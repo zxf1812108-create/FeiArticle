@@ -6,6 +6,36 @@
     --font-sans: "Plus Jakarta Sans", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
     --font-serif: "Fraunces", "Noto Serif SC", "Songti SC", "STSong", Georgia, serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+    /* FeiNote Unified Monochrome Ink & Surface Tokens (Light) */
+    --fei-text-primary: #333333;
+    --fei-text-muted: #8A8A8A;
+    --fei-bg: #FFFFFF;
+    --fei-bg-bar: #FAFAFA;
+    --fei-bg-surface: #FFFFFF;
+    --fei-bg-subtle: #F6F6F6;
+    --fei-bg-hover: #F5F5F5;
+    --fei-bg-selected: #EFEFEF;
+    --fei-border: #ECECEC;
+    --fei-border-strong: #DCDCDC;
+    --fei-btn-primary-bg: #333333;
+    --fei-btn-primary-text: #FFFFFF;
+  }
+
+  html.dark {
+    /* FeiNote Unified Monochrome Ink & Surface Tokens (Dark) */
+    --fei-text-primary: #C8C8C8;
+    --fei-text-muted: #787878;
+    --fei-bg: #1A1A1A;
+    --fei-bg-bar: #1F1F1F;
+    --fei-bg-surface: #1E1E1E;
+    --fei-bg-subtle: #232323;
+    --fei-bg-hover: #222222;
+    --fei-bg-selected: #262626;
+    --fei-border: #2A2A2A;
+    --fei-border-strong: #363636;
+    --fei-btn-primary-bg: #C8C8C8;
+    --fei-btn-primary-text: #1A1A1A;
   }
 
   html,
@@ -13,15 +43,8 @@
   #root {
     height: 100%;
     font-family: var(--font-sans);
-    background-color: #ffffff;
-    color: #222222;
-  }
-
-  html.dark,
-  html.dark body,
-  html.dark #root {
-    background-color: #1a1a1a;
-    color: #d9d9d9;
+    background-color: var(--fei-bg);
+    color: var(--fei-text-primary);
   }
 
   .font-editorial {
@@ -43,12 +66,12 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(136, 136, 136, 0.25);
+  background: rgba(138, 138, 138, 0.25);
   border-radius: 3px;
 }
 
 .dark ::-webkit-scrollbar-thumb {
-  background: rgba(160, 160, 160, 0.22);
+  background: rgba(120, 120, 120, 0.25);
 }
 
 @media (prefers-reduced-motion: reduce) {

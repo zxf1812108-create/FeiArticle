@@ -1,4 +1,4 @@
-import { Capacitor, CapacitorHttp } from '@capacitor/core';
+import { Capacitor, CapacitorHttp, registerPlugin } from '@capacitor/core';
 import {
   ArticleDoc,
   FolderNode,
@@ -23,8 +23,62 @@ interface ProxyResponse {
   error?: string;
 }
 
+interface WebDavNativePlugin {
+  request(options: {
+    url: string;
+    method: string;
+    headers?: Record<string, string>;
+    body?: string;
+    contentType?: string;
+  }): Promise<{
+    status: number;
+    body?: string;
+    etag?: string;
+    lastModified?: string;
+    error?: string;
+  }>;
+}
+
+const WebDavNative = registerPlugin<WebDavNativePlugin>('WebDavNative');
+
+export const DEFAULT_JIANGUOYUN_URL = 'https://dav.jianguoyun.com/dav/FeiArtical/';
+
 const MANIFEST_PATH = '_manifest.json';
 const DOCS_DIR = 'docs/';
+
+/**
+ * Normalize user-entered WebDAV URL:
+ * - Trims whitespace & auto-prepends https:// if protocol is omitted
+ * - Percent-encodes non-ASCII folder names cleanly via URL()
+ * - For Jianguoyun bare root (https://dav.jianguoyun.com/dav/), automatically appends FeiArtical/
+ *   because Jianguoyun forbids uploading files directly into /dav/ root.
+ */
+export function normalizeWebDavBaseUrl(rawUrl: string): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return DEFAULT_JIANGUOYUN_URL;
+
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(withScheme);
+    const host = parsed.hostname.toLowerCase();
+    let pathname = parsed.pathname || '/';
+
+    if (host === 'dav.jianguoyun.com') {
+      const cleanedPath = pathname.replace(/\/+$/, '');
+      if (cleanedPath === '' || cleanedPath === '/dav') {
+        pathname = '/dav/FeiArtical/';
+      }
+    }
+
+    if (!pathname.endsWith('/')) {
+      pathname = `${pathname}/`;
+    }
+    parsed.pathname = pathname;
+    return parsed.toString();
+  } catch {
+    return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+  }
+}
 
 function encodeBasicAuthUtf8(username: string, password: string): string {
   const bytes = new TextEncoder().encode(`${username}:${password}`);
@@ -47,28 +101,77 @@ function getHeaderCaseInsensitive(
   return '';
 }
 
-async function callWebDavNative(
-  config: WebDavConfig,
+function isSuccessHttpStatus(status: number): boolean {
+  return (status >= 200 && status < 300) || status === 304;
+}
+
+async function callWebDavUrlNative(
+  url: string,
+  username: string,
+  password: string,
   method: 'GET' | 'PUT' | 'MKCOL' | 'DELETE' | 'PROPFIND' | 'HEAD',
-  relativePath: string,
   options?: { body?: string; ifNoneMatch?: string; depth?: '0' | '1' }
 ): Promise<ProxyResponse> {
-  const cleanBase = config.baseUrl.endsWith('/') ? config.baseUrl : `${config.baseUrl}/`;
-  const cleanRel = relativePath.replace(/^\/+/, '');
-  const url = `${cleanBase}${cleanRel}`;
-
   const headers: Record<string, string> = {
-    Authorization: encodeBasicAuthUtf8(config.username, config.password),
+    Authorization: encodeBasicAuthUtf8(username, password),
     'User-Agent': 'FeiArtical-Android/1.0',
   };
   if (options?.ifNoneMatch) headers['If-None-Match'] = options.ifNoneMatch;
   if (options?.depth) headers['Depth'] = options.depth;
-  if (method === 'PUT') {
-    headers['Content-Type'] = cleanRel.endsWith('.json')
-      ? 'application/json; charset=utf-8'
-      : 'text/plain; charset=utf-8';
+
+  const contentType =
+    method === 'PUT'
+      ? url.endsWith('.json')
+        ? 'application/json; charset=utf-8'
+        : 'text/plain; charset=utf-8'
+      : method === 'PROPFIND'
+        ? 'application/xml; charset=utf-8'
+        : 'text/plain; charset=utf-8';
+
+  if (method === 'PUT' || method === 'PROPFIND') {
+    headers['Content-Type'] = contentType;
   }
 
+  // Prefer OkHttp-based native WebDavPlugin (supports MKCOL/PROPFIND and raw UTF-8 bodies cleanly)
+  if (Capacitor.isPluginAvailable('WebDavNative')) {
+    try {
+      const res = await WebDavNative.request({
+        url,
+        method,
+        headers,
+        body:
+          method === 'PUT'
+            ? (options?.body ?? '')
+            : method === 'PROPFIND'
+              ? '<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:"><D:prop><D:getetag/><D:getlastmodified/><D:getcontentlength/></D:prop></D:propfind>'
+              : undefined,
+        contentType,
+      });
+
+      const status = res.status || 0;
+      if (status === 0 && res.error) {
+        return { ok: false, status: 0, error: res.error };
+      }
+
+      const rawBody = typeof res.body === 'string' ? res.body : '';
+      return {
+        ok: isSuccessHttpStatus(status),
+        status,
+        etag: res.etag,
+        lastModified: res.lastModified,
+        body: status === 304 ? '' : rawBody,
+        bytesTransferred: status === 304 ? 0 : getByteSize(rawBody),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        status: 0,
+        error: err instanceof Error ? err.message : '坚果云网络请求失败',
+      };
+    }
+  }
+
+  // Fallback to CapacitorHttp (note: HttpURLConnection only allows standard HTTP methods)
   try {
     const res = await CapacitorHttp.request({
       url,
@@ -89,7 +192,7 @@ async function callWebDavNative(
     const lastModified = getHeaderCaseInsensitive(res.headers, 'last-modified');
 
     return {
-      ok: (status >= 200 && status < 300) || status === 304,
+      ok: isSuccessHttpStatus(status),
       status,
       etag,
       lastModified,
@@ -105,49 +208,178 @@ async function callWebDavNative(
   }
 }
 
+async function callWebDavUrl(
+  baseUrl: string,
+  username: string,
+  password: string,
+  method: 'GET' | 'PUT' | 'MKCOL' | 'DELETE' | 'PROPFIND' | 'HEAD',
+  relativePath: string,
+  options?: { body?: string; ifNoneMatch?: string; depth?: '0' | '1' }
+): Promise<ProxyResponse> {
+  const cleanBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  const cleanRel = relativePath.replace(/^\/+/, '');
+  const fullUrl = `${cleanBase}${cleanRel}`;
+
+  if (Capacitor.isNativePlatform()) {
+    return callWebDavUrlNative(fullUrl, username, password, method, options);
+  }
+
+  try {
+    const res = await fetch('/api/webdav/proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        baseUrl: cleanBase,
+        username,
+        password,
+        method,
+        relativePath: cleanRel,
+        body: options?.body,
+        ifNoneMatch: options?.ifNoneMatch,
+        depth: options?.depth,
+      }),
+    });
+
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text) as ProxyResponse;
+      return {
+        ok: Boolean(parsed.ok),
+        status: typeof parsed.status === 'number' ? parsed.status : res.status,
+        statusText: parsed.statusText,
+        etag: parsed.etag,
+        lastModified: parsed.lastModified,
+        body: parsed.body,
+        bytesTransferred: parsed.bytesTransferred,
+        error: parsed.error,
+      };
+    } catch {
+      return {
+        ok: false,
+        status: res.status || 0,
+        error: `同步代理返回异常（HTTP ${res.status}）`,
+      };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : '网络请求失败，请检查网络连接',
+    };
+  }
+}
+
 async function callWebDav(
   config: WebDavConfig,
   method: 'GET' | 'PUT' | 'MKCOL' | 'DELETE' | 'PROPFIND' | 'HEAD',
   relativePath: string,
   options?: { body?: string; ifNoneMatch?: string; depth?: '0' | '1' }
 ): Promise<ProxyResponse> {
-  if (Capacitor.isNativePlatform()) {
-    return callWebDavNative(config, method, relativePath, options);
-  }
-
-  const res = await fetch('/api/webdav/proxy', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      baseUrl: config.baseUrl,
-      username: config.username,
-      password: config.password,
-      method,
-      relativePath,
-      body: options?.body,
-      ifNoneMatch: options?.ifNoneMatch,
-      depth: options?.depth,
-    }),
-  });
-  return (await res.json()) as ProxyResponse;
+  const normalizedBase = normalizeWebDavBaseUrl(config.baseUrl);
+  return callWebDavUrl(
+    normalizedBase,
+    config.username.trim(),
+    config.password.trim(),
+    method,
+    relativePath,
+    options
+  );
 }
 
-export async function testWebDavConnection(config: WebDavConfig): Promise<{ ok: boolean; message: string }> {
+/**
+ * Recursively create missing collection folders on WebDAV (e.g. /dav/FeiArtical/ and /dav/FeiArtical/docs/).
+ * On Jianguoyun, MKCOL returns 201 (created) or 405 (already exists) — both are treated as success.
+ */
+async function ensureRemoteDirectories(
+  config: WebDavConfig
+): Promise<{ requests: number; authFailedStatus?: number; docsReady: boolean }> {
+  const normalizedBase = normalizeWebDavBaseUrl(config.baseUrl);
+  const username = config.username.trim();
+  const password = config.password.trim();
+  let requests = 0;
+
+  try {
+    const parsed = new URL(normalizedBase);
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    const isJianguoyun = parsed.hostname.toLowerCase() === 'dav.jianguoyun.com';
+
+    // Never MKCOL /dav/ itself on Jianguoyun; start from the subfolder after /dav/
+    const startIdx = isJianguoyun && segments[0]?.toLowerCase() === 'dav' ? 1 : 0;
+
+    let currentPath = startIdx > 0 ? `/${segments.slice(0, startIdx).join('/')}/` : '/';
+    for (let i = startIdx; i < segments.length; i++) {
+      currentPath = `${currentPath}${segments[i]}/`;
+      const targetDir = `${parsed.origin}${currentPath}`;
+      requests++;
+      const res = await callWebDavUrl(targetDir, username, password, 'MKCOL', '');
+      if (res.status === 401 || res.status === 403) {
+        return { requests, authFailedStatus: res.status, docsReady: false };
+      }
+    }
+  } catch {
+    requests++;
+    const baseRes = await callWebDav(config, 'MKCOL', '');
+    if (baseRes.status === 401 || baseRes.status === 403) {
+      return { requests, authFailedStatus: baseRes.status, docsReady: false };
+    }
+  }
+
+  requests++;
+  const docsRes = await callWebDav(config, 'MKCOL', DOCS_DIR);
+  if (docsRes.status === 401 || docsRes.status === 403) {
+    return { requests, authFailedStatus: docsRes.status, docsReady: false };
+  }
+  const docsReady =
+    docsRes.ok || docsRes.status === 201 || docsRes.status === 405 || docsRes.status === 301;
+  return { requests, docsReady };
+}
+
+function formatSyncHttpError(prefix: string, res: ProxyResponse): string {
+  if (res.status === 401 || res.status === 403) {
+    return `坚果云认证失败（HTTP ${res.status}），请确认填写的是坚果云「应用密码」而非登录密码`;
+  }
+  if (res.status === 503 || res.status === 429) {
+    return `坚果云请求过于频繁（HTTP ${res.status}），请稍后再试`;
+  }
+  if (res.status === 409) {
+    return `${prefix}（HTTP 409）：远端目录不存在，请先在坚果云中创建对应文件夹或检查同步地址`;
+  }
+  if (res.status === 0) {
+    return res.error || `${prefix}：无法连接服务器，请检查网络或同步地址`;
+  }
+  return res.error || `${prefix}（HTTP ${res.status}）`;
+}
+
+export async function testWebDavConnection(
+  config: WebDavConfig
+): Promise<{ ok: boolean; message: string }> {
   const result = await callWebDav(config, 'PROPFIND', '', { depth: '0' });
   if (result.status === 401 || result.status === 403) {
-    return { ok: false, message: '鉴权失败（401）：请确认填写的是坚果云「应用密码」，而非登录密码。' };
+    return {
+      ok: false,
+      message: '鉴权失败（401）：请确认填写的是坚果云「应用密码」，而非登录密码。',
+    };
   }
-  if (result.status === 404) {
-    const mk = await callWebDav(config, 'MKCOL', '');
-    if (mk.ok || mk.status === 201 || mk.status === 405) {
+  if (result.status === 404 || result.status === 409) {
+    const ensured = await ensureRemoteDirectories(config);
+    if (ensured.authFailedStatus) {
+      return {
+        ok: false,
+        message: '鉴权失败：请确认填写的是坚果云「应用密码」，而非登录密码。',
+      };
+    }
+    if (ensured.docsReady) {
       return { ok: true, message: '连接成功，已在坚果云自动创建同步目录。' };
     }
-    return { ok: false, message: '目录不存在且无法创建（404），请先在坚果云新建同步文件夹。' };
+    return {
+      ok: false,
+      message: '目录不存在且无法创建，请先在坚果云新建 FeiArtical 同步文件夹。',
+    };
   }
   if (result.ok) {
     return { ok: true, message: `连接成功（HTTP ${result.status}），支持增量同步协议。` };
   }
-  return { ok: false, message: result.error || `连接异常（HTTP ${result.status}）` };
+  return { ok: false, message: formatSyncHttpError('连接异常', result) };
 }
 
 export function buildLocalManifest(
@@ -188,9 +420,9 @@ export function buildLocalManifest(
     syncSettings: config
       ? {
           provider: 'jianguoyun',
-          baseUrl: config.baseUrl,
-          username: config.username,
-          password: config.password,
+          baseUrl: normalizeWebDavBaseUrl(config.baseUrl),
+          username: config.username.trim(),
+          password: config.password.trim(),
           encryptionPassword: config.encryptionPassword || '',
           updatedAt: config.settingsUpdatedAt || 0,
         }
@@ -215,18 +447,26 @@ export interface SyncOutcome {
 
 /**
  * Quota-saving incremental sync with Jianguoyun WebDAV:
+ * - Automatically normalizes Jianguoyun URLs & creates remote folders on 404/409
  * - Syncs all document contents (AES-256-GCM encrypted when doc.encrypted is true)
  * - Syncs all document states (encrypted, lastMode, lastScrollTop, order, folderId)
  * - Syncs directory tree state (folders, collapsedIds, activeTarget, scrollTop)
  * - Syncs settings parameters (Jianguoyun WebDAV params + encryption password)
  */
 export async function runIncrementalWebDavSync(
-  config: WebDavConfig,
+  rawConfig: WebDavConfig,
   localFolders: FolderNode[],
   localDocs: ArticleDoc[],
   localTreeState: SyncedTreeState,
   metaDirty = false
 ): Promise<SyncOutcome> {
+  const config: WebDavConfig = {
+    ...rawConfig,
+    baseUrl: normalizeWebDavBaseUrl(rawConfig.baseUrl),
+    username: rawConfig.username.trim(),
+    password: rawConfig.password.trim(),
+  };
+
   let uploadBytes = 0;
   let downloadBytes = 0;
   let requestCount = 0;
@@ -242,11 +482,12 @@ export async function runIncrementalWebDavSync(
   });
 
   if (manifestRes.status === 401 || manifestRes.status === 403) {
-    throw new Error('坚果云认证失败，请长按同步图标检查账号和应用密码。');
+    throw new Error(formatSyncHttpError('拉取索引失败', manifestRes));
   }
 
   let remoteManifest: RemoteManifest | null = null;
   let newEtag = config.lastManifestEtag;
+  let dirsEnsured = false;
 
   if (manifestRes.status === 304) {
     skippedByEtag304++;
@@ -275,11 +516,16 @@ export async function runIncrementalWebDavSync(
         },
       };
     }
-  } else if (manifestRes.status === 404) {
-    requestCount++;
-    await callWebDav(config, 'MKCOL', '');
-    requestCount++;
-    await callWebDav(config, 'MKCOL', DOCS_DIR);
+  } else if (manifestRes.status === 404 || manifestRes.status === 409) {
+    // First sync or missing remote folder: Jianguoyun returns 404 (no file) or 409 (no parent folder)
+    const ensured = await ensureRemoteDirectories(config);
+    requestCount += ensured.requests;
+    dirsEnsured = true;
+    if (ensured.authFailedStatus) {
+      throw new Error(
+        formatSyncHttpError('创建远端目录失败', { ok: false, status: ensured.authFailedStatus })
+      );
+    }
   } else if (manifestRes.ok && manifestRes.body) {
     downloadBytes += manifestRes.bytesTransferred || getByteSize(manifestRes.body);
     newEtag = manifestRes.etag || newEtag;
@@ -289,7 +535,7 @@ export async function runIncrementalWebDavSync(
       remoteManifest = null;
     }
   } else if (!manifestRes.ok) {
-    throw new Error(manifestRes.error || `拉取索引失败（HTTP ${manifestRes.status}）`);
+    throw new Error(formatSyncHttpError('拉取索引失败', manifestRes));
   }
 
   // Step 2: Merge sync settings (Last-Write-Wins by updatedAt)
@@ -301,9 +547,9 @@ export async function runIncrementalWebDavSync(
     mergedConfig = {
       ...mergedConfig,
       provider: 'jianguoyun',
-      baseUrl: remoteSettings.baseUrl || mergedConfig.baseUrl,
-      username: remoteSettings.username || mergedConfig.username,
-      password: remoteSettings.password || mergedConfig.password,
+      baseUrl: normalizeWebDavBaseUrl(remoteSettings.baseUrl || mergedConfig.baseUrl),
+      username: (remoteSettings.username || mergedConfig.username).trim(),
+      password: (remoteSettings.password || mergedConfig.password).trim(),
       encryptionPassword: remoteSettings.encryptionPassword ?? mergedConfig.encryptionPassword ?? '',
       settingsUpdatedAt: remoteSettings.updatedAt,
       enabled: Boolean(
@@ -374,15 +620,28 @@ export async function runIncrementalWebDavSync(
         let putRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${doc.id}.${docExt}`, {
           body: uploadBody,
         });
+
         if (!putRes.ok && (putRes.status === 404 || putRes.status === 409)) {
-          // Fallback to root sync directory if remote docs/ subfolder cannot be created via MKCOL
-          requestCount++;
-          putRes = await callWebDav(config, 'PUT', `${doc.id}.${docExt}`, {
-            body: uploadBody,
-          });
+          if (!dirsEnsured) {
+            const ensured = await ensureRemoteDirectories(config);
+            requestCount += ensured.requests;
+            dirsEnsured = true;
+            requestCount++;
+            putRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${doc.id}.${docExt}`, {
+              body: uploadBody,
+            });
+          }
+          if (!putRes.ok && (putRes.status === 404 || putRes.status === 409)) {
+            // Fallback to root sync folder if docs/ subfolder cannot be created
+            requestCount++;
+            putRes = await callWebDav(config, 'PUT', `${doc.id}.${docExt}`, {
+              body: uploadBody,
+            });
+          }
         }
+
         if (!putRes.ok) {
-          throw new Error(`上传《${doc.title}》失败（HTTP ${putRes.status}）`);
+          throw new Error(formatSyncHttpError(`上传《${doc.title}》失败`, putRes));
         }
         uploadBytes += getByteSize(uploadBody);
         pushedCount++;
@@ -461,11 +720,11 @@ export async function runIncrementalWebDavSync(
           const fallbackExt = primaryExt === 'txt' ? 'md' : 'txt';
           requestCount++;
           let getDoc = await callWebDav(config, 'GET', `${DOCS_DIR}${id}.${primaryExt}`);
-          if (!getDoc.ok && getDoc.status === 404) {
+          if (!getDoc.ok && (getDoc.status === 404 || getDoc.status === 409)) {
             requestCount++;
             getDoc = await callWebDav(config, 'GET', `${DOCS_DIR}${id}.${fallbackExt}`);
           }
-          if (!getDoc.ok && getDoc.status === 404) {
+          if (!getDoc.ok && (getDoc.status === 404 || getDoc.status === 409)) {
             requestCount++;
             getDoc = await callWebDav(config, 'GET', `${id}.${primaryExt}`);
           }
@@ -513,9 +772,15 @@ export async function runIncrementalWebDavSync(
     const nextManifest = buildLocalManifest(mergedFolders, finalDocs, mergedTreeState, mergedConfig);
     const manifestJson = JSON.stringify(nextManifest);
     requestCount++;
-    const putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
+    let putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
+    if (!putManifest.ok && (putManifest.status === 404 || putManifest.status === 409)) {
+      const ensured = await ensureRemoteDirectories(config);
+      requestCount += ensured.requests;
+      requestCount++;
+      putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
+    }
     if (!putManifest.ok) {
-      throw new Error(`更新云端索引失败（HTTP ${putManifest.status}）`);
+      throw new Error(formatSyncHttpError('更新云端索引失败', putManifest));
     }
     uploadBytes += getByteSize(manifestJson);
     newEtag = putManifest.etag || newEtag;
@@ -571,14 +836,14 @@ export async function fetchRemoteDocBody(
   const primaryExt = format === 'md' ? 'md' : 'txt';
   const fallbackExt = primaryExt === 'txt' ? 'md' : 'txt';
   let res = await callWebDav(config, 'GET', `${DOCS_DIR}${docId}.${primaryExt}`);
-  if (!res.ok && res.status === 404) {
+  if (!res.ok && (res.status === 404 || res.status === 409)) {
     res = await callWebDav(config, 'GET', `${DOCS_DIR}${docId}.${fallbackExt}`);
   }
-  if (!res.ok && res.status === 404) {
+  if (!res.ok && (res.status === 404 || res.status === 409)) {
     res = await callWebDav(config, 'GET', `${docId}.${primaryExt}`);
   }
   if (!res.ok || typeof res.body !== 'string') {
-    throw new Error(res.error || `拉取正文失败（HTTP ${res.status}）`);
+    throw new Error(formatSyncHttpError('拉取正文失败', res));
   }
   const bytes = res.bytesTransferred || getByteSize(res.body);
   const content =

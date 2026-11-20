@@ -311,17 +311,17 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           isDragging ? 'opacity-35' : ''
         } ${
           isCut
-            ? 'opacity-45 border border-dashed border-[#888888]'
+            ? 'opacity-45 border border-dashed border-[var(--fei-text-muted)]'
             : isTarget
-              ? 'bg-[#F0F0F0] dark:bg-[#262626]'
-              : 'hover:bg-[#F7F7F7] dark:hover:bg-[#222222]'
+              ? 'bg-[var(--fei-bg-selected)]'
+              : 'hover:bg-[var(--fei-bg-hover)]'
         }`}
       >
         {isDropBefore && (
-          <div className="pointer-events-none absolute -top-[1px] left-9 right-2 h-[2px] bg-[#222222] dark:bg-[#D9D9D9] rounded-full z-10" />
+          <div className="pointer-events-none absolute -top-[1px] left-9 right-2 h-[2px] bg-[var(--fei-text-primary)] rounded-full z-10" />
         )}
         {isDropAfter && (
-          <div className="pointer-events-none absolute -bottom-[1px] left-9 right-2 h-[2px] bg-[#222222] dark:bg-[#D9D9D9] rounded-full z-10" />
+          <div className="pointer-events-none absolute -bottom-[1px] left-9 right-2 h-[2px] bg-[var(--fei-text-primary)] rounded-full z-10" />
         )}
 
         <button
@@ -338,11 +338,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
               onSelectTarget({ kind: 'doc', id: doc.id });
             }
           }}
-          className={`flex-1 min-w-0 text-left text-[15px] leading-snug truncate py-2.5 ${
-            isTarget
-              ? 'text-[#111111] dark:text-[#F0F0F0] font-medium'
-              : 'text-[#2C2C2C] dark:text-[#D2D2D2]'
-          }`}
+          className="flex-1 min-w-0 text-left text-[15px] leading-snug truncate py-2.5 text-[var(--fei-text-primary)]"
         >
           {doc.title || '无标题文档'}
         </button>
@@ -350,7 +346,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
         {doc.encrypted && (
           <span
             aria-label="已加密"
-            className="mr-1.5 min-w-[16px] text-center text-[14px] leading-none font-code text-[#888888] dark:text-[#8E8E8E] shrink-0"
+            className="mr-1.5 min-w-[16px] text-center text-[14px] leading-none font-code text-[var(--fei-text-muted)] shrink-0"
           >
             *
           </span>
@@ -363,13 +359,13 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="w-full h-full overflow-y-auto bg-[#FFFFFF] dark:bg-[#1A1A1A] select-none"
+      className="w-full h-full overflow-y-auto bg-[var(--fei-bg)] select-none"
     >
       <div className="max-w-[760px] mx-auto px-4 sm:px-8 pt-6 pb-10 space-y-1.5">
         {/* Status strip only when cutting or selecting item to cut */}
         {(pickCutMode || cutLabel) && (
-          <div className="mb-3 px-3.5 py-2.5 rounded-lg bg-[#F5F5F5] dark:bg-[#242424] flex items-center justify-between gap-3 text-[13px]">
-            <span className="text-[#444444] dark:text-[#CCCCCC] truncate">
+          <div className="mb-3 px-3.5 py-2.5 rounded-lg bg-[var(--fei-bg-subtle)] flex items-center justify-between gap-3 text-[13px]">
+            <span className="text-[var(--fei-text-muted)] truncate">
               {cutLabel
                 ? `已剪切 ${cutLabel} — 点选目标目录或文章后，点击底部粘贴图标插入其后`
                 : '请点击要剪切的目录或文章'}
@@ -377,7 +373,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
             <button
               type="button"
               onClick={onCancelCut}
-              className="text-[#888888] hover:text-[#222222] dark:hover:text-[#EEEEEE] shrink-0 whitespace-nowrap"
+              className="text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] shrink-0 whitespace-nowrap transition-colors"
             >
               取消
             </button>
@@ -401,7 +397,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           return (
             <div key={folder.id} className="relative space-y-0.5">
               {isFolderDropBefore && (
-                <div className="pointer-events-none absolute -top-[2px] left-2 right-2 h-[2px] bg-[#222222] dark:bg-[#D9D9D9] rounded-full z-10" />
+                <div className="pointer-events-none absolute -top-[2px] left-2 right-2 h-[2px] bg-[var(--fei-text-primary)] rounded-full z-10" />
               )}
 
               {/* Directory Header (Draggable, no leading dots) */}
@@ -415,12 +411,10 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                   isDragging ? 'opacity-35' : ''
                 } ${
                   isCut
-                    ? 'opacity-45 border border-dashed border-[#888888]'
-                    : isDocDropIntoFolder
-                      ? 'bg-[#EBEBEB] dark:bg-[#2B2B2B]'
-                      : isTarget
-                        ? 'bg-[#F0F0F0] dark:bg-[#262626]'
-                        : 'hover:bg-[#F7F7F7] dark:hover:bg-[#222222]'
+                    ? 'opacity-45 border border-dashed border-[var(--fei-text-muted)]'
+                    : isDocDropIntoFolder || isTarget
+                      ? 'bg-[var(--fei-bg-selected)]'
+                      : 'hover:bg-[var(--fei-bg-hover)]'
                 }`}
               >
                 <button
@@ -430,7 +424,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                     toggleExpand(folder.id);
                   }}
                   aria-label={isExpanded ? '收起目录' : '展开目录'}
-                  className="w-6 h-8 flex items-center justify-center text-[#999999] dark:text-[#707070] shrink-0"
+                  className="w-6 h-8 flex items-center justify-center text-[var(--fei-text-muted)] shrink-0"
                 >
                   {isExpanded ? (
                     <ChevronDown className="w-4 h-4" />
@@ -449,7 +443,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                       if (e.key === 'Enter') commitRename(folder.id);
                       if (e.key === 'Escape') setEditingFolderId(null);
                     }}
-                    className="flex-1 min-w-0 bg-transparent border-b border-[#666666] dark:border-[#999999] text-[14.5px] font-medium text-[#222222] dark:text-[#E5E5E5] outline-none py-0.5"
+                    className="flex-1 min-w-0 bg-transparent border-b border-[var(--fei-text-muted)] text-[14.5px] font-medium text-[var(--fei-text-primary)] outline-none py-0.5"
                   />
                 ) : (
                   <button
@@ -467,17 +461,13 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                         onSelectTarget({ kind: 'folder', id: folder.id });
                       }
                     }}
-                    className={`flex-1 min-w-0 text-left text-[14.5px] font-medium truncate py-2 ${
-                      isTarget
-                        ? 'text-[#111111] dark:text-[#F0F0F0]'
-                        : 'text-[#666666] dark:text-[#9A9A9A]'
-                    }`}
+                    className="flex-1 min-w-0 text-left text-[14.5px] font-medium truncate py-2 text-[var(--fei-text-primary)]"
                   >
                     {folder.name}
                   </button>
                 )}
 
-                <span className="mr-1.5 min-w-[16px] text-center text-[12px] font-code tabular-nums text-[#AAAAAA] dark:text-[#606060] group-hover:hidden shrink-0">
+                <span className="mr-1.5 min-w-[16px] text-center text-[12px] font-code tabular-nums text-[var(--fei-text-muted)] group-hover:hidden shrink-0">
                   {folderDocs.length}
                 </span>
 
@@ -490,7 +480,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                       onExpandFolder(folder.id);
                       onCreateDocInFolder(folder.id);
                     }}
-                    className="w-7 h-7 inline-flex items-center justify-center rounded text-[#888888] hover:text-[#222222] dark:hover:text-[#EEEEEE]"
+                    className="w-7 h-7 inline-flex items-center justify-center rounded text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
                   >
                     <FilePlus className="w-3.5 h-3.5" />
                   </button>
@@ -502,7 +492,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                       setEditingFolderId(folder.id);
                       setEditingName(folder.name);
                     }}
-                    className="w-7 h-7 inline-flex items-center justify-center rounded text-[#888888] hover:text-[#222222] dark:hover:text-[#EEEEEE]"
+                    className="w-7 h-7 inline-flex items-center justify-center rounded text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
                   >
                     <Pencil className="w-3.5 h-3.5" />
                   </button>
@@ -513,7 +503,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                       e.stopPropagation();
                       onDeleteFolder(folder.id);
                     }}
-                    className="w-7 h-7 inline-flex items-center justify-center rounded text-[#888888] hover:text-[#222222] dark:hover:text-[#EEEEEE]"
+                    className="w-7 h-7 inline-flex items-center justify-center rounded text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -528,13 +518,13 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
               )}
 
               {isFolderDropAfter && (
-                <div className="pointer-events-none absolute -bottom-[2px] left-2 right-2 h-[2px] bg-[#222222] dark:bg-[#D9D9D9] rounded-full z-10" />
+                <div className="pointer-events-none absolute -bottom-[2px] left-2 right-2 h-[2px] bg-[var(--fei-text-primary)] rounded-full z-10" />
               )}
             </div>
           );
         })}
 
-        {/* Uncategorized Articles (shown only when needed) */}
+        {/* Uncategorized Articles (shown only when orphaned docs exist) */}
         {uncategorizedDocs.length > 0 && (
           <div className="space-y-0.5 pt-2">
             <div
@@ -542,8 +532,8 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
               onDrop={(e) => handleFolderDrop(e, null)}
               className={`flex items-center justify-between gap-1.5 px-2 min-h-[44px] rounded-lg transition-colors ${
                 docDrop?.folderId === null && docDrop.docId === null
-                  ? 'bg-[#EBEBEB] dark:bg-[#2B2B2B]'
-                  : 'hover:bg-[#F7F7F7] dark:hover:bg-[#222222]'
+                  ? 'bg-[var(--fei-bg-selected)]'
+                  : 'hover:bg-[var(--fei-bg-hover)]'
               }`}
             >
               <button
@@ -551,18 +541,18 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                 onClick={() => toggleExpand('__uncategorized__')}
                 className="flex items-center gap-1.5 flex-1 min-w-0 text-left py-2"
               >
-                <span className="w-6 h-6 flex items-center justify-center text-[#999999] dark:text-[#707070] shrink-0">
+                <span className="w-6 h-6 flex items-center justify-center text-[var(--fei-text-muted)] shrink-0">
                   {!collapsedIds.has('__uncategorized__') ? (
                     <ChevronDown className="w-4 h-4" />
                   ) : (
                     <ChevronRight className="w-4 h-4" />
                   )}
                 </span>
-                <span className="text-[14.5px] font-medium text-[#888888] dark:text-[#7A7A7A] truncate">
+                <span className="text-[14.5px] font-medium text-[var(--fei-text-primary)] truncate">
                   未分类
                 </span>
               </button>
-              <span className="mr-1.5 min-w-[16px] text-center text-[12px] font-code tabular-nums text-[#AAAAAA] dark:text-[#606060] shrink-0">
+              <span className="mr-1.5 min-w-[16px] text-center text-[12px] font-code tabular-nums text-[var(--fei-text-muted)] shrink-0">
                 {uncategorizedDocs.length}
               </span>
             </div>
@@ -591,13 +581,13 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                 }
               }}
               placeholder="输入目录名称，回车确认…"
-              className="w-full h-10 px-3 rounded-lg bg-[#F7F7F7] dark:bg-[#242424] border border-[#DDDDDD] dark:border-[#383838] text-[14.5px] text-[#222222] dark:text-[#E5E5E5] placeholder:text-[#999999] outline-none"
+              className="w-full h-10 px-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border-strong)] text-[14.5px] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none"
             />
           ) : (
             <button
               type="button"
               onClick={() => setAddingFolder(true)}
-              className="h-9 px-2 inline-flex items-center gap-1.5 text-[13.5px] text-[#999999] dark:text-[#6E6E6E] hover:text-[#222222] dark:hover:text-[#DDDDDD] transition-colors"
+              className="h-9 px-2 inline-flex items-center gap-1.5 text-[13.5px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
             >
               <Plus className="w-4 h-4" />
               <span>新建目录</span>

@@ -61,19 +61,27 @@ app.post('/api/webdav/proxy', async (req, res) => {
   try {
     const payload = req.body as WebDavProxyPayload;
     if (!payload || !payload.baseUrl || !payload.username || !payload.password || !payload.method) {
-      res.status(400).json({ error: '缺少 WebDAV 必填连接参数（地址、账号、应用密码或方法）。' });
+      res.status(400).json({
+        ok: false,
+        status: 400,
+        error: '缺少 WebDAV 必填连接参数（地址、账号、应用密码或方法）。',
+      });
       return;
     }
 
     const allowedMethods = new Set(['GET', 'PUT', 'MKCOL', 'DELETE', 'PROPFIND', 'HEAD']);
     if (!allowedMethods.has(payload.method)) {
-      res.status(400).json({ error: '不支持的 WebDAV 请求方法。' });
+      res.status(400).json({ ok: false, status: 400, error: '不支持的 WebDAV 请求方法。' });
       return;
     }
 
     const targetUrl = joinWebDavPath(payload.baseUrl.trim(), payload.relativePath || '');
     if (!isAllowedWebDavUrl(targetUrl)) {
-      res.status(400).json({ error: '仅支持公网 HTTPS WebDAV 服务地址（如 https://dav.jianguoyun.com/dav/）。' });
+      res.status(400).json({
+        ok: false,
+        status: 400,
+        error: '仅支持公网 HTTPS WebDAV 服务地址（如 https://dav.jianguoyun.com/dav/）。',
+      });
       return;
     }
 
@@ -93,7 +101,7 @@ app.post('/api/webdav/proxy', async (req, res) => {
     if (payload.method === 'PUT') {
       headers['Content-Type'] = targetUrl.endsWith('.json')
         ? 'application/json; charset=utf-8'
-        : 'text/markdown; charset=utf-8';
+        : 'text/plain; charset=utf-8';
     }
 
     const controller = new AbortController();

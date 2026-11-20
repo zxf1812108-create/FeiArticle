@@ -166,7 +166,7 @@ export default function App() {
     setToast({ msg });
     window.setTimeout(() => {
       setToast((prev) => (prev?.msg === msg ? null : prev));
-    }, 2400);
+    }, 3800);
   };
 
   const dirtyCount = useMemo(
@@ -878,7 +878,7 @@ export default function App() {
         if (e.currentTarget === e.target) setWindowDragging(false);
       }}
       onDrop={handleWindowDrop}
-      className="h-full w-full flex flex-col overflow-hidden bg-[#FFFFFF] dark:bg-[#1A1A1A] text-[#222222] dark:text-[#D9D9D9]"
+      className="h-full w-full flex flex-col overflow-hidden bg-[var(--fei-bg)] text-[var(--fei-text-primary)]"
     >
       {/* Main Area (Above Bottom Toolbar) */}
       <main className="flex-1 min-h-0 overflow-hidden">
@@ -925,7 +925,7 @@ export default function App() {
       {/* Bottom Toolbar */}
       <footer
         aria-label="底部工具栏"
-        className="h-[52px] shrink-0 bg-[#FAFAFA] dark:bg-[#1F1F1F] border-t border-[#EEEEEE] dark:border-[#2A2A2A]"
+        className="h-[52px] shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)]"
       >
         <div className="h-full max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-between">
           {/* Leftmost: Directory Tree Tab */}
@@ -936,8 +936,8 @@ export default function App() {
             title="目录树"
             className={`min-w-[44px] h-[44px] px-2.5 inline-flex items-center justify-center rounded-lg transition-colors duration-150 shrink-0 ${
               mainView === 'tree'
-                ? 'text-[#222222] dark:text-[#F0F0F0]'
-                : 'text-[#888888] dark:text-[#787878] hover:text-[#222222] dark:hover:text-[#DDDDDD]'
+                ? 'text-[var(--fei-text-primary)]'
+                : 'text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)]'
             }`}
           >
             <FolderTree
@@ -956,7 +956,7 @@ export default function App() {
                   onClick={handleCollapseAllFolders}
                   aria-label="收起所有目录"
                   title="收起所有内容，只显示目录"
-                  className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[#666666] dark:text-[#969696] hover:text-[#222222] dark:hover:text-[#EEEEEE] transition-colors"
+                  className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
                 >
                   <ChevronsUp className="w-[19px] h-[19px]" strokeWidth={1.75} />
                 </button>
@@ -969,8 +969,8 @@ export default function App() {
                   title={cutItem || pickCutMode ? '取消剪切' : '剪切选定的目录或文章'}
                   className={`w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-colors ${
                     cutItem || pickCutMode
-                      ? 'text-[#222222] dark:text-[#F0F0F0] bg-[#EAEAEA] dark:bg-[#2C2C2C]'
-                      : 'text-[#666666] dark:text-[#969696] hover:text-[#222222] dark:hover:text-[#EEEEEE]'
+                      ? 'text-[var(--fei-text-primary)] bg-[var(--fei-bg-selected)]'
+                      : 'text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)]'
                   }`}
                 >
                   <Scissors className="w-[19px] h-[19px]" strokeWidth={1.75} />
@@ -984,8 +984,8 @@ export default function App() {
                   title="粘贴插入到选定的目录或文章之后"
                   className={`w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-colors ${
                     cutItem
-                      ? 'text-[#222222] dark:text-[#F0F0F0] hover:bg-[#EAEAEA] dark:hover:bg-[#2C2C2C]'
-                      : 'text-[#B5B5B5] dark:text-[#555555] hover:text-[#666666] dark:hover:text-[#888888]'
+                      ? 'text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)]'
+                      : 'text-[var(--fei-text-muted)] opacity-50 hover:opacity-100'
                   }`}
                 >
                   <PasteInIcon className="w-[19px] h-[19px]" strokeWidth={1.75} />
@@ -997,7 +997,7 @@ export default function App() {
                   onClick={() => setShowImportModal(true)}
                   aria-label="导入文本文档"
                   title="导入 .txt / .md 文档或粘贴文本"
-                  className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[#666666] dark:text-[#969696] hover:text-[#222222] dark:hover:text-[#EEEEEE] transition-colors"
+                  className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
                 >
                   <Download className="w-[19px] h-[19px]" strokeWidth={1.75} />
                 </button>
@@ -1008,7 +1008,7 @@ export default function App() {
                   onClick={handleEncryptButtonClick}
                   aria-label="加密或解密选中的文档或目录"
                   title="加密 / 解密选中的文档或目录"
-                  className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[#666666] dark:text-[#969696] hover:text-[#222222] dark:hover:text-[#EEEEEE] transition-colors"
+                  className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
                 >
                   <Lock className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
                 </button>
@@ -1029,7 +1029,7 @@ export default function App() {
                       ? '有内容未同步至坚果云，点击直接同步，长按打开同步设置'
                       : '点击直接同步，长按打开同步设置'
                   }
-                  className="relative w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[#666666] dark:text-[#969696] hover:text-[#222222] dark:hover:text-[#EEEEEE] transition-colors disabled:opacity-50 select-none"
+                  className="relative w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors disabled:opacity-50 select-none"
                 >
                   <RefreshCw
                     className={`w-[19px] h-[19px] ${isSyncing ? 'animate-spin' : ''}`}
@@ -1038,7 +1038,7 @@ export default function App() {
                   {hasPendingSync && (
                     <span
                       aria-hidden="true"
-                      className="absolute top-[10px] right-[10px] w-[5.5px] h-[5.5px] rounded-full bg-[#222222] dark:bg-[#E0E0E0]"
+                      className="absolute top-[10px] right-[10px] w-[5.5px] h-[5.5px] rounded-full bg-[var(--fei-text-primary)]"
                     />
                   )}
                 </button>
@@ -1050,7 +1050,7 @@ export default function App() {
                 onClick={handleToggleEditMode}
                 aria-label={isEditing ? '退出编辑' : '进入编辑'}
                 title={isEditing ? '完成编辑' : '编辑文章'}
-                className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[#666666] dark:text-[#969696] hover:text-[#222222] dark:hover:text-[#EEEEEE] transition-colors"
+                className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
               >
                 {isEditing ? (
                   <Check className="w-[19px] h-[19px]" strokeWidth={1.75} />
@@ -1103,7 +1103,7 @@ export default function App() {
       {/* Drag Overlay */}
       {windowDragging && (
         <div className="fixed inset-0 z-50 bg-black/15 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
-          <div className="px-5 py-3 rounded-xl bg-[#FFFFFF] dark:bg-[#242424] shadow-lg text-[14px] text-[#222222] dark:text-[#E5E5E5]">
+          <div className="px-5 py-3 rounded-xl bg-[var(--fei-bg-surface)] border border-[var(--fei-border)] shadow-lg text-[14px] text-[var(--fei-text-primary)]">
             松开导入 .txt / .md 文档
           </div>
         </div>
@@ -1111,7 +1111,7 @@ export default function App() {
 
       {/* Toast */}
       {toast && (
-        <div className="fixed bottom-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-[#222222] dark:bg-[#E5E5E5] text-[#FFFFFF] dark:text-[#1A1A1A] text-[12.5px] shadow-md whitespace-nowrap">
+        <div className="fixed bottom-16 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-32px)] px-4 py-2 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[12.5px] leading-snug text-center shadow-md">
           <span>{toast.msg}</span>
         </div>
       )}

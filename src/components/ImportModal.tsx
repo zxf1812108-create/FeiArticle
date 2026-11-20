@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { Check, Download, FileText, Folder, Plus, X } from 'lucide-react';
 import { FolderNode } from '../types';
 import { readTextFileSmart } from '../utils/textParser';
@@ -20,7 +20,25 @@ export const ImportModal: React.FC<ImportModalProps> = ({
   onImportDocs,
   onClose,
 }) => {
-  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(defaultFolderId);
+  const sortedFolders = useMemo(
+    () => [...folders].sort((a, b) => a.order - b.order),
+    [folders]
+  );
+
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(() => {
+    if (defaultFolderId && folders.some((f) => f.id === defaultFolderId)) {
+      return defaultFolderId;
+    }
+    return sortedFolders[0]?.id ?? null;
+  });
+
+  const effectiveFolderId = useMemo(() => {
+    if (selectedFolderId && sortedFolders.some((f) => f.id === selectedFolderId)) {
+      return selectedFolderId;
+    }
+    return sortedFolders[0]?.id ?? null;
+  }, [selectedFolderId, sortedFolders]);
+
   const [addingFolder, setAddingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [pasteTitle, setPasteTitle] = useState('');
@@ -29,10 +47,12 @@ export const ImportModal: React.FC<ImportModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const sortedFolders = [...folders].sort((a, b) => a.order - b.order);
-
   const processFiles = async (fileList: FileList | File[]) => {
     setError(null);
+    if (!effectiveFolderId) {
+      setError('请先新建一个目标目录后再导入。');
+      return;
+    }
     const files = Array.from(fileList).filter(
       (f) => /\.(txt|md|markdown|text)$/i.test(f.name) || f.type.startsWith('text/')
     );
@@ -50,13 +70,18 @@ export const ImportModal: React.FC<ImportModalProps> = ({
     for (const file of files) {
       const content = await readTextFileSmart(file);
       const title = file.name.replace(/\.(txt|md|markdown|text)$/i, '').trim() || '导入文档';
-      parsed.push({ title, content, folderId: selectedFolderId, format: 'txt' });
+      parsed.push({ title, content, folderId: effectiveFolderId, format: 'txt' });
     }
     onImportDocs(parsed);
     onClose();
   };
 
   const handleImportPasted = () => {
+    setError(null);
+    if (!effectiveFolderId) {
+      setError('请先新建一个目标目录后再导入。');
+      return;
+    }
     const trimmed = pasteContent.trim();
     if (!trimmed) {
       setError('请先在文本框中粘贴要导入的内容。');
@@ -73,7 +98,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
       {
         title: finalTitle,
         content: trimmed,
-        folderId: selectedFolderId,
+        folderId: effectiveFolderId,
         format: 'txt',
       },
     ]);
@@ -85,6 +110,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
     if (trimmed) {
       const created = onCreateFolder(trimmed);
       setSelectedFolderId(created.id);
+      if (error) setError(null);
     }
     setNewFolderName('');
     setAddingFolder(false);
@@ -96,67 +122,57 @@ export const ImportModal: React.FC<ImportModalProps> = ({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md max-h-[88vh] flex flex-col bg-[#FFFFFF] dark:bg-[#1E1E1E] border border-[#EAEAEA] dark:border-[#2E2E2E] rounded-2xl shadow-2xl overflow-hidden"
+        className="w-full max-w-md max-h-[88vh] flex flex-col bg-[var(--fei-bg-surface)] border border-[var(--fei-border)] rounded-2xl shadow-2xl overflow-hidden text-[var(--fei-text-primary)]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="px-5 py-4 border-b border-[#EEEEEE] dark:border-[#2A2A2A] flex items-center justify-between shrink-0">
-          <h2 className="text-[15px] font-semibold text-[#222222] dark:text-[#EAEAEA]">
+        <div className="px-5 py-4 border-b border-[var(--fei-border)] flex items-center justify-between shrink-0">
+          <h2 className="text-[15px] font-semibold text-[var(--fei-text-primary)]">
             导入文档
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-[#888888] hover:bg-[#F3F3F3] dark:hover:bg-[#2A2A2A]"
+            className="w-8 h-8 flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
-          {/* Directory Picker List */}
+          {/* Directory Picker List (existing folders only, no automatic 未分类 option) */}
           <div className="space-y-2">
-            <div className="text-[12.5px] text-[#777777] dark:text-[#8E8E8E]">目标目录</div>
-            <div className="max-h-40 overflow-y-auto divide-y divide-[#F2F2F2] dark:divide-[#282828] border border-[#EEEEEE] dark:border-[#2C2C2C] rounded-xl">
-              {sortedFolders.map((folder) => {
-                const active = selectedFolderId === folder.id;
-                return (
-                  <button
-                    key={folder.id}
-                    type="button"
-                    onClick={() => setSelectedFolderId(folder.id)}
-                    className={`w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-left text-[14px] transition-colors ${
-                      active
-                        ? 'bg-[#F2F2F2] dark:bg-[#282828] text-[#222222] dark:text-[#F0F0F0] font-medium'
-                        : 'text-[#444444] dark:text-[#C8C8C8] hover:bg-[#FAFAFA] dark:hover:bg-[#242424]'
-                    }`}
-                  >
-                    <span className="flex items-center gap-2.5 min-w-0">
-                      <Folder className="w-4 h-4 opacity-55 shrink-0" />
-                      <span className="truncate">{folder.name}</span>
-                    </span>
-                    {active && <Check className="w-4 h-4 text-[#222222] dark:text-[#EAEAEA] shrink-0" />}
-                  </button>
-                );
-              })}
-
-              <button
-                type="button"
-                onClick={() => setSelectedFolderId(null)}
-                className={`w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-left text-[14px] transition-colors ${
-                  selectedFolderId === null
-                    ? 'bg-[#F2F2F2] dark:bg-[#282828] text-[#222222] dark:text-[#F0F0F0] font-medium'
-                    : 'text-[#777777] dark:text-[#8E8E8E] hover:bg-[#FAFAFA] dark:hover:bg-[#242424]'
-                }`}
-              >
-                <span className="flex items-center gap-2.5">
-                  <Folder className="w-4 h-4 opacity-45 shrink-0" />
-                  <span>未分类</span>
-                </span>
-                {selectedFolderId === null && (
-                  <Check className="w-4 h-4 text-[#222222] dark:text-[#EAEAEA] shrink-0" />
-                )}
-              </button>
+            <div className="text-[12.5px] text-[var(--fei-text-muted)]">目标目录</div>
+            <div className="max-h-40 overflow-y-auto divide-y divide-[var(--fei-border)] border border-[var(--fei-border)] rounded-xl">
+              {sortedFolders.length === 0 ? (
+                <div className="px-3.5 py-3 text-[13px] text-[var(--fei-text-muted)]">
+                  暂无目录，请先点击下方新建目标目录
+                </div>
+              ) : (
+                sortedFolders.map((folder) => {
+                  const active = effectiveFolderId === folder.id;
+                  return (
+                    <button
+                      key={folder.id}
+                      type="button"
+                      onClick={() => setSelectedFolderId(folder.id)}
+                      className={`w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-left text-[14px] text-[var(--fei-text-primary)] transition-colors ${
+                        active
+                          ? 'bg-[var(--fei-bg-selected)]'
+                          : 'hover:bg-[var(--fei-bg-hover)]'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2.5 min-w-0">
+                        <Folder className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0" />
+                        <span className="truncate">{folder.name}</span>
+                      </span>
+                      {active && (
+                        <Check className="w-4 h-4 text-[var(--fei-text-primary)] shrink-0" />
+                      )}
+                    </button>
+                  );
+                })
+              )}
             </div>
 
             {addingFolder ? (
@@ -170,12 +186,12 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                     if (e.key === 'Escape') setAddingFolder(false);
                   }}
                   placeholder="输入新目录名称…"
-                  className="flex-1 h-9 px-3 rounded-lg bg-[#F7F7F7] dark:bg-[#262626] border border-[#DDDDDD] dark:border-[#3A3A3A] text-[13.5px] outline-none"
+                  className="flex-1 h-9 px-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border-strong)] text-[13.5px] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none"
                 />
                 <button
                   type="button"
                   onClick={handleConfirmNewFolder}
-                  className="h-9 px-3 rounded-lg bg-[#222222] dark:bg-[#E0E0E0] text-white dark:text-[#1A1A1A] text-[13px] font-medium whitespace-nowrap"
+                  className="h-9 px-3 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium whitespace-nowrap"
                 >
                   创建
                 </button>
@@ -184,7 +200,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
               <button
                 type="button"
                 onClick={() => setAddingFolder(true)}
-                className="inline-flex items-center gap-1.5 text-[13px] text-[#777777] dark:text-[#909090] hover:text-[#222222] dark:hover:text-[#EAEAEA]"
+                className="inline-flex items-center gap-1.5 text-[13px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>新建目标目录</span>
@@ -193,8 +209,8 @@ export const ImportModal: React.FC<ImportModalProps> = ({
           </div>
 
           {/* Paste Text Box (placed BEFORE file picker, defaults to .txt format) */}
-          <div className="space-y-2 pt-1 border-t border-[#EEEEEE] dark:border-[#2A2A2A]">
-            <div className="flex items-center justify-between text-[12.5px] text-[#777777] dark:text-[#8E8E8E]">
+          <div className="space-y-2 pt-1 border-t border-[var(--fei-border)]">
+            <div className="flex items-center justify-between text-[12.5px] text-[var(--fei-text-muted)]">
               <span>粘贴文本导入</span>
               <span className="font-code text-[11.5px]">默认 .txt</span>
             </div>
@@ -203,7 +219,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
               value={pasteTitle}
               onChange={(e) => setPasteTitle(e.target.value)}
               placeholder="文档标题（留空自动取正文首行）"
-              className="w-full h-9 px-3 rounded-lg bg-[#F7F7F7] dark:bg-[#171717] border border-[#E5E5E5] dark:border-[#333333] text-[13.5px] text-[#222222] dark:text-[#E5E5E5] placeholder:text-[#999999] dark:placeholder:text-[#606060] outline-none focus:border-[#666666]"
+              className="w-full h-9 px-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13.5px] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none focus:border-[var(--fei-border-strong)]"
             />
             <textarea
               rows={4}
@@ -213,14 +229,14 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                 if (error) setError(null);
               }}
               placeholder="在此粘贴文本内容…"
-              className="w-full p-3 rounded-lg bg-[#F7F7F7] dark:bg-[#171717] border border-[#E5E5E5] dark:border-[#333333] text-[13.5px] leading-relaxed text-[#222222] dark:text-[#E5E5E5] placeholder:text-[#999999] dark:placeholder:text-[#606060] outline-none focus:border-[#666666] resize-none"
+              className="w-full p-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13.5px] leading-relaxed text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none focus:border-[var(--fei-border-strong)] resize-none"
             />
             <div className="flex justify-end">
               <button
                 type="button"
                 onClick={handleImportPasted}
-                disabled={!pasteContent.trim()}
-                className="h-9 px-3.5 inline-flex items-center gap-1.5 rounded-lg bg-[#222222] dark:bg-[#E0E0E0] text-[#FFFFFF] dark:text-[#1A1A1A] text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-35 whitespace-nowrap"
+                disabled={!pasteContent.trim() || !effectiveFolderId}
+                className="h-9 px-3.5 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-35 whitespace-nowrap"
               >
                 <FileText className="w-3.5 h-3.5" />
                 <span>导入粘贴文本</span>
@@ -245,15 +261,15 @@ export const ImportModal: React.FC<ImportModalProps> = ({
             onClick={() => fileInputRef.current?.click()}
             className={`py-6 px-4 rounded-xl border border-dashed text-center cursor-pointer transition-colors space-y-1.5 ${
               dragging
-                ? 'border-[#222222] dark:border-[#D9D9D9] bg-[#F5F5F5] dark:bg-[#262626]'
-                : 'border-[#D8D8D8] dark:border-[#383838] hover:border-[#AAAAAA] dark:hover:border-[#555555]'
+                ? 'border-[var(--fei-text-primary)] bg-[var(--fei-bg-selected)]'
+                : 'border-[var(--fei-border-strong)] hover:border-[var(--fei-text-muted)]'
             }`}
           >
-            <Download className="w-5 h-5 mx-auto text-[#777777] dark:text-[#8E8E8E]" />
-            <div className="text-[14px] font-medium text-[#222222] dark:text-[#EAEAEA]">
+            <Download className="w-5 h-5 mx-auto text-[var(--fei-text-muted)]" />
+            <div className="text-[14px] font-medium text-[var(--fei-text-primary)]">
               选择 .txt / .md 文件（可多选）
             </div>
-            <p className="text-[12px] text-[#888888] dark:text-[#787878]">
+            <p className="text-[12px] text-[var(--fei-text-muted)]">
               导入后默认存放为 .txt 文本文档，自动兼容 UTF-8 / GBK 编码
             </p>
             <input
@@ -271,7 +287,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
             />
           </div>
 
-          {error && <p className="text-[12.5px] text-[#555555] dark:text-[#A8A8A8]">{error}</p>}
+          {error && <p className="text-[12.5px] text-[var(--fei-text-muted)]">{error}</p>}
         </div>
       </div>
     </div>

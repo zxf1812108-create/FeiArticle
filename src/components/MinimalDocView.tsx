@@ -562,7 +562,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <code
               key={idx}
-              className="font-code text-[0.88em] px-1.5 py-0.5 rounded bg-[#F2F2F2] dark:bg-[#262626]"
+              className="font-code text-[0.88em] px-1.5 py-0.5 rounded bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)]"
             >
               {token.value}
             </code>
@@ -570,7 +570,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
         if (token.type === 'bold') {
           return (
-            <strong key={idx} className="font-semibold text-[#111111] dark:text-[#EDEDED]">
+            <strong key={idx} className="font-semibold text-[var(--fei-text-primary)]">
               {token.value}
             </strong>
           );
@@ -589,7 +589,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             return (
               <h1
                 key={idx}
-                className="text-[22px] font-semibold leading-snug mt-7 mb-3.5 first:mt-0 text-[#181818] dark:text-[#E8E8E8] text-balance"
+                className="text-[22px] font-semibold leading-snug mt-7 mb-3.5 first:mt-0 text-[var(--fei-text-primary)] text-balance"
               >
                 {block.text}
               </h1>
@@ -599,7 +599,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             return (
               <h2
                 key={idx}
-                className="text-[18.5px] font-semibold leading-snug mt-7 mb-3 text-[#1F1F1F] dark:text-[#E2E2E2] text-balance"
+                className="text-[18.5px] font-semibold leading-snug mt-7 mb-3 text-[var(--fei-text-primary)] text-balance"
               >
                 {block.text}
               </h2>
@@ -608,7 +608,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <h3
               key={idx}
-              className="text-[16.5px] font-semibold leading-snug mt-5 mb-2 text-[#222222] dark:text-[#DEDEDE]"
+              className="text-[16.5px] font-semibold leading-snug mt-5 mb-2 text-[var(--fei-text-primary)]"
             >
               {block.text}
             </h3>
@@ -624,7 +624,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <blockquote
               key={idx}
-              className="my-5 px-4 py-3.5 rounded-lg bg-[#F7F7F7] dark:bg-[#222222] text-[#555555] dark:text-[#B5B5B5] text-[15px]"
+              className="my-5 px-4 py-3.5 rounded-lg bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)] text-[15px]"
             >
               <span className="whitespace-pre-line">{renderInline(block.text)}</span>
             </blockquote>
@@ -633,7 +633,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <pre
               key={idx}
-              className="my-5 p-4 rounded-lg bg-[#F5F5F5] dark:bg-[#222222] overflow-x-auto text-[13px] leading-relaxed font-code text-[#2B2B2B] dark:text-[#D4D4D4]"
+              className="my-5 p-4 rounded-lg bg-[var(--fei-bg-subtle)] overflow-x-auto text-[13px] leading-relaxed font-code text-[var(--fei-text-primary)]"
             >
               <code>{block.code}</code>
             </pre>
@@ -641,7 +641,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         case 'list':
           if (block.ordered) {
             return (
-              <ol key={idx} className="my-4 pl-5 list-decimal space-y-2">
+              <ol key={idx} className="my-4 pl-5 list-decimal space-y-2 marker:text-[var(--fei-text-muted)]">
                 {block.items.map((item, i) => (
                   <li key={i}>{renderInline(item)}</li>
                 ))}
@@ -649,14 +649,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             );
           }
           return (
-            <ul key={idx} className="my-4 pl-5 list-disc space-y-2 marker:text-[#999999]">
+            <ul key={idx} className="my-4 pl-5 list-disc space-y-2 marker:text-[var(--fei-text-muted)]">
               {block.items.map((item, i) => (
                 <li key={i}>{renderInline(item)}</li>
               ))}
             </ul>
           );
         case 'hr':
-          return <hr key={idx} className="my-7 border-t border-[#EEEEEE] dark:border-[#2C2C2C]" />;
+          return <hr key={idx} className="my-7 border-t border-[var(--fei-border)]" />;
       }
     };
 
@@ -677,7 +677,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         ref={scrollRef}
         onClick={handleContainerClick}
         onScroll={handleScroll}
-        className="w-full h-full overflow-y-auto bg-[#FFFFFF] dark:bg-[#1A1A1A]"
+        className="w-full h-full overflow-y-auto bg-[var(--fei-bg)]"
       >
         <div className="max-w-[720px] mx-auto px-5 sm:px-8 pt-8 pb-[calc(100vh-110px)]">
           {isEditing ? (
@@ -690,7 +690,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                   scheduleSave(e.target.value, content);
                 }}
                 placeholder="标题"
-                className="w-full bg-transparent text-[23px] font-semibold tracking-tight leading-snug text-[#181818] dark:text-[#EAEAEA] placeholder:text-[#AAAAAA] dark:placeholder:text-[#555555] outline-none"
+                className="w-full bg-transparent text-[23px] font-semibold tracking-tight leading-snug text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none"
               />
               <textarea
                 ref={textareaRef}
@@ -700,37 +700,37 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                   scheduleSave(title, e.target.value);
                 }}
                 placeholder="开始输入正文…"
-                className="w-full bg-transparent text-[16px] leading-[1.85] text-[#222222] dark:text-[#D9D9D9] placeholder:text-[#AAAAAA] dark:placeholder:text-[#555555] outline-none resize-none overflow-hidden"
+                className="w-full bg-transparent text-[16px] leading-[1.85] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none resize-none overflow-hidden"
               />
             </div>
           ) : (
             <article ref={articleRef}>
-              <h1 className="text-[23px] font-semibold tracking-tight leading-snug text-[#181818] dark:text-[#EAEAEA] mb-6 text-balance">
+              <h1 className="text-[23px] font-semibold tracking-tight leading-snug text-[var(--fei-text-primary)] mb-6 text-balance">
                 {title || '无标题文档'}
               </h1>
 
               {doc.syncStatus === 'remote-only' && !content ? (
                 <div className="py-12 text-center space-y-3">
-                  <p className="text-[14px] text-[#777777] dark:text-[#8E8E8E]">
+                  <p className="text-[14px] text-[var(--fei-text-muted)]">
                     正文位于坚果云（约 {formatBytes(doc.byteSize)}），按需拉取后将缓存在本地。
                   </p>
                   {fetchError && (
-                    <p className="text-[13px] text-[#555555] dark:text-[#A8A8A8]">{fetchError}</p>
+                    <p className="text-[13px] text-[var(--fei-text-muted)]">{fetchError}</p>
                   )}
                   <button
                     type="button"
                     onClick={handleFetch}
                     disabled={fetching}
-                    className="h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[#222222] dark:bg-[#D9D9D9] text-[#FFFFFF] dark:text-[#1A1A1A] text-[13px] font-medium disabled:opacity-60"
+                    className="h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium disabled:opacity-60"
                   >
                     <CloudDownload className="w-4 h-4" />
                     <span>{fetching ? '拉取中…' : '拉取正文'}</span>
                   </button>
                 </div>
               ) : (
-                <div className="text-[16px] leading-[1.85] text-[#222222] dark:text-[#D9D9D9]">
+                <div className="text-[16px] leading-[1.85] text-[var(--fei-text-primary)]">
                   {blocks.length === 0 ? (
-                    <p className="text-[#999999] dark:text-[#666666]">
+                    <p className="text-[var(--fei-text-muted)]">
                       暂无内容，点击右下角编辑图标开始写作。
                     </p>
                   ) : (
