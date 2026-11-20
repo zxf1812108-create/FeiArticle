@@ -252,6 +252,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const hasUnsavedDraftRef = useRef(false);
     const pendingAnchorRef = useRef<PendingAnchor | null>(null);
     const restoredDocIdRef = useRef<string | null>(null);
+    const hadSelectionOnDownRef = useRef(false);
+    const lastPointerDownAtRef = useRef(0);
+    const lastTouchStartAtRef = useRef(0);
 
     // Sync local buffer only when switching documents
     useEffect(() => {
@@ -259,6 +262,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       titleRef.current = doc.title;
       contentRef.current = doc.content;
       hasUnsavedDraftRef.current = false;
+      hadSelectionOnDownRef.current = false;
       setFetchError(null);
       setArticleOverflow(false);
     }, [doc.id]);
@@ -575,16 +579,48 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }, 220);
     };
 
+    const hasActiveSelection = () => {
+      const sel = window.getSelection();
+      return Boolean(sel && !sel.isCollapsed && sel.toString().length > 0);
+    };
+
+    const handleReadPointerDownCapture = () => {
+      if (isEditing) return;
+      const now = performance.now();
+      const active = hasActiveSelection();
+      if (now - lastTouchStartAtRef.current < 40) {
+        if (active) hadSelectionOnDownRef.current = true;
+      } else {
+        hadSelectionOnDownRef.current = active;
+      }
+      lastPointerDownAtRef.current = now;
+    };
+
+    const handleReadTouchStartCapture = () => {
+      if (isEditing) return;
+      const now = performance.now();
+      const active = hasActiveSelection();
+      if (now - lastPointerDownAtRef.current < 40) {
+        if (active) hadSelectionOnDownRef.current = true;
+      } else {
+        hadSelectionOnDownRef.current = active;
+      }
+      lastTouchStartAtRef.current = now;
+    };
+
     // Exact visual-line-accurate tap pagination in Read mode:
     // Left 1/3 => Page Up, Right 2/3 => Page Down (zero repeated complete lines)
     const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
+      const hadSelectionOnDown = hadSelectionOnDownRef.current;
+      hadSelectionOnDownRef.current = false;
+
       if (isEditing) return;
 
       const target = e.target as HTMLElement | null;
       if (target?.closest('button, a, input, textarea, select')) return;
 
-      const selText = window.getSelection()?.toString().trim();
-      if (selText && selText.length > 0) return;
+      // Do not turn page if text is currently selected OR this tap dismissed an active selection
+      if (hadSelectionOnDown || hasActiveSelection()) return;
 
       const el = scrollRef.current;
       const articleEl = articleRef.current;
@@ -866,6 +902,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         ) : (
           <div
             ref={scrollRef}
+            onPointerDownCapture={handleReadPointerDownCapture}
+            onTouchStartCapture={handleReadTouchStartCapture}
             onClick={handleContainerClick}
             onScroll={handleScroll}
             className="flex-1 min-h-0 w-full overflow-y-auto"

@@ -608,46 +608,6 @@ export default function App() {
     );
   };
 
-  const handlePermanentDeleteFolder = (folderId: string) => {
-    const now = Date.now();
-    const childDocs = docsRef.current.filter(
-      (d) =>
-        d.deleted &&
-        (d.deletedByFolderId === folderId || d.folderId === folderId)
-    );
-    const childIdSet = new Set(childDocs.map((d) => d.id));
-
-    setFolders((prev) => prev.filter((f) => f.id !== folderId));
-    setDocs((prev) => prev.filter((d) => !childIdSet.has(d.id)));
-    setPurgedRecords((prev) => {
-      const nextDocs = { ...prev.docs };
-      const nextDocFormats = { ...(prev.docFormats || {}) };
-      for (const d of childDocs) {
-        nextDocs[d.id] = now;
-        nextDocFormats[d.id] = d.format === 'md' ? 'md' : 'txt';
-      }
-      return {
-        docs: nextDocs,
-        docFormats: nextDocFormats,
-        folders: { ...prev.folders, [folderId]: now },
-      };
-    });
-    setFoldersDirty(true);
-  };
-
-  const handlePermanentDeleteDoc = (docId: string) => {
-    const now = Date.now();
-    const targetDoc = docsRef.current.find((d) => d.id === docId);
-    const fmt: 'txt' | 'md' = targetDoc?.format === 'md' ? 'md' : 'txt';
-    setDocs((prev) => prev.filter((d) => d.id !== docId));
-    setPurgedRecords((prev) => ({
-      ...prev,
-      docs: { ...prev.docs, [docId]: now },
-      docFormats: { ...(prev.docFormats || {}), [docId]: fmt },
-    }));
-    setFoldersDirty(true);
-  };
-
   const handleEmptyTrash = () => {
     const now = Date.now();
     const deletedFolderIds = foldersRef.current.filter((f) => f.deleted).map((f) => f.id);
@@ -1749,8 +1709,6 @@ export default function App() {
           docs={docs}
           onRestoreFolder={handleRestoreFolderFromTrash}
           onRestoreDoc={handleRestoreDocFromTrash}
-          onPermanentDeleteFolder={handlePermanentDeleteFolder}
-          onPermanentDeleteDoc={handlePermanentDeleteDoc}
           onEmptyTrash={handleEmptyTrash}
           onClose={() => setShowTrashModal(false)}
         />

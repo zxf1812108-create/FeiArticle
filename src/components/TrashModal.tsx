@@ -1,15 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import { FileText, Folder, RotateCcw, Trash2, X } from 'lucide-react';
 import { ArticleDoc, FolderNode } from '../types';
-import { getItemDeletedAt, getTrashRemainingDays } from '../utils/trash';
+import { getItemDeletedAt } from '../utils/trash';
 
 interface TrashModalProps {
   folders: FolderNode[];
   docs: ArticleDoc[];
   onRestoreFolder: (folderId: string) => void;
   onRestoreDoc: (docId: string) => void;
-  onPermanentDeleteFolder: (folderId: string) => void;
-  onPermanentDeleteDoc: (docId: string) => void;
   onEmptyTrash: () => void;
   onClose: () => void;
 }
@@ -19,8 +17,6 @@ export const TrashModal: React.FC<TrashModalProps> = ({
   docs,
   onRestoreFolder,
   onRestoreDoc,
-  onPermanentDeleteFolder,
-  onPermanentDeleteDoc,
   onEmptyTrash,
   onClose,
 }) => {
@@ -78,12 +74,6 @@ export const TrashModal: React.FC<TrashModalProps> = ({
   }, [deletedDocs, deletedFolderIdSet]);
 
   const hasTrashItems = deletedFolders.length > 0 || deletedDocs.length > 0;
-  const now = Date.now();
-
-  const formatRemaining = (item: { deletedAt?: number; updatedAt: number }) => {
-    const days = getTrashRemainingDays(item, now);
-    return days <= 1 ? '不足 1 天后彻底删除' : `剩余 ${days} 天`;
-  };
 
   return (
     <div
@@ -97,11 +87,11 @@ export const TrashModal: React.FC<TrashModalProps> = ({
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-[var(--fei-border)] flex items-center justify-between gap-3 shrink-0">
           <div className="min-w-0">
-            <h2 className="text-[15px] font-semibold text-[var(--fei-text-primary)] leading-tight">
+            <h2 className="text-[12.5px] font-normal text-[var(--fei-text-muted)] leading-tight">
               回收站
             </h2>
             <p className="text-[11.5px] text-[var(--fei-text-muted)] mt-0.5">
-              内容保留 30 天，到期自动彻底删除
+              30天后自动删除
             </p>
           </div>
 
@@ -183,11 +173,6 @@ export const TrashModal: React.FC<TrashModalProps> = ({
                         <div className="text-[14px] font-medium text-[var(--fei-text-primary)] truncate">
                           {folder.name}
                         </div>
-                        <div className="text-[11.5px] text-[var(--fei-text-muted)] flex items-center gap-2 mt-0.5">
-                          <span>{childDocs.length} 篇文档</span>
-                          <span>·</span>
-                          <span>{formatRemaining(folder)}</span>
-                        </div>
                       </div>
 
                       <div className="flex items-center gap-0.5 shrink-0">
@@ -199,15 +184,6 @@ export const TrashModal: React.FC<TrashModalProps> = ({
                           className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
                         >
                           <RotateCcw className="w-4 h-4" strokeWidth={1.75} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onPermanentDeleteFolder(folder.id)}
-                          title="彻底删除目录及文档"
-                          aria-label={`彻底删除目录 ${folder.name}`}
-                          className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" strokeWidth={1.75} />
                         </button>
                       </div>
                     </div>
@@ -242,15 +218,6 @@ export const TrashModal: React.FC<TrashModalProps> = ({
                               className="w-7 h-7 inline-flex items-center justify-center rounded text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0"
                             >
                               <RotateCcw className="w-3.5 h-3.5" strokeWidth={1.75} />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onPermanentDeleteDoc(doc.id)}
-                              title="彻底删除该文档"
-                              aria-label={`彻底删除文档 ${doc.title || '无标题文档'}`}
-                              className="w-7 h-7 inline-flex items-center justify-center rounded text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
                             </button>
                           </div>
                         ))}
@@ -288,15 +255,11 @@ export const TrashModal: React.FC<TrashModalProps> = ({
                           </span>
                         )}
                       </div>
-                      <div className="text-[11.5px] text-[var(--fei-text-muted)] flex items-center gap-2 mt-0.5 truncate">
-                        {originFolder && (
-                          <>
-                            <span className="truncate">原目录：{originFolder}</span>
-                            <span>·</span>
-                          </>
-                        )}
-                        <span className="shrink-0">{formatRemaining(doc)}</span>
-                      </div>
+                      {originFolder && (
+                        <div className="text-[11.5px] text-[var(--fei-text-muted)] mt-0.5 truncate">
+                          原目录：{originFolder}
+                        </div>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-0.5 shrink-0">
@@ -308,15 +271,6 @@ export const TrashModal: React.FC<TrashModalProps> = ({
                         className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] transition-colors"
                       >
                         <RotateCcw className="w-4 h-4" strokeWidth={1.75} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onPermanentDeleteDoc(doc.id)}
-                        title="彻底删除"
-                        aria-label={`彻底删除文档 ${doc.title || '无标题文档'}`}
-                        className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] transition-colors"
-                      >
-                        <Trash2 className="w-4 h-4" strokeWidth={1.75} />
                       </button>
                     </div>
                   </div>
