@@ -174,7 +174,8 @@ export const PC_DIRECT_HTML = `<!doctype html>
     state.folders = Array.isArray(state.folders) ? state.folders : [];
     state.docs = Array.isArray(state.docs) ? state.docs.filter(d => !d.deleted) : [];
     if (!activeFolderId && state.folders.length > 0) {
-      activeFolderId = state.folders[0].id;
+      const firstRegular = state.folders.find(f => f.id !== '__inbox__');
+      activeFolderId = firstRegular ? firstRegular.id : null;
     }
     render();
   }
@@ -192,7 +193,13 @@ export const PC_DIRECT_HTML = `<!doctype html>
   function render() {
     const tree = $('tree');
     tree.innerHTML = '';
-    const folders = [...state.folders].sort((a, b) => (a.order || 0) - (b.order || 0));
+    const folders = [...state.folders]
+      .filter(f => f.id !== '__inbox__')
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
+
+    const inboxDocs = state.docs
+      .filter(d => d.folderId === '__inbox__')
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
 
     if (folders.length === 0 && state.docs.length === 0) {
       const div = document.createElement('div');
@@ -200,6 +207,24 @@ export const PC_DIRECT_HTML = `<!doctype html>
       div.style.padding = '16px 10px';
       div.textContent = '暂无目录，请先点击上方「新建目录」';
       tree.appendChild(div);
+    }
+
+    if (inboxDocs.length > 0) {
+      const fRow = document.createElement('div');
+      fRow.className = 'folder-row';
+      fRow.innerHTML = '<span class="truncate">inbox</span><span class="count"></span>';
+      fRow.children[1].textContent = String(inboxDocs.length);
+      tree.appendChild(fRow);
+
+      for (const doc of inboxDocs) {
+        const dRow = document.createElement('div');
+        dRow.className = 'doc-row' + (activeDocId === doc.id ? ' active' : '');
+        dRow.innerHTML = '<span class="truncate"></span><span class="count"></span>';
+        dRow.children[0].textContent = doc.title || '无标题文档';
+        dRow.children[1].textContent = doc.encrypted ? '*' : '';
+        dRow.onclick = () => selectDoc(doc.id);
+        tree.appendChild(dRow);
+      }
     }
 
     for (const folder of folders) {
@@ -266,7 +291,7 @@ export const PC_DIRECT_HTML = `<!doctype html>
   function selectDoc(id) {
     activeDocId = id;
     const doc = state.docs.find(d => d.id === id);
-    if (doc && doc.folderId) activeFolderId = doc.folderId;
+    if (doc && doc.folderId && doc.folderId !== '__inbox__') activeFolderId = doc.folderId;
     dirty = false;
     render();
   }
@@ -298,6 +323,10 @@ export const PC_DIRECT_HTML = `<!doctype html>
     if (e.key !== 'Enter') return;
     const name = $('newFolderInput').value.trim();
     if (!name) return;
+    if (name.toLowerCase() === 'inbox') {
+      showToast('inbox 为云端投递箱保留名称');
+      return;
+    }
     const id = 'folder_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
     await apiAction({ type: 'createFolder', id, name });
     state.folders.push({ id, name, parentId: null, order: state.folders.length, updatedAt: Date.now() });

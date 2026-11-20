@@ -1,12 +1,13 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Check, Download, FileText, Folder, Plus, X } from 'lucide-react';
 import { FolderNode } from '../types';
+import { INBOX_FOLDER_ID, isReservedInboxName } from '../utils/inbox';
 import { readTextFileSmart } from '../utils/textParser';
 
 interface ImportModalProps {
   folders: FolderNode[];
   defaultFolderId: string | null;
-  onCreateFolder: (name: string) => FolderNode;
+  onCreateFolder: (name: string) => FolderNode | null;
   onImportDocs: (
     items: Array<{ title: string; content: string; folderId: string | null; format?: 'txt' | 'md' }>
   ) => void;
@@ -21,7 +22,10 @@ export const ImportModal: React.FC<ImportModalProps> = ({
   onClose,
 }) => {
   const sortedFolders = useMemo(
-    () => [...folders].sort((a, b) => a.order - b.order),
+    () =>
+      [...folders]
+        .filter((f) => f.id !== INBOX_FOLDER_ID)
+        .sort((a, b) => a.order - b.order),
     [folders]
   );
 
@@ -108,8 +112,14 @@ export const ImportModal: React.FC<ImportModalProps> = ({
   const handleConfirmNewFolder = () => {
     const trimmed = newFolderName.trim();
     if (trimmed) {
+      if (isReservedInboxName(trimmed)) {
+        setError('inbox 为云端投递箱保留名称，请使用其他目录名。');
+        return;
+      }
       const created = onCreateFolder(trimmed);
-      setSelectedFolderId(created.id);
+      if (created) {
+        setSelectedFolderId(created.id);
+      }
       if (error) setError(null);
     }
     setNewFolderName('');

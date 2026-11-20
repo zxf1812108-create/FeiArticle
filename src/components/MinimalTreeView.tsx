@@ -15,6 +15,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ArticleDoc, FolderNode } from '../types';
+import { INBOX_FOLDER_ID, INBOX_FOLDER_NAME } from '../utils/inbox';
 
 export type InsertPosition = 'before' | 'after' | 'end';
 
@@ -151,6 +152,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
       .filter((d) => d.folderId === folderId)
       .sort((a, b) => a.order - b.order || b.updatedAt - a.updatedAt);
 
+  const inboxDocs = getDocsForFolder(INBOX_FOLDER_ID);
   const uncategorizedDocs = getDocsForFolder(null);
 
   const cutLabel = useMemo(() => {
@@ -200,7 +202,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
   };
 
   const handleFolderDragOver = (e: React.DragEvent, targetFolderId: string | null) => {
-    if (!dragging) return;
+    if (!dragging || targetFolderId === INBOX_FOLDER_ID) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
 
@@ -219,6 +221,10 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
 
   const handleFolderDrop = (e: React.DragEvent, targetFolderId: string | null) => {
     e.preventDefault();
+    if (targetFolderId === INBOX_FOLDER_ID) {
+      clearDragState();
+      return;
+    }
     let payload = dragging;
     if (!payload) {
       try {
@@ -259,7 +265,14 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     folderId: string | null,
     targetDocId: string
   ) => {
-    if (!dragging || dragging.kind !== 'doc' || dragging.id === targetDocId) return;
+    if (
+      !dragging ||
+      dragging.kind !== 'doc' ||
+      dragging.id === targetDocId ||
+      folderId === INBOX_FOLDER_ID
+    ) {
+      return;
+    }
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     const rect = e.currentTarget.getBoundingClientRect();
@@ -275,6 +288,10 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     targetDocId: string
   ) => {
     e.preventDefault();
+    if (folderId === INBOX_FOLDER_ID) {
+      clearDragState();
+      return;
+    }
     let payload = dragging;
     if (!payload) {
       try {
@@ -379,6 +396,56 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
             </button>
           </div>
         )}
+
+        {/* Dynamic inbox dropbox directory (visible only when it contains documents; disappears once emptied) */}
+        {inboxDocs.length > 0 && (() => {
+          const isInboxExpanded = !collapsedIds.has(INBOX_FOLDER_ID);
+          const isInboxTarget =
+            activeTarget?.kind === 'folder' && activeTarget.id === INBOX_FOLDER_ID;
+          return (
+            <div className="relative space-y-0.5">
+              <div
+                className={`flex items-center gap-1.5 px-2 min-h-[44px] rounded-lg transition-colors duration-150 ${
+                  isInboxTarget ? 'bg-[var(--fei-bg-selected)]' : 'hover:bg-[var(--fei-bg-hover)]'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleExpand(INBOX_FOLDER_ID);
+                  }}
+                  aria-label={isInboxExpanded ? '收起 inbox' : '展开 inbox'}
+                  className="w-6 h-8 flex items-center justify-center text-[var(--fei-text-muted)] shrink-0"
+                >
+                  {isInboxExpanded ? (
+                    <ChevronDown className="w-4 h-4" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onSelectTarget({ kind: 'folder', id: INBOX_FOLDER_ID })}
+                  className="flex-1 min-w-0 text-left text-[14.5px] font-medium truncate py-2 text-[var(--fei-text-primary)]"
+                >
+                  {INBOX_FOLDER_NAME}
+                </button>
+
+                <span className="mr-1.5 min-w-[16px] text-center text-[12px] font-code tabular-nums text-[var(--fei-text-muted)] shrink-0">
+                  {inboxDocs.length}
+                </span>
+              </div>
+
+              {isInboxExpanded && (
+                <div className="space-y-0.5">
+                  {inboxDocs.map((doc) => renderArticleRow(doc, INBOX_FOLDER_ID))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Single-Level Directory List */}
         {sortedFolders.map((folder) => {

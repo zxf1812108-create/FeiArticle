@@ -10,6 +10,13 @@ import {
   WebDavConfig,
 } from '../types';
 import { decryptText, encryptText, isEncryptedPayload } from './crypto';
+import {
+  INBOX_FOLDER_ID,
+  INBOX_FOLDER_NAME,
+  parseWebDavInboxXml,
+  RemoteInboxFile,
+  resolveDuplicateDocImport,
+} from './inbox';
 import { extractExcerpt, formatBytes, getByteSize, sha256Hex } from './textParser';
 
 interface ProxyResponse {
@@ -45,6 +52,7 @@ export const DEFAULT_JIANGUOYUN_URL = 'https://dav.jianguoyun.com/dav/FeiArtical
 
 const MANIFEST_PATH = '_manifest.json';
 const DOCS_DIR = 'docs/';
+const INBOX_DIR = `${INBOX_FOLDER_NAME}/`;
 
 /**
  * Normalize user-entered WebDAV URL:
@@ -143,7 +151,7 @@ async function callWebDavUrlNative(
           method === 'PUT'
             ? (options?.body ?? '')
             : method === 'PROPFIND'
-              ? '<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:"><D:prop><D:getetag/><D:getlastmodified/><D:getcontentlength/></D:prop></D:propfind>'
+              ? '<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getetag/><D:getlastmodified/><D:getcontentlength/></D:prop></D:propfind>'
               : undefined,
         contentType,
       });
@@ -331,6 +339,14 @@ async function ensureRemoteDirectories(
   }
   const docsReady =
     docsRes.ok || docsRes.status === 201 || docsRes.status === 405 || docsRes.status === 301;
+
+  // Also ensure the dropbox inbox/ directory exists alongside docs/
+  requests++;
+  const inboxRes = await callWebDav(config, 'MKCOL', INBOX_DIR);
+  if (inboxRes.status === 401 || inboxRes.status === 403) {
+    return { requests, authFailedStatus: inboxRes.status, docsReady: false };
+  }
+
   return { requests, docsReady };
 }
 
@@ -488,34 +504,10 @@ export async function runIncrementalWebDavSync(
   let remoteManifest: RemoteManifest | null = null;
   let newEtag = config.lastManifestEtag;
   let dirsEnsured = false;
+  const wasEtag304 = manifestRes.status === 304;
 
-  if (manifestRes.status === 304) {
+  if (wasEtag304) {
     skippedByEtag304++;
-    if (dirtyDocs.length === 0 && !metaDirty) {
-      return {
-        folders: localFolders,
-        docs: localDocs,
-        treeState: localTreeState,
-        config: { ...config, lastSyncedAt: Date.now() },
-        quotaDelta: {
-          uploadBytes: 0,
-          downloadBytes: 0,
-          requestCount,
-          skippedByEtag304,
-          skippedByHashMatch: localDocs.length,
-        },
-        log: {
-          id: `log_${Date.now()}`,
-          timestamp: Date.now(),
-          mode: 'live',
-          summary: '已是最新（304 零流量）',
-          requests: requestCount,
-          uploadBytes: 0,
-          downloadBytes: 0,
-          status: 'noop',
-        },
-      };
-    }
   } else if (manifestRes.status === 404 || manifestRes.status === 409) {
     // First sync or missing remote folder: Jianguoyun returns 404 (no file) or 409 (no parent folder)
     const ensured = await ensureRemoteDirectories(config);
@@ -536,6 +528,54 @@ export async function runIncrementalWebDavSync(
     }
   } else if (!manifestRes.ok) {
     throw new Error(formatSyncHttpError('拉取索引失败', manifestRes));
+  }
+
+  // Step 1b: Check Jianguoyun inbox/ dropbox folder for external files
+  let inboxFiles: RemoteInboxFile[] = [];
+  requestCount++;
+  const inboxPropRes = await callWebDav(config, 'PROPFIND', INBOX_DIR, { depth: '1' });
+  if (inboxPropRes.status === 401 || inboxPropRes.status === 403) {
+    throw new Error(formatSyncHttpError('检查投递箱失败', inboxPropRes));
+  } else if (inboxPropRes.status === 404 || inboxPropRes.status === 409) {
+    if (!dirsEnsured) {
+      const ensured = await ensureRemoteDirectories(config);
+      requestCount += ensured.requests;
+      dirsEnsured = true;
+      if (ensured.authFailedStatus) {
+        throw new Error(
+          formatSyncHttpError('创建投递箱目录失败', { ok: false, status: ensured.authFailedStatus })
+        );
+      }
+    }
+  } else if (inboxPropRes.ok && typeof inboxPropRes.body === 'string') {
+    downloadBytes += inboxPropRes.bytesTransferred || getByteSize(inboxPropRes.body);
+    inboxFiles = parseWebDavInboxXml(inboxPropRes.body, `${config.baseUrl}${INBOX_DIR}`);
+  }
+
+  if (wasEtag304 && dirtyDocs.length === 0 && !metaDirty && inboxFiles.length === 0) {
+    return {
+      folders: localFolders,
+      docs: localDocs,
+      treeState: localTreeState,
+      config: { ...config, lastSyncedAt: Date.now() },
+      quotaDelta: {
+        uploadBytes: 0,
+        downloadBytes,
+        requestCount,
+        skippedByEtag304,
+        skippedByHashMatch: localDocs.length,
+      },
+      log: {
+        id: `log_${Date.now()}`,
+        timestamp: Date.now(),
+        mode: 'live',
+        summary: '已是最新（304 零流量）',
+        requests: requestCount,
+        uploadBytes: 0,
+        downloadBytes,
+        status: 'noop',
+      },
+    };
   }
 
   // Step 2: Merge sync settings (Last-Write-Wins by updatedAt)
@@ -604,9 +644,12 @@ export async function runIncrementalWebDavSync(
     const hashDiffers = !remoteEntry || remoteEntry.contentHash !== doc.contentHash;
     const encryptionDiffers = Boolean(remoteEntry?.encrypted) !== Boolean(doc.encrypted);
     const isLocallyNewer = !remoteEntry || doc.updatedAt >= remoteEntry.updatedAt;
+    const shouldPush = wasEtag304
+      ? doc.syncStatus === 'dirty'
+      : (doc.syncStatus === 'dirty' || !remoteEntry || encryptionDiffers) && isLocallyNewer;
 
-    if ((doc.syncStatus === 'dirty' || !remoteEntry || encryptionDiffers) && isLocallyNewer) {
-      if ((hashDiffers || encryptionDiffers || doc.syncStatus === 'dirty') && !doc.deleted) {
+    if (shouldPush) {
+      if ((wasEtag304 || hashDiffers || encryptionDiffers || doc.syncStatus === 'dirty') && !doc.deleted) {
         let uploadBody = doc.content;
         if (doc.encrypted) {
           if (!effectiveEncPassword) {
@@ -765,10 +808,106 @@ export async function runIncrementalWebDavSync(
     }
   }
 
+  // 5c. Ingest files placed inside Jianguoyun inbox/ into app's dynamic inbox folder
+  let inboxImportedCount = 0;
+  const inboxFilesToDelete: string[] = [];
+
+  if (inboxFiles.length > 0) {
+    let nextInboxOrder = Array.from(mergedDocsMap.values())
+      .filter((d) => !d.deleted && d.folderId === INBOX_FOLDER_ID)
+      .reduce((max, d) => Math.max(max, d.order), -1) + 1;
+
+    for (let i = 0; i < inboxFiles.length; i++) {
+      const inboxFile = inboxFiles[i];
+      requestCount++;
+      const getInboxRes = await callWebDav(config, 'GET', inboxFile.relPath);
+      if (getInboxRes.status === 401 || getInboxRes.status === 403) {
+        throw new Error(formatSyncHttpError('读取投递箱文件失败', getInboxRes));
+      }
+      if (!getInboxRes.ok || typeof getInboxRes.body !== 'string') {
+        continue;
+      }
+
+      const plainContent = getInboxRes.body.replace(/^\uFEFF/, '');
+      downloadBytes += getInboxRes.bytesTransferred || getByteSize(plainContent);
+
+      const isMd = /\.(md|markdown)$/i.test(inboxFile.name);
+      const format: 'txt' | 'md' = isMd ? 'md' : 'txt';
+      const rawTitle =
+        inboxFile.name.replace(/\.(txt|md|markdown|text)$/i, '').trim() || '导入文档';
+
+      const dupRes = await resolveDuplicateDocImport(
+        rawTitle,
+        plainContent,
+        Array.from(mergedDocsMap.values())
+      );
+
+      if (dupRes.action === 'skip') {
+        inboxFilesToDelete.push(inboxFile.relPath);
+        continue;
+      }
+
+      const now = Date.now() + i;
+      const newDoc: ArticleDoc = {
+        id: `doc_${now}_${Math.random().toString(36).slice(2, 6)}`,
+        title: dupRes.title,
+        folderId: INBOX_FOLDER_ID,
+        order: nextInboxOrder++,
+        content: plainContent,
+        contentHash: dupRes.contentHash,
+        excerpt: extractExcerpt(plainContent),
+        tags: [],
+        starred: false,
+        readProgress: 0,
+        lastReadAt: null,
+        lastMode: 'read',
+        lastScrollTop: 0,
+        format,
+        createdAt: now,
+        updatedAt: now,
+        syncStatus: 'synced',
+        highlights: [],
+        byteSize: getByteSize(plainContent),
+      };
+
+      requestCount++;
+      let putDocRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${newDoc.id}.${format}`, {
+        body: plainContent,
+      });
+      if (!putDocRes.ok && (putDocRes.status === 404 || putDocRes.status === 409)) {
+        if (!dirsEnsured) {
+          const ensured = await ensureRemoteDirectories(config);
+          requestCount += ensured.requests;
+          dirsEnsured = true;
+          requestCount++;
+          putDocRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${newDoc.id}.${format}`, {
+            body: plainContent,
+          });
+        }
+        if (!putDocRes.ok && (putDocRes.status === 404 || putDocRes.status === 409)) {
+          requestCount++;
+          putDocRes = await callWebDav(config, 'PUT', `${newDoc.id}.${format}`, {
+            body: plainContent,
+          });
+        }
+      }
+
+      if (!putDocRes.ok) {
+        throw new Error(formatSyncHttpError(`归档投递箱《${newDoc.title}》失败`, putDocRes));
+      }
+
+      uploadBytes += getByteSize(plainContent);
+      inboxImportedCount++;
+      mergedDocsMap.set(newDoc.id, newDoc);
+      needManifestPush = true;
+      inboxFilesToDelete.push(inboxFile.relPath);
+    }
+  }
+
   const finalDocs = Array.from(mergedDocsMap.values());
 
   // Step 6: Upload single updated _manifest.json containing all doc states, tree state & sync settings
-  if (needManifestPush || metaDirty || !remoteManifest) {
+  if (needManifestPush || metaDirty || (!remoteManifest && !wasEtag304)) {
     const nextManifest = buildLocalManifest(mergedFolders, finalDocs, mergedTreeState, mergedConfig);
     const manifestJson = JSON.stringify(nextManifest);
     requestCount++;
@@ -786,7 +925,14 @@ export async function runIncrementalWebDavSync(
     newEtag = putManifest.etag || newEtag;
   }
 
+  // Step 7: Delete processed inbox/ files on Jianguoyun ONLY AFTER docs/ and _manifest.json succeed
+  for (const relPath of inboxFilesToDelete) {
+    requestCount++;
+    await callWebDav(config, 'DELETE', relPath);
+  }
+
   const summaryParts: string[] = [];
+  if (inboxImportedCount > 0) summaryParts.push(`投递箱导入 ${inboxImportedCount} 篇`);
   if (pushedCount > 0) summaryParts.push(`上传 ${pushedCount} 篇`);
   if (pulledCount > 0) summaryParts.push(`拉取 ${pulledCount} 篇`);
   if (lazyQueuedCount > 0) summaryParts.push(`索引 ${lazyQueuedCount} 篇`);

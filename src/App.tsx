@@ -64,6 +64,11 @@ import {
   sha256Hex,
 } from './utils/textParser';
 import {
+  INBOX_FOLDER_ID,
+  isReservedInboxName,
+  resolveDuplicateDocImport,
+} from './utils/inbox';
+import {
   fetchRemoteDocBody,
   runIncrementalWebDavSync,
 } from './utils/webdavSync';
@@ -167,6 +172,8 @@ export default function App() {
   const treeViewRef = useRef<MinimalTreeViewHandle>(null);
   const syncLongPressTimerRef = useRef<number | null>(null);
   const syncLongPressedRef = useRef(false);
+  const docsRef = useRef<ArticleDoc[]>(docs);
+  docsRef.current = docs;
 
   const collapsedFolderSet = useMemo(() => new Set(collapsedFolderIds), [collapsedFolderIds]);
 
@@ -229,7 +236,7 @@ export default function App() {
       const now = Date.now();
       if (action.type === 'createFolder') {
         const name = action.name?.trim();
-        if (!name) return;
+        if (!name || isReservedInboxName(name)) return;
         setFolders((prev) => {
           if (prev.some((f) => f.id === action.id)) return prev;
           const maxOrder = prev.reduce((m, f) => Math.max(m, f.order), -1);
@@ -249,6 +256,7 @@ export default function App() {
       }
 
       if (action.type === 'createDoc') {
+        if (action.folderId === INBOX_FOLDER_ID) return;
         const content = action.content ?? '';
         const hash = await sha256Hex(content);
         setDocs((prev) => {
@@ -327,15 +335,21 @@ export default function App() {
         const created: ArticleDoc[] = [];
         for (let i = 0; i < action.items.length; i++) {
           const item = action.items[i];
+          if (item.folderId === INBOX_FOLDER_ID) continue;
           const content = item.content ?? '';
-          const hash = await sha256Hex(content);
+          const dupRes = await resolveDuplicateDocImport(
+            item.title?.trim() || '导入文档',
+            content,
+            [...docsRef.current, ...created]
+          );
+          if (dupRes.action === 'skip') continue;
           created.push({
             id: `doc_${now + i}_${Math.random().toString(36).slice(2, 6)}`,
-            title: item.title?.trim() || '导入文档',
+            title: dupRes.title,
             folderId: item.folderId ?? null,
             order: now + i,
             content,
-            contentHash: hash,
+            contentHash: dupRes.contentHash,
             excerpt: extractExcerpt(content),
             tags: [],
             starred: false,
@@ -351,7 +365,9 @@ export default function App() {
             byteSize: getByteSize(content),
           });
         }
-        setDocs((prev) => [...prev, ...created]);
+        if (created.length > 0) {
+          setDocs((prev) => [...prev, ...created]);
+        }
       }
     });
   }, [lanRunning, selectedDocId]);
@@ -376,11 +392,17 @@ export default function App() {
   );
 
   // Folder CRUD & Drag Reorder
-  const handleCreateFolder = (name: string): FolderNode => {
+  const handleCreateFolder = (name: string): FolderNode | null => {
+    const trimmed = name.trim();
+    if (!trimmed) return null;
+    if (isReservedInboxName(trimmed)) {
+      showToast('inbox 为云端投递箱保留名称');
+      return null;
+    }
     const maxOrder = folders.reduce((m, f) => Math.max(m, f.order), -1);
     const next: FolderNode = {
       id: `folder_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      name,
+      name: trimmed,
       parentId: null,
       order: maxOrder + 1,
       updatedAt: Date.now(),
@@ -391,8 +413,15 @@ export default function App() {
   };
 
   const handleRenameFolder = (folderId: string, name: string) => {
+    if (folderId === INBOX_FOLDER_ID) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (isReservedInboxName(trimmed)) {
+      showToast('inbox 为云端投递箱保留名称');
+      return;
+    }
     setFolders((prev) =>
-      prev.map((f) => (f.id === folderId ? { ...f, name, updatedAt: Date.now() } : f))
+      prev.map((f) => (f.id === folderId ? { ...f, name: trimmed, updatedAt: Date.now() } : f))
     );
     setFoldersDirty(true);
   };
@@ -432,7 +461,7 @@ export default function App() {
   };
 
   const handleCollapseAllFolders = () => {
-    setCollapsedFolderIds([...folders.map((f) => f.id), '__uncategorized__']);
+    setCollapsedFolderIds([...folders.map((f) => f.id), INBOX_FOLDER_ID, '__uncategorized__']);
     setTreeStateUpdatedAt(Date.now());
     setFoldersDirty(true);
   };
@@ -476,7 +505,13 @@ export default function App() {
     targetFolderId: string,
     position: 'before' | 'after'
   ) => {
-    if (sourceFolderId === targetFolderId) return;
+    if (
+      sourceFolderId === targetFolderId ||
+      sourceFolderId === INBOX_FOLDER_ID ||
+      targetFolderId === INBOX_FOLDER_ID
+    ) {
+      return;
+    }
     const now = Date.now();
     setFolders((prev) => {
       const sorted = [...prev].sort((a, b) => a.order - b.order);
@@ -506,6 +541,7 @@ export default function App() {
     targetDocId: string | null,
     position: InsertPosition
   ) => {
+    if (targetFolderId === INBOX_FOLDER_ID) return;
     const now = Date.now();
     setDocs((prev) => {
       const movingDoc = prev.find((d) => d.id === docId);
@@ -559,6 +595,10 @@ export default function App() {
   // Bottom Toolbar: Selection, Cut, Paste & Encrypt Handlers
   const handleSelectTreeTarget = (target: TreeSelection) => {
     if (pickCutMode) {
+      if (target.kind === 'folder' && target.id === INBOX_FOLDER_ID) {
+        showToast('inbox 目录不可剪切');
+        return;
+      }
       setCutItem(target);
       setActiveTarget(target);
       setPickCutMode(false);
@@ -652,6 +692,10 @@ export default function App() {
         return;
       }
       if (activeTarget) {
+        if (activeTarget.kind === 'folder' && activeTarget.id === INBOX_FOLDER_ID) {
+          showToast('inbox 目录不可剪切');
+          return;
+        }
         setCutItem(activeTarget);
       } else {
         setPickCutMode(true);
@@ -674,8 +718,8 @@ export default function App() {
         targetFolderId = targetDoc?.folderId ?? null;
       }
 
-      if (!targetFolderId) {
-        showToast('请点选一个目标目录以插入其下方');
+      if (!targetFolderId || targetFolderId === INBOX_FOLDER_ID) {
+        showToast('请点选一个常规目标目录以插入其下方');
         return;
       }
       if (targetFolderId === cutItem.id) {
@@ -695,10 +739,18 @@ export default function App() {
       }
       const targetDoc = docs.find((d) => d.id === activeTarget.id);
       if (!targetDoc) return;
+      if (targetDoc.folderId === INBOX_FOLDER_ID) {
+        showToast('不能将文档移入 inbox 目录');
+        return;
+      }
       handleMoveDocToPosition(cutItem.id, targetDoc.folderId, targetDoc.id, 'after');
       setActiveTarget(cutItem);
       setCutItem(null);
     } else {
+      if (activeTarget.id === INBOX_FOLDER_ID) {
+        showToast('不能将文档移入 inbox 目录');
+        return;
+      }
       handleMoveDocToPosition(cutItem.id, activeTarget.id, null, 'before');
       handleExpandFolder(activeTarget.id);
       setActiveTarget(cutItem);
@@ -708,8 +760,10 @@ export default function App() {
 
   // Document CRUD & View State Persistence
   const handleCreateDoc = async (targetFolderId?: string | null) => {
-    const folderId =
+    const requestedFolderId =
       targetFolderId !== undefined ? targetFolderId : folders[0]?.id ?? null;
+    const folderId =
+      requestedFolderId === INBOX_FOLDER_ID ? (folders[0]?.id ?? null) : requestedFolderId;
     const now = Date.now();
     const hash = await sha256Hex('');
     const siblings = docs.filter((d) => !d.deleted && d.folderId === folderId);
@@ -861,24 +915,31 @@ export default function App() {
     setIsEditing(nextEditing);
   };
 
-  // Batch Import .txt / .md / pasted text (defaults to .txt storage format)
+  // Batch Import .txt / .md / pasted text (defaults to .txt storage format, silently deduplicates)
   const handleImportDocs = async (
     items: Array<{ title: string; content: string; folderId: string | null; format?: 'txt' | 'md' }>
   ) => {
     const now = Date.now();
-    const maxOrder = docs.reduce((m, d) => Math.max(m, d.order), -1);
+    const maxOrder = docsRef.current.reduce((m, d) => Math.max(m, d.order), -1);
     const created: ArticleDoc[] = [];
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const hash = await sha256Hex(item.content);
+      if (item.folderId === INBOX_FOLDER_ID) continue;
+
+      const dupRes = await resolveDuplicateDocImport(item.title, item.content, [
+        ...docsRef.current,
+        ...created,
+      ]);
+      if (dupRes.action === 'skip') continue;
+
       created.push({
         id: `doc_${now + i}_${Math.random().toString(36).slice(2, 6)}`,
-        title: item.title,
+        title: dupRes.title,
         folderId: item.folderId,
-        order: maxOrder + 1 + i,
+        order: maxOrder + 1 + created.length,
         content: item.content,
-        contentHash: hash,
+        contentHash: dupRes.contentHash,
         excerpt: extractExcerpt(item.content),
         tags: [],
         starred: false,
@@ -895,7 +956,9 @@ export default function App() {
       });
     }
 
-    setDocs((prev) => [...prev, ...created]);
+    if (created.length > 0) {
+      setDocs((prev) => [...prev, ...created]);
+    }
   };
 
   // WebDAV Manual Sync
@@ -1101,6 +1164,19 @@ export default function App() {
     });
   };
 
+  const defaultImportFolderId = useMemo(() => {
+    const regularFolders = folders.filter((f) => f.id !== INBOX_FOLDER_ID);
+    const fallbackId = regularFolders[0]?.id ?? null;
+    if (activeTarget?.kind === 'folder') {
+      return activeTarget.id === INBOX_FOLDER_ID ? fallbackId : activeTarget.id;
+    }
+    if (activeTarget?.kind === 'doc') {
+      const docFolder = docs.find((d) => d.id === activeTarget.id)?.folderId ?? null;
+      if (docFolder && docFolder !== INBOX_FOLDER_ID) return docFolder;
+    }
+    return fallbackId;
+  }, [activeTarget, docs, folders]);
+
   const handleWindowDrop = async (e: React.DragEvent) => {
     if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
     e.preventDefault();
@@ -1109,23 +1185,14 @@ export default function App() {
       /\.(txt|md|markdown|text)$/i.test(f.name)
     );
     if (files.length === 0) return;
-    const defaultFolderId =
-      activeTarget?.kind === 'folder' ? activeTarget.id : folders[0]?.id ?? null;
     const parsed: Array<{ title: string; content: string; folderId: string | null }> = [];
     for (const file of files) {
       const content = await readTextFileSmart(file);
       const title = file.name.replace(/\.(txt|md|markdown|text)$/i, '').trim() || '导入文档';
-      parsed.push({ title, content, folderId: defaultFolderId });
+      parsed.push({ title, content, folderId: defaultImportFolderId });
     }
     await handleImportDocs(parsed);
   };
-
-  const defaultImportFolderId =
-    activeTarget?.kind === 'folder'
-      ? activeTarget.id
-      : activeTarget?.kind === 'doc'
-        ? docs.find((d) => d.id === activeTarget.id)?.folderId ?? folders[0]?.id ?? null
-        : folders[0]?.id ?? null;
 
   return (
     <div
@@ -1171,9 +1238,7 @@ export default function App() {
               setCutItem(null);
               setPickCutMode(false);
             }}
-            onCreateFolder={(name) => {
-              handleCreateFolder(name);
-            }}
+            onCreateFolder={handleCreateFolder}
             onRenameFolder={handleRenameFolder}
             onDeleteFolder={handleDeleteFolder}
             onCreateDocInFolder={(folderId) => handleCreateDoc(folderId)}
