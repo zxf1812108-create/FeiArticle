@@ -11,7 +11,7 @@ import { CloudDownload } from 'lucide-react';
 import { ArticleDoc } from '../types';
 import { BlockNode, formatBytes, parseDocumentBlocks } from '../utils/textParser';
 
-export type EditFormatKind = 'h1' | 'h2' | 'ul' | 'ol' | 'hr';
+export type EditFormatKind = 'h1' | 'h2' | 'ul' | 'hr';
 
 export interface MinimalDocViewHandle {
   prepareModeSwitch: (nextEditing: boolean) => void;
@@ -134,7 +134,10 @@ function createTextareaMirror(textarea: HTMLTextAreaElement): HTMLDivElement {
   mirror.style.fontWeight = style.fontWeight;
   mirror.style.lineHeight = style.lineHeight;
   mirror.style.letterSpacing = style.letterSpacing;
-  mirror.style.padding = style.padding;
+  mirror.style.paddingTop = style.paddingTop;
+  mirror.style.paddingRight = style.paddingRight;
+  mirror.style.paddingBottom = style.paddingBottom;
+  mirror.style.paddingLeft = style.paddingLeft;
   document.body.appendChild(mirror);
   return mirror;
 }
@@ -237,6 +240,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const [content, setContent] = useState(doc.content);
     const [fetching, setFetching] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
+    const [articleOverflow, setArticleOverflow] = useState(false);
 
     const titleRef = useRef(doc.title);
     const contentRef = useRef(content);
@@ -249,84 +253,108 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const pendingAnchorRef = useRef<PendingAnchor | null>(null);
     const restoredDocIdRef = useRef<string | null>(null);
 
-    // Sync local buffer when switching documents
+    // Sync local buffer only when switching documents
     useEffect(() => {
       setContent(doc.content);
       titleRef.current = doc.title;
       contentRef.current = doc.content;
       hasUnsavedDraftRef.current = false;
       setFetchError(null);
-    }, [doc.id, doc.title]);
+      setArticleOverflow(false);
+    }, [doc.id]);
 
-    // Sync content if remote body arrives lazily while document is open
+    // Sync content only when remote body arrives lazily in read mode
     useEffect(() => {
-      if (!hasUnsavedDraftRef.current && doc.content !== contentRef.current) {
+      if (!isEditing && !hasUnsavedDraftRef.current && doc.content !== contentRef.current) {
         setContent(doc.content);
         contentRef.current = doc.content;
       }
-    }, [doc.content]);
+    }, [doc.content, isEditing]);
 
-    // Auto-size textarea height to match full content so scrollRef is the single shared scroll container
-    const resizeTextarea = () => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      ta.style.height = 'auto';
-      ta.style.height = `${Math.max(360, ta.scrollHeight)}px`;
+    // Measure whether rendered Markdown overflows the reading viewport so short docs center vertically
+    const measureReadOverflow = () => {
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl) return false;
+      const needed = articleEl.offsetHeight + 48 > el.clientHeight;
+      if (needed !== articleOverflow) {
+        setArticleOverflow(needed);
+        return true;
+      }
+      return false;
     };
 
     useLayoutEffect(() => {
-      if (isEditing) {
-        resizeTextarea();
-      }
+      if (isEditing) return;
+      measureReadOverflow();
     }, [isEditing, content, doc.id]);
+
+    useEffect(() => {
+      if (isEditing) return;
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl || typeof ResizeObserver === 'undefined') return;
+      const ro = new ResizeObserver(() => {
+        const needed = articleEl.offsetHeight + 48 > el.clientHeight;
+        setArticleOverflow((prev) => (prev === needed ? prev : needed));
+      });
+      ro.observe(el);
+      ro.observe(articleEl);
+      return () => ro.disconnect();
+    }, [isEditing, doc.id]);
 
     // Restore saved scrollTop when opening a document
     useLayoutEffect(() => {
       if (restoredDocIdRef.current === doc.id) return;
+      if (!isEditing && measureReadOverflow()) return;
       restoredDocIdRef.current = doc.id;
-      const el = scrollRef.current;
-      if (!el) return;
-      if (isEditing) {
-        resizeTextarea();
-      }
-      el.scrollTop = doc.lastScrollTop ?? 0;
-    }, [doc.id, doc.lastScrollTop, isEditing]);
+      const targetEl = isEditing ? textareaRef.current : scrollRef.current;
+      if (!targetEl) return;
+      targetEl.scrollTop = doc.lastScrollTop ?? 0;
+    }, [doc.id, doc.lastScrollTop, isEditing, articleOverflow]);
 
     // Apply anchored scroll alignment right after Read <-> Edit mode toggle commits
     useLayoutEffect(() => {
       const anchor = pendingAnchorRef.current;
       if (!anchor) return;
+      if (!isEditing && measureReadOverflow()) return;
       pendingAnchorRef.current = null;
+
+      if (isEditing) {
+        const ta = textareaRef.current;
+        if (!ta) return;
+
+        if (anchor.kind === 'top') {
+          ta.scrollTop = 0;
+          onViewStateChange({ mode: 'edit', scrollTop: 0 });
+          return;
+        }
+
+        if (anchor.kind === 'to-edit') {
+          const measuredY = measureCharOffsetY(ta, contentRef.current, anchor.charIndex);
+          const targetTop = Math.max(0, Math.floor(measuredY) - 6);
+          ta.scrollTop = targetTop;
+          try {
+            ta.setSelectionRange(anchor.charIndex, anchor.charIndex);
+            ta.focus({ preventScroll: true });
+          } catch {
+            // ignore focus errors on mobile
+          }
+          onViewStateChange({ mode: 'edit', scrollTop: ta.scrollTop });
+        }
+        return;
+      }
 
       const el = scrollRef.current;
       if (!el) return;
 
       if (anchor.kind === 'top') {
         el.scrollTop = 0;
-        onViewStateChange({ mode: isEditing ? 'edit' : 'read', scrollTop: 0 });
+        onViewStateChange({ mode: 'read', scrollTop: 0 });
         return;
       }
 
-      if (isEditing && anchor.kind === 'to-edit') {
-        const ta = textareaRef.current;
-        if (!ta) return;
-        resizeTextarea();
-        const taTop =
-          ta.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
-        const measuredY = measureCharOffsetY(ta, contentRef.current, anchor.charIndex);
-        const targetTop = Math.max(0, Math.floor(taTop + measuredY) - 6);
-        el.scrollTop = targetTop;
-        try {
-          ta.setSelectionRange(anchor.charIndex, anchor.charIndex);
-          ta.focus({ preventScroll: true });
-        } catch {
-          // ignore focus errors on mobile
-        }
-        onViewStateChange({ mode: 'edit', scrollTop: el.scrollTop });
-        return;
-      }
-
-      if (!isEditing && anchor.kind === 'to-read') {
+      if (anchor.kind === 'to-read') {
         const articleEl = articleRef.current;
         if (!articleEl) return;
         const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
@@ -359,7 +387,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         el.scrollTop = targetTop;
         onViewStateChange({ mode: 'read', scrollTop: el.scrollTop });
       }
-    }, [isEditing]);
+    }, [isEditing, articleOverflow]);
 
     const flushDraftNow = () => {
       if (debounceSaveRef.current) {
@@ -384,25 +412,25 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     useImperativeHandle(ref, () => ({
       prepareModeSwitch(nextEditing: boolean) {
-        const el = scrollRef.current;
-        if (!el) return;
+        const activeScrollEl = isEditing ? textareaRef.current : scrollRef.current;
+        if (!activeScrollEl) return;
 
-        if (el.scrollTop <= 10) {
+        if (activeScrollEl.scrollTop <= 10) {
           flushDraftNow();
           pendingAnchorRef.current = { kind: 'top' };
           return;
         }
 
-        const maxScroll = Math.max(1, el.scrollHeight - el.clientHeight);
-        const fallbackRatio = Math.min(1, Math.max(0, el.scrollTop / maxScroll));
+        const maxScroll = Math.max(1, activeScrollEl.scrollHeight - activeScrollEl.clientHeight);
+        const fallbackRatio = Math.min(1, Math.max(0, activeScrollEl.scrollTop / maxScroll));
 
         if (nextEditing) {
           // Capturing from Read mode -> target Edit mode
           const articleEl = articleRef.current;
           let snippet = '';
           if (articleEl) {
-            const lines = collectVisualLines(el, articleEl);
-            const firstVisible = lines.find((line) => line.bottom > el.scrollTop + 4);
+            const lines = collectVisualLines(activeScrollEl, articleEl);
+            const firstVisible = lines.find((line) => line.bottom > activeScrollEl.scrollTop + 4);
             if (firstVisible) {
               snippet = firstVisible.text;
             }
@@ -416,9 +444,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           let snippet = '';
           let charRatio = fallbackRatio;
           if (ta) {
-            const taTop =
-              ta.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
-            const offsetInsideTa = Math.max(0, el.scrollTop - taTop);
+            const offsetInsideTa = Math.max(0, ta.scrollTop);
             const charIdx = findCharOffsetAtY(ta, contentRef.current, offsetInsideTa);
             charRatio = charIdx / Math.max(1, contentRef.current.length);
             const rest = contentRef.current.slice(charIdx);
@@ -430,15 +456,17 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       },
       flushAndCaptureViewState() {
         flushDraftNow();
+        const activeEl = isEditing ? textareaRef.current : scrollRef.current;
         return {
           mode: isEditing ? 'edit' : 'read',
-          scrollTop: scrollRef.current?.scrollTop ?? 0,
+          scrollTop: activeEl?.scrollTop ?? 0,
         };
       },
       applyMarkdownFormat(kind: EditFormatKind) {
         const ta = textareaRef.current;
         if (!ta) return;
 
+        const prevScrollTop = ta.scrollTop;
         const current = contentRef.current;
         const selStart = ta.selectionStart ?? current.length;
         const selEnd = ta.selectionEnd ?? selStart;
@@ -472,16 +500,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           const selectedBlock = current.slice(blockStart, blockEnd);
           const lines = selectedBlock.split('\n');
 
-          const targetPrefix =
-            kind === 'h1'
-              ? '# '
-              : kind === 'h2'
-                ? '## '
-                : kind === 'ul'
-                  ? '- '
-                  : '1. ';
+          const targetPrefix = kind === 'h1' ? '# ' : kind === 'h2' ? '## ' : '- ';
 
-          const transformed = lines.map((line, idx) => {
+          const transformed = lines.map((line) => {
             const stripMatch = line.match(/^(\s*)(#{1,6}\s+|[-*+]\s+|\d+\.\s+)/);
             const indent = stripMatch ? stripMatch[1] : '';
             const existingPrefix = stripMatch ? stripMatch[2] : '';
@@ -496,11 +517,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             if (kind === 'ul' && /^[-*+]\s+$/.test(existingPrefix)) {
               return indent + body;
             }
-            if (kind === 'ol' && /^\d+\.\s+$/.test(existingPrefix)) {
-              return indent + body;
-            }
-            const prefix = kind === 'ol' ? `${idx + 1}. ` : targetPrefix;
-            return `${indent}${prefix}${body}`;
+            return `${indent}${targetPrefix}${body}`;
           });
 
           const replacedBlock = transformed.join('\n');
@@ -523,13 +540,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         requestAnimationFrame(() => {
           const el = textareaRef.current;
           if (!el) return;
-          resizeTextarea();
           try {
             el.focus({ preventScroll: true });
             el.setSelectionRange(nextSelStart, nextSelEnd);
           } catch {
             // ignore focus errors on mobile
           }
+          el.scrollTop = prevScrollTop;
         });
       },
     }));
@@ -547,7 +564,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     const handleScroll = () => {
-      const el = scrollRef.current;
+      const el = isEditing ? textareaRef.current : scrollRef.current;
       if (!el) return;
       if (debounceScrollRef.current) window.clearTimeout(debounceScrollRef.current);
       debounceScrollRef.current = window.setTimeout(() => {
@@ -634,7 +651,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }
     };
 
-    const { blocks } = useMemo(() => parseDocumentBlocks(content), [content]);
+    const { blocks } = useMemo(
+      () => (isEditing ? { blocks: [] } : parseDocumentBlocks(content)),
+      [content, isEditing]
+    );
 
     const renderInline = (raw: string) => {
       const tokens: Array<{ type: 'text' | 'code' | 'bold' | 'italic'; value: string }> = [];
@@ -798,7 +818,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                         return (
                           <td
                             key={colIdx}
-                            className={`px-3 py-2 border-r last:border-r-0 border-[var(--fei-border)] align-top ${alignCls}`}
+                            className={`px-3 py-2 border-r last:border-r-0 border-[var(--fei-border)] align-middle ${alignCls}`}
                           >
                             {renderInline(cell)}
                           </td>
@@ -829,27 +849,32 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     return (
       <div className="w-full h-full flex flex-col bg-[var(--fei-bg)] pt-6">
-        <div
-          ref={scrollRef}
-          onClick={handleContainerClick}
-          onScroll={handleScroll}
-          className="flex-1 min-h-0 w-full overflow-y-auto"
-        >
-          <div className="max-w-[720px] mx-auto px-5 sm:px-8 pt-1 pb-[calc(100vh-110px)]">
-            {isEditing ? (
-              <div>
-                <textarea
-                  ref={textareaRef}
-                  value={content}
-                  onChange={(e) => {
-                    setContent(e.target.value);
-                    scheduleSave(titleRef.current, e.target.value);
-                  }}
-                  placeholder="开始输入正文…"
-                  className="w-full bg-transparent text-[16px] leading-[1.85] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none resize-none overflow-hidden"
-                />
-              </div>
-            ) : (
+        {isEditing ? (
+          <textarea
+            ref={textareaRef}
+            value={content}
+            onScroll={handleScroll}
+            onChange={(e) => {
+              const nextVal = e.target.value;
+              contentRef.current = nextVal;
+              setContent(nextVal);
+              scheduleSave(titleRef.current, nextVal);
+            }}
+            placeholder="开始输入正文…"
+            className="flex-1 min-h-0 w-full overflow-y-auto pt-1 pb-[40vh] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent text-[16px] leading-[1.85] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none resize-none"
+          />
+        ) : (
+          <div
+            ref={scrollRef}
+            onClick={handleContainerClick}
+            onScroll={handleScroll}
+            className="flex-1 min-h-0 w-full overflow-y-auto"
+          >
+            <div
+              className={`max-w-[720px] w-full mx-auto px-5 sm:px-8 min-h-full flex flex-col ${
+                articleOverflow ? 'pt-1 pb-[calc(100vh-110px)]' : 'py-6 justify-center'
+              }`}
+            >
               <article ref={articleRef}>
                 {doc.syncStatus === 'remote-only' && !content ? (
                   <div className="py-12 text-center space-y-3">
@@ -881,9 +906,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                   </div>
                 )}
               </article>
-            )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }

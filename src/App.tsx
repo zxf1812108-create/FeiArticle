@@ -7,7 +7,6 @@ import {
   Heading1,
   Heading2,
   List,
-  ListOrdered,
   Lock,
   Minus,
   Pencil,
@@ -1256,7 +1255,7 @@ export default function App() {
                 </button>
               </>
             ) : (
-              /* 文档模式：编辑态在对勾前提供 一级标题 / 二级标题 / 无序列表 / 有序列表 / 分割线；浏览态仅保留编辑图标 */
+              /* 文档模式：编辑态在对勾前提供 一级标题 / 二级标题 / 无序列表 / 分割线；浏览态仅保留编辑图标 */
               <div className="flex items-center gap-0.5 sm:gap-1">
                 {isEditing && (
                   <>
@@ -1265,7 +1264,6 @@ export default function App() {
                         { kind: 'h1', label: '一级标题', Icon: Heading1 },
                         { kind: 'h2', label: '二级标题', Icon: Heading2 },
                         { kind: 'ul', label: '无序列表', Icon: List },
-                        { kind: 'ol', label: '有序列表', Icon: ListOrdered },
                         { kind: 'hr', label: '分割线', Icon: Minus },
                       ] as Array<{
                         kind: EditFormatKind;
