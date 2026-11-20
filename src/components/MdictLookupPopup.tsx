@@ -1,6 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { MdictDictionarySummary, MdictLookupResult } from '../types';
+import { sanitizeMdictCss } from '../utils/mdict';
 
 interface MdictLookupPopupProps {
   queryWord: string;
@@ -15,190 +16,191 @@ interface MdictLookupPopupProps {
   onClose: () => void;
 }
 
-const SKIP_TAGS = new Set([
+const UNSAFE_TAGS = [
   'script',
-  'style',
-  'link',
   'iframe',
   'object',
   'embed',
-  'svg',
   'form',
   'input',
-  'button',
-  'select',
   'textarea',
+  'select',
   'meta',
-  'title',
-  'audio',
-  'video',
-  'source',
-  'img',
-]);
+  'base',
+  'link',
+];
 
-function renderSafeHtmlNode(
-  node: ChildNode,
-  key: string,
-  onLookupWord: (word: string) => void
-): React.ReactNode {
-  if (node.nodeType === Node.TEXT_NODE) {
-    return node.textContent;
-  }
-  if (node.nodeType !== Node.ELEMENT_NODE) {
-    return null;
+function sanitizeMdictEntryHtml(rawHtml: string): string {
+  if (typeof DOMParser === 'undefined') return '';
+  const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+
+  for (const tag of UNSAFE_TAGS) {
+    doc.querySelectorAll(tag).forEach((el) => el.remove());
   }
 
-  const el = node as HTMLElement;
-  const tag = el.tagName.toLowerCase();
-  if (SKIP_TAGS.has(tag)) return null;
+  // Strip external @import or unsafe expressions in inline <style> tags
+  doc.querySelectorAll('style').forEach((styleEl) => {
+    styleEl.textContent = sanitizeMdictCss(styleEl.textContent || '');
+  });
 
-  if (tag === 'br') {
-    return <br key={key} />;
-  }
-  if (tag === 'hr') {
-    return <hr key={key} className="my-2 border-t border-[var(--fei-border)]" />;
-  }
+  // Remove unresolvable local/mdd images so broken image placeholders never appear
+  doc.querySelectorAll('img').forEach((img) => {
+    const src = (img.getAttribute('src') || '').trim();
+    if (!src.startsWith('data:image/')) {
+      img.remove();
+    }
+  });
 
-  const children = Array.from(el.childNodes).map((child, idx) =>
-    renderSafeHtmlNode(child, `${key}_${idx}`, onLookupWord)
-  );
-
-  if (tag === 'a') {
-    const href = (el.getAttribute('href') || '').trim();
-    const entryMatch = href.match(/^(?:entry|bword):\/\/(.+)$/i);
-    if (entryMatch && entryMatch[1]) {
-      const targetWord = decodeURIComponent(entryMatch[1]).replace(/#.*$/, '').trim();
-      if (targetWord) {
-        return (
-          <button
-            key={key}
-            type="button"
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => onLookupWord(targetWord)}
-            className="underline decoration-[var(--fei-border-strong)] underline-offset-2 text-[var(--fei-text-primary)] hover:opacity-75 text-left inline"
-          >
-            {children}
-          </button>
-        );
+  // Remove inline event handlers and javascript: URLs
+  doc.querySelectorAll('*').forEach((el) => {
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      const val = attr.value.trim();
+      if (name.startsWith('on')) {
+        el.removeAttribute(attr.name);
+        continue;
+      }
+      if (
+        (name === 'href' || name === 'src' || name === 'xlink:href') &&
+        /^(?:javascript|vbscript):/i.test(val)
+      ) {
+        el.removeAttribute(attr.name);
+      }
+      if (name === 'style' && /expression\s*\(|javascript:/i.test(val)) {
+        el.removeAttribute(attr.name);
       }
     }
-    return <span key={key}>{children}</span>;
-  }
+  });
 
-  if (tag === 'b' || tag === 'strong' || tag === 'dt') {
-    return (
-      <strong key={key} className="font-semibold text-[var(--fei-text-primary)]">
-        {children}
-      </strong>
-    );
-  }
-  if (tag === 'i' || tag === 'em') {
-    return (
-      <em key={key} className="italic">
-        {children}
-      </em>
-    );
-  }
-  if (tag === 'u') {
-    return (
-      <span key={key} className="underline underline-offset-2">
-        {children}
-      </span>
-    );
-  }
-  if (tag === 'sup') {
-    return <sup key={key}>{children}</sup>;
-  }
-  if (tag === 'sub') {
-    return <sub key={key}>{children}</sub>;
-  }
-  if (tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4' || tag === 'h5' || tag === 'h6') {
-    return (
-      <div key={key} className="font-semibold text-[var(--fei-text-primary)] mt-1.5 mb-1">
-        {children}
-      </div>
-    );
-  }
-  if (tag === 'ul') {
-    return (
-      <ul key={key} className="list-disc pl-4 my-1 space-y-0.5">
-        {children}
-      </ul>
-    );
-  }
-  if (tag === 'ol') {
-    return (
-      <ol key={key} className="list-decimal pl-4 my-1 space-y-0.5">
-        {children}
-      </ol>
-    );
-  }
-  if (tag === 'li') {
-    return <li key={key}>{children}</li>;
-  }
-  if (tag === 'blockquote') {
-    return (
-      <div
-        key={key}
-        className="my-1.5 pl-2.5 border-l-2 border-[var(--fei-border-strong)] text-[var(--fei-text-muted)]"
-      >
-        {children}
-      </div>
-    );
-  }
-  if (tag === 'p' || tag === 'div' || tag === 'dd' || tag === 'dl') {
-    return (
-      <div key={key} className="my-1 first:mt-0 last:mb-0">
-        {children}
-      </div>
-    );
-  }
-  if (tag === 'table') {
-    return (
-      <table key={key} className="w-full border-collapse my-1.5 text-[12.5px]">
-        <tbody>{children}</tbody>
-      </table>
-    );
-  }
-  if (tag === 'tr') {
-    return (
-      <tr key={key} className="border-b border-[var(--fei-border)] last:border-b-0">
-        {children}
-      </tr>
-    );
-  }
-  if (tag === 'td' || tag === 'th') {
-    return (
-      <td key={key} className="py-1 pr-2 align-top">
-        {children}
-      </td>
-    );
-  }
-
-  return <span key={key}>{children}</span>;
+  return doc.body.innerHTML;
 }
 
-function SanitizedMdictHtml({
-  html,
-  onLookupWord,
-}: {
-  html: string;
+function escapeHtmlText(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+const MdictShadowDefinition: React.FC<{
+  htmlDefinitions: string[];
+  dictCssText?: string;
   onLookupWord: (word: string) => void;
-}) {
-  const nodes = useMemo(() => {
-    if (typeof DOMParser === 'undefined') return html;
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    return Array.from(doc.body.childNodes).map((node, idx) =>
-      renderSafeHtmlNode(node, `mdx_${idx}`, onLookupWord)
-    );
-  }, [html, onLookupWord]);
+}> = ({ htmlDefinitions, dictCssText, onLookupWord }) => {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const shadowRef = useRef<ShadowRoot | null>(null);
+  const onLookupWordRef = useRef(onLookupWord);
+  onLookupWordRef.current = onLookupWord;
 
-  return (
-    <div className="text-[13.5px] leading-[1.65] text-[var(--fei-text-primary)] break-words">
-      {nodes}
-    </div>
+  const [isDark, setIsDark] = useState(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
   );
-}
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const syncTheme = () => setIsDark(root.classList.contains('dark'));
+    syncTheme();
+    const obs = new MutationObserver(syncTheme);
+    obs.observe(root, { attributes: true, attributeFilter: ['class'] });
+    return () => obs.disconnect();
+  }, []);
+
+  const sanitizedEntries = useMemo(
+    () => htmlDefinitions.map((raw) => sanitizeMdictEntryHtml(raw)).filter(Boolean),
+    [htmlDefinitions]
+  );
+
+  const safeDictCss = useMemo(
+    () => (dictCssText ? sanitizeMdictCss(dictCssText) : ''),
+    [dictCssText]
+  );
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    if (!shadowRef.current) {
+      shadowRef.current = host.attachShadow({ mode: 'open' });
+      shadowRef.current.addEventListener('click', (evt) => {
+        const target = evt.target as HTMLElement | null;
+        const anchor = target?.closest('a[href]') as HTMLAnchorElement | null;
+        if (!anchor) return;
+        evt.preventDefault();
+        const href = (anchor.getAttribute('href') || '').trim();
+        const entryMatch = href.match(/^(?:entry|bword):\/\/(.+)$/i);
+        if (entryMatch && entryMatch[1]) {
+          const nextWord = decodeURIComponent(entryMatch[1]).replace(/#.*$/, '').trim();
+          if (nextWord) {
+            onLookupWordRef.current(nextWord);
+          }
+        }
+      });
+    }
+
+    const shadow = shadowRef.current;
+    const hasCustomCss = Boolean(safeDictCss.trim());
+    const baseStyle = `
+      :host {
+        display: block;
+        color: var(--fei-text-primary, #333333);
+        font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif);
+        font-size: 13.5px;
+        line-height: 1.65;
+        word-break: break-word;
+      }
+      *, *::before, *::after {
+        box-sizing: border-box;
+        max-width: 100%;
+      }
+      .mdx-entry + .mdx-entry {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--fei-border, #ececec);
+      }
+      p { margin: 0.3em 0; }
+      ul, ol { margin: 0.35em 0; padding-left: 1.35em; }
+      li { margin: 0.15em 0; }
+      a[href^="entry://"], a[href^="bword://"] {
+        color: inherit;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+        cursor: pointer;
+      }
+      a:not([href^="entry://"]):not([href^="bword://"]) {
+        color: inherit;
+        text-decoration: none;
+        cursor: default;
+      }
+      img { max-width: 100%; height: auto; }
+    `;
+
+    // Dark-mode contrast inversion for third-party light-mode MDict stylesheets
+    const darkAdaptStyle =
+      hasCustomCss && isDark
+        ? `
+          .mdx-surface {
+            background-color: #ffffff;
+            color: #222222;
+            padding: 4px 6px;
+            border-radius: 8px;
+            filter: invert(0.88) hue-rotate(180deg);
+          }
+          .mdx-surface img {
+            filter: invert(1) hue-rotate(180deg);
+          }
+        `
+        : '';
+
+    const entriesHtml = sanitizedEntries
+      .map((html) => `<div class="mdx-entry">${html}</div>`)
+      .join('');
+
+    shadow.innerHTML = `<style>${baseStyle}</style>${
+      hasCustomCss ? `<style>${escapeHtmlText(safeDictCss)}</style>` : ''
+    }${darkAdaptStyle ? `<style>${darkAdaptStyle}</style>` : ''}<div class="mdx-surface">${entriesHtml}</div>`;
+  }, [sanitizedEntries, safeDictCss, isDark]);
+
+  return <div ref={hostRef} />;
+};
 
 export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
   queryWord,
@@ -278,22 +280,17 @@ export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
         </div>
 
         {/* Scrollable Definition Body */}
-        <div className="flex-1 overflow-y-auto px-3.5 py-2.5 space-y-2.5">
+        <div className="flex-1 overflow-y-auto px-3.5 py-2.5">
           {loading ? (
             <div className="py-4 text-[12.5px] text-[var(--fei-text-muted)]">正在查词…</div>
           ) : error ? (
             <div className="py-3 text-[12.5px] text-[var(--fei-text-muted)]">{error}</div>
           ) : result && result.htmlDefinitions.length > 0 ? (
-            result.htmlDefinitions.map((html, idx) => (
-              <div
-                key={idx}
-                className={
-                  idx > 0 ? 'pt-2.5 border-t border-[var(--fei-border)]' : undefined
-                }
-              >
-                <SanitizedMdictHtml html={html} onLookupWord={onLookupWord} />
-              </div>
-            ))
+            <MdictShadowDefinition
+              htmlDefinitions={result.htmlDefinitions}
+              dictCssText={result.dictCssText}
+              onLookupWord={onLookupWord}
+            />
           ) : (
             <div className="py-3 text-[12.5px] text-[var(--fei-text-muted)]">
               当前词典中未收录「{queryWord}」

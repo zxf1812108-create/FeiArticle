@@ -177,6 +177,9 @@ export interface MdictDictionaryRecord {
   encrypt: number;
   isStripKey: boolean;
   isCaseSensitive: boolean;
+  styleSheet?: Record<string, { prefix: string; suffix: string }>;
+  cssText?: string;
+  cssFileName?: string;
   numEntries: number;
   fileSize: number;
   addedAt: number;
@@ -187,12 +190,13 @@ export interface MdictDictionaryRecord {
 
 export type MdictDictionarySummary = Pick<
   MdictDictionaryRecord,
-  'id' | 'fileName' | 'title' | 'description' | 'numEntries' | 'fileSize' | 'addedAt'
+  'id' | 'fileName' | 'title' | 'description' | 'numEntries' | 'fileSize' | 'addedAt' | 'cssFileName'
 >;
 
 export interface MdictLookupResult {
   dictId: string;
   dictTitle: string;
+  dictCssText?: string;
   queryWord: string;
   matchedHeadword: string;
   htmlDefinitions: string[];

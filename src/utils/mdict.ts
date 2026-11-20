@@ -312,11 +312,62 @@ function decodeText(bytes: Uint8Array, encoding: MdictEncoding): string {
 
 function unescapeXmlEntities(s: string): string {
   return s
+    .replace(/&#x0*a;/gi, '\n')
+    .replace(/&#x0*d;/gi, '\r')
+    .replace(/&#0*10;/g, '\n')
+    .replace(/&#0*13;/g, '\r')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&amp;/g, '&');
+}
+
+function parseStyleSheetMap(
+  raw?: string
+): Record<string, { prefix: string; suffix: string }> | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  const lines = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const map: Record<string, { prefix: string; suffix: string }> = {};
+  let hasAny = false;
+  for (let i = 0; i + 2 < lines.length; i += 3) {
+    const id = lines[i].trim();
+    if (!id) continue;
+    map[id] = { prefix: lines[i + 1], suffix: lines[i + 2] };
+    hasAny = true;
+  }
+  return hasAny ? map : undefined;
+}
+
+function expandStyleSheetTags(
+  rawHtml: string,
+  styleSheet?: Record<string, { prefix: string; suffix: string }>
+): string {
+  if (!styleSheet || !rawHtml.includes('`')) return rawHtml;
+  const parts = rawHtml.split(/`([^`\r\n]{1,16})`/);
+  if (parts.length <= 1) return rawHtml;
+  let out = parts[0];
+  let openSuffix = '';
+  for (let i = 1; i < parts.length; i += 2) {
+    const tagId = parts[i];
+    const body = parts[i + 1] ?? '';
+    const entry = styleSheet[tagId];
+    if (entry) {
+      out += openSuffix + entry.prefix + body;
+      openSuffix = entry.suffix;
+    } else {
+      out += '`' + tagId + '`' + body;
+    }
+  }
+  out += openSuffix;
+  return out;
+}
+
+export function sanitizeMdictCss(rawCss: string): string {
+  return rawCss
+    .replace(/@import\s+[^;]+;?/gi, '')
+    .replace(/expression\s*\([^)]*\)/gi, '')
+    .replace(/url\(\s*['"]?\s*(?:https?:|javascript:)[^)]*\)/gi, 'none');
 }
 
 function parseHeaderAttributes(xml: string): Record<string, string> {
@@ -406,6 +457,7 @@ export async function parseMdictIndexFromBlob(
   const encoding = normalizeEncoding(attrs.Encoding);
   const isStripKey = (attrs.StripKey || 'Yes').trim().toLowerCase() !== 'no';
   const isCaseSensitive = (attrs.KeyCaseSensitive || 'No').trim().toLowerCase() === 'yes';
+  const styleSheet = parseStyleSheetMap(attrs.StyleSheet);
   const fallbackTitle = fileName.replace(/\.mdx$/i, '') || '未命名词典';
   const title = stripHtmlTagsPlain(attrs.Title || '') || fallbackTitle;
   const description = stripHtmlTagsPlain(attrs.Description || '').slice(0, 240);
@@ -568,6 +620,7 @@ export async function parseMdictIndexFromBlob(
     encrypt,
     isStripKey,
     isCaseSensitive,
+    styleSheet,
     numEntries: numEntries || recEntriesRes.value,
     fileSize: blob.size,
     addedAt: Date.now(),
@@ -917,7 +970,7 @@ async function lookupExactWord(
         }
       }
     }
-    htmlDefinitions.push(rawDef);
+    htmlDefinitions.push(expandStyleSheetTags(rawDef, meta.styleSheet));
   }
 
   if (htmlDefinitions.length === 0) return null;
@@ -936,6 +989,7 @@ export async function lookupInMdictBlob(
       return {
         dictId: meta.id,
         dictTitle: meta.title,
+        dictCssText: meta.cssText,
         queryWord: rawQuery,
         matchedHeadword: res.matchedHeadword,
         htmlDefinitions: res.htmlDefinitions,

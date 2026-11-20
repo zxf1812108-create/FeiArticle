@@ -1,5 +1,5 @@
 import { MdictDictionaryRecord, MdictDictionarySummary, MdictLookupResult } from '../types';
-import { lookupInMdictBlob, parseMdictIndexFromBlob } from './mdict';
+import { lookupInMdictBlob, parseMdictIndexFromBlob, sanitizeMdictCss } from './mdict';
 
 const DB_NAME = 'feiartical_mdict_db';
 const DB_VERSION = 1;
@@ -38,6 +38,7 @@ function toSummary(rec: MdictDictionaryRecord): MdictDictionarySummary {
     numEntries: rec.numEntries,
     fileSize: rec.fileSize,
     addedAt: rec.addedAt,
+    cssFileName: rec.cssFileName,
   };
 }
 
@@ -100,6 +101,100 @@ export async function deleteMdictDictionary(id: string): Promise<void> {
     tx.onerror = () => {
       db.close();
       reject(tx.error || new Error('删除词典失败'));
+    };
+  });
+}
+
+async function decodeCssFileText(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '');
+  } catch {
+    return new TextDecoder('gb18030').decode(bytes);
+  }
+}
+
+export async function attachMdictCss(
+  dictId: string,
+  cssFile: File
+): Promise<MdictDictionarySummary> {
+  if (!cssFile.name.toLowerCase().endsWith('.css')) {
+    throw new Error(`文件「${cssFile.name}」不是 .css 样式文件`);
+  }
+  const rawCss = await decodeCssFileText(cssFile);
+  const cleanedCss = sanitizeMdictCss(rawCss);
+
+  const db = await openMdictDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_DICTS, 'readwrite');
+    const store = tx.objectStore(STORE_DICTS);
+    const getReq = store.get(dictId);
+    getReq.onsuccess = () => {
+      const rec = getReq.result as MdictDictionaryRecord | undefined;
+      if (!rec) {
+        reject(new Error('未找到对应的词典记录'));
+        return;
+      }
+      const updated: MdictDictionaryRecord = {
+        ...rec,
+        cssText: cleanedCss,
+        cssFileName: cssFile.name,
+      };
+      store.put(updated);
+      recordCache.set(dictId, updated);
+      tx.oncomplete = () => {
+        db.close();
+        resolve(toSummary(updated));
+      };
+    };
+    getReq.onerror = () => {
+      db.close();
+      reject(getReq.error || new Error('读取词典记录失败'));
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error('保存样式文件失败'));
+    };
+  });
+}
+
+export async function removeMdictCss(dictId: string): Promise<MdictDictionarySummary> {
+  const db = await openMdictDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_DICTS, 'readwrite');
+    const store = tx.objectStore(STORE_DICTS);
+    const getReq = store.get(dictId);
+    getReq.onsuccess = () => {
+      const rec = getReq.result as MdictDictionaryRecord | undefined;
+      if (!rec) {
+        reject(new Error('未找到对应的词典记录'));
+        return;
+      }
+      const updated: MdictDictionaryRecord = {
+        ...rec,
+        cssText: undefined,
+        cssFileName: undefined,
+      };
+      store.put(updated);
+      recordCache.set(dictId, updated);
+      tx.oncomplete = () => {
+        db.close();
+        resolve(toSummary(updated));
+      };
+    };
+    getReq.onerror = () => {
+      db.close();
+      reject(getReq.error || new Error('读取词典记录失败'));
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error('移除样式失败'));
     };
   });
 }

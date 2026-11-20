@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { BookA, Check, Trash2, Upload, X } from 'lucide-react';
+import { BookA, Check, FileCode2, Trash2, Upload, X } from 'lucide-react';
 import { MdictDictionarySummary } from '../types';
 import { formatBytes } from '../utils/textParser';
 
@@ -7,6 +7,8 @@ interface MdictDictModalProps {
   dictionaries: MdictDictionarySummary[];
   activeDictId: string | null;
   onImportFiles: (files: FileList) => Promise<void>;
+  onAttachCss: (dictId: string, file: File) => Promise<void>;
+  onRemoveCss: (dictId: string) => Promise<void>;
   onSelectDict: (id: string) => void;
   onDeleteDict: (id: string) => Promise<void>;
   onClose: () => void;
@@ -16,13 +18,18 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
   dictionaries,
   activeDictId,
   onImportFiles,
+  onAttachCss,
+  onRemoveCss,
   onSelectDict,
   onDeleteDict,
   onClose,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cssInputRef = useRef<HTMLInputElement>(null);
+  const pendingCssDictIdRef = useRef<string | null>(null);
+
   const [importing, setImporting] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [busyDictId, setBusyDictId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -37,6 +44,24 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
     } finally {
       setImporting(false);
       e.target.value = '';
+    }
+  };
+
+  const handleCssFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const targetId = pendingCssDictIdRef.current;
+    pendingCssDictIdRef.current = null;
+    e.target.value = '';
+    if (!file || !targetId) return;
+
+    setErrorMsg(null);
+    setBusyDictId(targetId);
+    try {
+      await onAttachCss(targetId, file);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : '导入样式文件失败');
+    } finally {
+      setBusyDictId(null);
     }
   };
 
@@ -56,7 +81,7 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
               词典
             </h2>
             <p className="text-[11.5px] text-[var(--fei-text-muted)] mt-0.5">
-              长按选中英文单词自动查词（仅本地离线保存）
+              支持导入 .mdx 词库及配套 .css 样式文件
             </p>
           </div>
 
@@ -66,6 +91,12 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
               type="file"
               multiple
               onChange={handleFileChange}
+              className="hidden"
+            />
+            <input
+              ref={cssInputRef}
+              type="file"
+              onChange={handleCssFileChange}
               className="hidden"
             />
             <button
@@ -107,18 +138,18 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
                 暂未导入词典
               </div>
               <p className="text-[12px] leading-relaxed text-[var(--fei-text-muted)] max-w-[270px]">
-                点击右上角「导入词库」选择本地 .mdx 词典文件，支持导入多本并随时切换。
+                点击右上角「导入词库」选择 .mdx 文件（可同时选中同名 .css 样式文件一起导入）。
               </p>
             </div>
           ) : (
             dictionaries.map((dict) => {
               const isActive = dict.id === activeDictId;
-              const isDeleting = deletingId === dict.id;
+              const isBusy = busyDictId === dict.id;
               return (
                 <div
                   key={dict.id}
                   onClick={() => onSelectDict(dict.id)}
-                  className={`group flex items-center gap-2.5 px-3 py-2.5 min-h-[48px] rounded-xl border cursor-pointer transition-colors ${
+                  className={`group flex items-center gap-2.5 px-3 py-2.5 min-h-[52px] rounded-xl border cursor-pointer transition-colors ${
                     isActive
                       ? 'bg-[var(--fei-bg-selected)] border-[var(--fei-border-strong)]'
                       : 'bg-transparent border-[var(--fei-border)] hover:bg-[var(--fei-bg-hover)]'
@@ -136,32 +167,77 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
                     <div className="text-[14px] font-medium text-[var(--fei-text-primary)] truncate">
                       {dict.title}
                     </div>
-                    <div className="text-[11.5px] text-[var(--fei-text-muted)] truncate mt-0.5">
-                      {dict.numEntries.toLocaleString()} 词条 · {formatBytes(dict.fileSize)}
+                    <div className="text-[11.5px] text-[var(--fei-text-muted)] flex items-center gap-1.5 mt-0.5 truncate">
+                      <span className="shrink-0">
+                        {dict.numEntries.toLocaleString()} 词条 · {formatBytes(dict.fileSize)}
+                      </span>
+                      {dict.cssFileName && (
+                        <>
+                          <span>·</span>
+                          <span className="truncate">样式：{dict.cssFileName}</span>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              setBusyDictId(dict.id);
+                              setErrorMsg(null);
+                              try {
+                                await onRemoveCss(dict.id);
+                              } catch (err) {
+                                setErrorMsg(err instanceof Error ? err.message : '移除样式失败');
+                              } finally {
+                                setBusyDictId(null);
+                              }
+                            }}
+                            className="shrink-0 underline underline-offset-2 hover:text-[var(--fei-text-primary)]"
+                          >
+                            清除
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    disabled={isDeleting}
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      setDeletingId(dict.id);
-                      setErrorMsg(null);
-                      try {
-                        await onDeleteDict(dict.id);
-                      } catch (err) {
-                        setErrorMsg(err instanceof Error ? err.message : '删除词典失败');
-                      } finally {
-                        setDeletingId(null);
-                      }
-                    }}
-                    title="移除词库"
-                    aria-label={`移除词库 ${dict.title}`}
-                    className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0 disabled:opacity-50"
-                  >
-                    <Trash2 className="w-4 h-4" strokeWidth={1.75} />
-                  </button>
+                  <div className="flex items-center gap-0.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        pendingCssDictIdRef.current = dict.id;
+                        cssInputRef.current?.click();
+                      }}
+                      title={dict.cssFileName ? `替换样式（${dict.cssFileName}）` : '导入配套 .css 样式'}
+                      aria-label={`为 ${dict.title} 导入样式`}
+                      className="h-8 px-2 inline-flex items-center gap-1 rounded-lg text-[11.5px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors disabled:opacity-50"
+                    >
+                      <FileCode2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                      <span>{dict.cssFileName ? '换样式' : '样式'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        setBusyDictId(dict.id);
+                        setErrorMsg(null);
+                        try {
+                          await onDeleteDict(dict.id);
+                        } catch (err) {
+                          setErrorMsg(err instanceof Error ? err.message : '删除词典失败');
+                        } finally {
+                          setBusyDictId(null);
+                        }
+                      }}
+                      title="移除词库"
+                      aria-label={`移除词库 ${dict.title}`}
+                      className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0 disabled:opacity-50"
+                    >
+                      <Trash2 className="w-4 h-4" strokeWidth={1.75} />
+                    </button>
+                  </div>
                 </div>
               );
             })

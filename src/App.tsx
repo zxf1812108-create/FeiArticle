@@ -46,10 +46,12 @@ import {
   WebDavConfig,
 } from './types';
 import {
+  attachMdictCss,
   deleteMdictDictionary,
   importMdictFile,
   listMdictDictionaries,
   lookupMdictWord,
+  removeMdictCss,
 } from './utils/mdictStorage';
 import {
   loadActiveMdictId,
@@ -1209,17 +1211,79 @@ export default function App() {
   };
 
   const handleImportMdictFiles = async (files: FileList) => {
-    const imported: MdictDictionarySummary[] = [];
+    const mdxFiles: File[] = [];
+    const cssFiles: File[] = [];
+
     for (let i = 0; i < files.length; i++) {
-      const summary = await importMdictFile(files[i]);
+      const f = files[i];
+      const lower = f.name.toLowerCase();
+      if (lower.endsWith('.mdx')) {
+        mdxFiles.push(f);
+      } else if (lower.endsWith('.css')) {
+        cssFiles.push(f);
+      } else {
+        throw new Error(`不支持的文件「${f.name}」，请选择 .mdx 词典或 .css 样式文件`);
+      }
+    }
+
+    const imported: MdictDictionarySummary[] = [];
+    for (const f of mdxFiles) {
+      const summary = await importMdictFile(f);
       imported.push(summary);
     }
+
+    let currentList = await listMdictDictionaries();
+    let nextActiveId = activeMdictId;
+    if (imported.length > 0 && (!nextActiveId || !currentList.some((d) => d.id === nextActiveId))) {
+      nextActiveId = imported[0].id;
+      setActiveMdictId(nextActiveId);
+      saveActiveMdictId(nextActiveId);
+    }
+
+    // Match each selected .css file to its corresponding .mdx dictionary
+    for (const cssFile of cssFiles) {
+      const cssBase = cssFile.name.replace(/\.css$/i, '').toLowerCase();
+      const matched =
+        imported.find((d) => d.fileName.replace(/\.mdx$/i, '').toLowerCase() === cssBase) ||
+        currentList.find((d) => d.fileName.replace(/\.mdx$/i, '').toLowerCase() === cssBase) ||
+        (imported.length === 1 ? imported[0] : null) ||
+        (currentList.length === 1 ? currentList[0] : null) ||
+        (mdxFiles.length === 0 && nextActiveId
+          ? currentList.find((d) => d.id === nextActiveId) || null
+          : null);
+
+      if (!matched) {
+        throw new Error(
+          `未找到与「${cssFile.name}」同名的词典，请点击对应词典右侧的「样式」按钮手动导入`
+        );
+      }
+      await attachMdictCss(matched.id, cssFile);
+    }
+
+    if (cssFiles.length > 0) {
+      currentList = await listMdictDictionaries();
+      if (mdictLookup) {
+        void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, nextActiveId);
+      }
+    }
+    setMdictDicts(currentList);
+  };
+
+  const handleAttachMdictCss = async (dictId: string, cssFile: File) => {
+    await attachMdictCss(dictId, cssFile);
     const updatedList = await listMdictDictionaries();
     setMdictDicts(updatedList);
-    if (imported.length > 0 && (!activeMdictId || !updatedList.some((d) => d.id === activeMdictId))) {
-      const nextId = imported[0].id;
-      setActiveMdictId(nextId);
-      saveActiveMdictId(nextId);
+    if (mdictLookup && (activeMdictId === dictId || mdictLookup.result?.dictId === dictId)) {
+      void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, dictId);
+    }
+  };
+
+  const handleRemoveMdictCss = async (dictId: string) => {
+    await removeMdictCss(dictId);
+    const updatedList = await listMdictDictionaries();
+    setMdictDicts(updatedList);
+    if (mdictLookup && (activeMdictId === dictId || mdictLookup.result?.dictId === dictId)) {
+      void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, dictId);
     }
   };
 
@@ -1865,6 +1929,8 @@ export default function App() {
           dictionaries={mdictDicts}
           activeDictId={activeMdictId}
           onImportFiles={handleImportMdictFiles}
+          onAttachCss={handleAttachMdictCss}
+          onRemoveCss={handleRemoveMdictCss}
           onSelectDict={(id) => {
             handleSelectActiveMdict(id);
             if (mdictLookup) {
