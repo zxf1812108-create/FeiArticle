@@ -59,8 +59,29 @@ if (!content.includes('com.squareup.okhttp3:okhttp')) {
 fs.writeFileSync(gradlePath, content, 'utf8');
 console.log(`Patched ${gradlePath}: versionName=${versionName}, versionCode=${versionCode}`);
 
-// Inject native OkHttp WebDavPlugin & register it in MainActivity when patching a real Capacitor android/ project
 const appDir = path.dirname(gradlePath);
+
+// Ensure required network permissions in AndroidManifest.xml (for WebDAV + LAN IP discovery)
+const manifestPath = path.join(appDir, 'src', 'main', 'AndroidManifest.xml');
+if (fs.existsSync(manifestPath)) {
+  let manifest = fs.readFileSync(manifestPath, 'utf8');
+  const perms = [
+    'android.permission.INTERNET',
+    'android.permission.ACCESS_NETWORK_STATE',
+    'android.permission.ACCESS_WIFI_STATE',
+  ];
+  for (const perm of perms) {
+    if (!manifest.includes(perm)) {
+      manifest = manifest.replace(
+        /<application\b/,
+        `<uses-permission android:name="${perm}" />\n    <application`
+      );
+    }
+  }
+  fs.writeFileSync(manifestPath, manifest, 'utf8');
+}
+
+// Inject native OkHttp WebDavPlugin, pure-Java LanServerPlugin & camera-cutout-safe MainActivity
 const javaPkgDir = path.join(appDir, 'src', 'main', 'java', 'com', 'feiartical', 'app');
 
 if (fs.existsSync(javaPkgDir)) {
@@ -163,21 +184,356 @@ public class WebDavPlugin extends Plugin {
 }
 `;
 
+  const lanServerPluginJava = `package com.feiartical.app;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+@CapacitorPlugin(name = "LanServerNative")
+public class LanServerPlugin extends Plugin {
+
+    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private volatile ServerSocket serverSocket;
+    private volatile boolean running = false;
+    private volatile int activePort = 8899;
+    private volatile String activeIp = "";
+    private volatile String pageHtml = "";
+    private volatile String stateJson = "{\\"folders\\":[],\\"docs\\":[]}";
+
+    @PluginMethod
+    public void start(PluginCall call) {
+        int preferredPort = call.getInt("port", 8899);
+        String html = call.getString("html", "");
+        String state = call.getString("stateJson", "{\\"folders\\":[],\\"docs\\":[]}");
+
+        this.pageHtml = html != null ? html : "";
+        this.stateJson = state != null ? state : "{\\"folders\\":[],\\"docs\\":[]}";
+
+        if (running && serverSocket != null && !serverSocket.isClosed()) {
+            JSObject res = new JSObject();
+            res.put("running", true);
+            res.put("ip", activeIp);
+            res.put("port", activePort);
+            res.put("url", "http://" + activeIp + ":" + activePort);
+            call.resolve(res);
+            return;
+        }
+
+        String ip = resolveLanIpv4();
+        if (ip == null || ip.isEmpty()) {
+            call.reject("未检测到局域网 Wi-Fi，请确认手机已连接 Wi-Fi");
+            return;
+        }
+
+        ServerSocket socket = null;
+        int boundPort = preferredPort;
+        for (int p = preferredPort; p <= preferredPort + 10; p++) {
+            try {
+                socket = new ServerSocket(p);
+                boundPort = p;
+                break;
+            } catch (IOException ignored) {
+            }
+        }
+
+        if (socket == null) {
+            call.reject("无法启动本地端口，请重试");
+            return;
+        }
+
+        this.serverSocket = socket;
+        this.activePort = boundPort;
+        this.activeIp = ip;
+        this.running = true;
+
+        final ServerSocket listening = socket;
+        executor.execute(() -> {
+            while (running && !listening.isClosed()) {
+                try {
+                    Socket client = listening.accept();
+                    executor.execute(() -> handleClient(client));
+                } catch (IOException e) {
+                    if (!running) break;
+                }
+            }
+        });
+
+        JSObject res = new JSObject();
+        res.put("running", true);
+        res.put("ip", activeIp);
+        res.put("port", activePort);
+        res.put("url", "http://" + activeIp + ":" + activePort);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void stop(PluginCall call) {
+        stopInternal();
+        JSObject res = new JSObject();
+        res.put("running", false);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void updateState(PluginCall call) {
+        String state = call.getString("stateJson");
+        if (state != null) {
+            this.stateJson = state;
+        }
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void getStatus(PluginCall call) {
+        JSObject res = new JSObject();
+        res.put("running", running);
+        res.put("ip", activeIp);
+        res.put("port", activePort);
+        res.put("url", running && !activeIp.isEmpty() ? ("http://" + activeIp + ":" + activePort) : "");
+        call.resolve(res);
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        stopInternal();
+        super.handleOnDestroy();
+    }
+
+    private void stopInternal() {
+        running = false;
+        ServerSocket s = serverSocket;
+        serverSocket = null;
+        if (s != null) {
+            try {
+                s.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    private void handleClient(Socket client) {
+        try (Socket sock = client) {
+            sock.setSoTimeout(15000);
+            InputStream in = new BufferedInputStream(sock.getInputStream());
+            OutputStream out = sock.getOutputStream();
+
+            String headerBlock = readHeaderBlock(in);
+            if (headerBlock == null || headerBlock.isEmpty()) return;
+
+            String[] lines = headerBlock.split("\\r\\n");
+            if (lines.length == 0) return;
+
+            String[] reqParts = lines[0].split(" ");
+            if (reqParts.length < 2) return;
+
+            String method = reqParts[0].toUpperCase(Locale.ROOT);
+            String fullPath = reqParts[1];
+            int qIdx = fullPath.indexOf('?');
+            String path = qIdx >= 0 ? fullPath.substring(0, qIdx) : fullPath;
+
+            int contentLength = 0;
+            for (int i = 1; i < lines.length; i++) {
+                int colon = lines[i].indexOf(':');
+                if (colon > 0) {
+                    String k = lines[i].substring(0, colon).trim().toLowerCase(Locale.ROOT);
+                    String v = lines[i].substring(colon + 1).trim();
+                    if ("content-length".equals(k)) {
+                        try {
+                            contentLength = Integer.parseInt(v);
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                }
+            }
+
+            String requestBody = "";
+            if (contentLength > 0 && contentLength <= 20 * 1024 * 1024) {
+                byte[] buf = readExactBytes(in, contentLength);
+                requestBody = new String(buf, StandardCharsets.UTF_8);
+            }
+
+            if ("OPTIONS".equals(method)) {
+                writeResponse(out, 204, "No Content", "text/plain; charset=utf-8", "");
+                return;
+            }
+
+            if ("GET".equals(method) && ("/".equals(path) || "/index.html".equals(path) || "/pc".equals(path))) {
+                writeResponse(out, 200, "OK", "text/html; charset=utf-8", pageHtml);
+                return;
+            }
+
+            if ("GET".equals(method) && "/api/state".equals(path)) {
+                writeResponse(out, 200, "OK", "application/json; charset=utf-8", stateJson);
+                return;
+            }
+
+            if ("POST".equals(method) && "/api/action".equals(path)) {
+                JSObject payload = new JSObject();
+                payload.put("actionJson", requestBody);
+                notifyListeners("lanAction", payload);
+                writeResponse(out, 200, "OK", "application/json; charset=utf-8", "{\\"ok\\":true}");
+                return;
+            }
+
+            writeResponse(out, 404, "Not Found", "text/plain; charset=utf-8", "Not Found");
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String readHeaderBlock(InputStream in) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int state = 0;
+        int b;
+        while ((b = in.read()) != -1) {
+            baos.write(b);
+            if (baos.size() > 65536) return null;
+            if (state == 0 && b == '\\r') state = 1;
+            else if (state == 1 && b == '\\n') state = 2;
+            else if (state == 2 && b == '\\r') state = 3;
+            else if (state == 3 && b == '\\n') break;
+            else state = (b == '\\r') ? 1 : 0;
+        }
+        return baos.toString(StandardCharsets.UTF_8.name());
+    }
+
+    private static byte[] readExactBytes(InputStream in, int length) throws IOException {
+        byte[] data = new byte[length];
+        int offset = 0;
+        while (offset < length) {
+            int n = in.read(data, offset, length - offset);
+            if (n < 0) break;
+            offset += n;
+        }
+        return data;
+    }
+
+    private static void writeResponse(OutputStream out, int code, String reason, String contentType, String body)
+        throws IOException {
+        byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+        String headers =
+            "HTTP/1.1 " + code + " " + reason + "\\r\\n" +
+            "Content-Type: " + contentType + "\\r\\n" +
+            "Content-Length: " + bodyBytes.length + "\\r\\n" +
+            "Access-Control-Allow-Origin: *\\r\\n" +
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS\\r\\n" +
+            "Access-Control-Allow-Headers: Content-Type\\r\\n" +
+            "Cache-Control: no-store\\r\\n" +
+            "Connection: close\\r\\n\\r\\n";
+        out.write(headers.getBytes(StandardCharsets.UTF_8));
+        if (bodyBytes.length > 0) {
+            out.write(bodyBytes);
+        }
+        out.flush();
+    }
+
+    private static String resolveLanIpv4() {
+        String fallback = null;
+        try {
+            Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
+            if (ifaces == null) return null;
+            for (NetworkInterface nif : Collections.list(ifaces)) {
+                if (!nif.isUp() || nif.isLoopback()) continue;
+                String name = nif.getName().toLowerCase(Locale.ROOT);
+                for (InetAddress addr : Collections.list(nif.getInetAddresses())) {
+                    if (addr.isLoopbackAddress() || !(addr instanceof Inet4Address)) continue;
+                    String ip = addr.getHostAddress();
+                    if (ip == null) continue;
+                    if (name.startsWith("wlan") || name.startsWith("eth") || name.startsWith("ap")) {
+                        return ip;
+                    }
+                    if (fallback == null) {
+                        fallback = ip;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return fallback;
+    }
+}
+`;
+
   const mainActivityJava = `package com.feiartical.app;
 
+import android.content.res.Configuration;
 import android.os.Bundle;
+import android.view.View;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(WebDavPlugin.class);
+        registerPlugin(LanServerPlugin.class);
         super.onCreate(savedInstanceState);
+        applySystemBarAndCutoutInsets();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applySystemBarAppearance(newConfig);
+    }
+
+    private void applySystemBarAndCutoutInsets() {
+        View content = findViewById(android.R.id.content);
+        if (content == null) return;
+        applySystemBarAppearance(getResources().getConfiguration());
+        ViewCompat.setOnApplyWindowInsetsListener(content, (v, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
+            );
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return WindowInsetsCompat.CONSUMED;
+        });
+        ViewCompat.requestApplyInsets(content);
+    }
+
+    private void applySystemBarAppearance(Configuration config) {
+        boolean isNight = (config.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        int bgColor = isNight ? 0xFF1A1A1A : 0xFFFFFFFF;
+        View content = findViewById(android.R.id.content);
+        if (content != null) {
+            content.setBackgroundColor(bgColor);
+        }
+        getWindow().getDecorView().setBackgroundColor(bgColor);
+        WindowInsetsControllerCompat controller = new WindowInsetsControllerCompat(
+            getWindow(),
+            getWindow().getDecorView()
+        );
+        controller.setAppearanceLightStatusBars(!isNight);
+        controller.setAppearanceLightNavigationBars(!isNight);
     }
 }
 `;
 
   fs.writeFileSync(path.join(javaPkgDir, 'WebDavPlugin.java'), webDavPluginJava, 'utf8');
+  fs.writeFileSync(path.join(javaPkgDir, 'LanServerPlugin.java'), lanServerPluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'MainActivity.java'), mainActivityJava, 'utf8');
-  console.log(`Installed native OkHttp WebDavPlugin into ${javaPkgDir}`);
+  console.log(`Installed native WebDavPlugin, LanServerPlugin & cutout-safe MainActivity into ${javaPkgDir}`);
 }

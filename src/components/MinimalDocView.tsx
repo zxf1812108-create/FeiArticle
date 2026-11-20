@@ -673,13 +673,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     return (
-      <div
-        ref={scrollRef}
-        onClick={handleContainerClick}
-        onScroll={handleScroll}
-        className="w-full h-full overflow-y-auto bg-[var(--fei-bg)]"
-      >
-        <div className="max-w-[720px] mx-auto px-5 sm:px-8 pt-8 pb-[calc(100vh-110px)]">
+      <div className="w-full h-full flex flex-col bg-[var(--fei-bg)] pt-6">
+        <div
+          ref={scrollRef}
+          onClick={handleContainerClick}
+          onScroll={handleScroll}
+          className="flex-1 min-h-0 w-full overflow-y-auto"
+        >
+          <div className="max-w-[720px] mx-auto px-5 sm:px-8 pt-1 pb-[calc(100vh-110px)]">
           {isEditing ? (
             <div className="space-y-5">
               <input
@@ -740,6 +741,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               )}
             </article>
           )}
+        </div>
         </div>
       </div>
     );

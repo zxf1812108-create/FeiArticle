@@ -1,4 +1,3 @@
-import { INITIAL_DOCUMENTS, INITIAL_FOLDERS } from '../data/sampleDocuments';
 import {
   ArticleDoc,
   FolderNode,
@@ -65,7 +64,7 @@ function safeParse<T>(raw: string | null, fallback: T): T {
 }
 
 export function loadFolders(): FolderNode[] {
-  const loaded = safeParse<FolderNode[]>(localStorage.getItem(KEYS.FOLDERS), INITIAL_FOLDERS);
+  const loaded = safeParse<FolderNode[]>(localStorage.getItem(KEYS.FOLDERS), []);
   return loaded.map((f, idx) => ({
     ...f,
     parentId: null,
@@ -78,7 +77,7 @@ export function saveFolders(folders: FolderNode[]): void {
 }
 
 export function loadDocs(): ArticleDoc[] {
-  return safeParse<ArticleDoc[]>(localStorage.getItem(KEYS.DOCS), INITIAL_DOCUMENTS);
+  return safeParse<ArticleDoc[]>(localStorage.getItem(KEYS.DOCS), []);
 }
 
 export function saveDocs(docs: ArticleDoc[]): void {

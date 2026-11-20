@@ -149,6 +149,68 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
+// LAN Direct Connect (电脑直连) preview server bridge
+let lanEnabled = false;
+let lanHtml = '';
+let lanStateJson = JSON.stringify({ folders: [], docs: [] });
+let lanPendingActions: unknown[] = [];
+
+app.post('/api/lan/start', (req, res) => {
+  const { html, stateJson } = req.body as { html?: string; stateJson?: string };
+  lanEnabled = true;
+  if (typeof html === 'string') lanHtml = html;
+  if (typeof stateJson === 'string') lanStateJson = stateJson;
+  lanPendingActions = [];
+  const host = req.get('host') || `localhost:${PORT}`;
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
+  res.json({ running: true, url: `${proto}://${host}/pc` });
+});
+
+app.post('/api/lan/stop', (_req, res) => {
+  lanEnabled = false;
+  lanPendingActions = [];
+  res.json({ running: false });
+});
+
+app.post('/api/lan/state', (req, res) => {
+  const { stateJson } = req.body as { stateJson?: string };
+  if (typeof stateJson === 'string') {
+    lanStateJson = stateJson;
+  }
+  res.json({ ok: true });
+});
+
+app.get('/api/lan/poll-actions', (_req, res) => {
+  const actions = lanPendingActions;
+  lanPendingActions = [];
+  res.json({ actions });
+});
+
+app.get('/pc', (_req, res) => {
+  if (!lanEnabled || !lanHtml) {
+    res.status(503).type('text/plain; charset=utf-8').send('电脑直连未开启，请在手机端同步设置中打开「电脑直连」。');
+    return;
+  }
+  res.type('text/html; charset=utf-8').send(lanHtml);
+});
+
+app.get('/api/state', (_req, res) => {
+  if (!lanEnabled) {
+    res.status(503).json({ error: '电脑直连未开启' });
+    return;
+  }
+  res.type('application/json; charset=utf-8').send(lanStateJson);
+});
+
+app.post('/api/action', (req, res) => {
+  if (!lanEnabled) {
+    res.status(503).json({ error: '电脑直连未开启' });
+    return;
+  }
+  lanPendingActions.push(req.body);
+  res.json({ ok: true });
+});
+
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
 

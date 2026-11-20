@@ -56,6 +56,13 @@ import {
   fetchRemoteDocBody,
   runIncrementalWebDavSync,
 } from './utils/webdavSync';
+import {
+  LanDirectAction,
+  pushLanDirectState,
+  startLanDirectServer,
+  stopLanDirectServer,
+  subscribeLanDirectActions,
+} from './utils/lanDirect';
 
 type MainView = 'tree' | 'doc';
 
@@ -114,6 +121,9 @@ export default function App() {
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [lanRunning, setLanRunning] = useState(false);
+  const [lanUrl, setLanUrl] = useState('');
+  const [lanLoading, setLanLoading] = useState(false);
   const [toast, setToast] = useState<{ msg: string } | null>(null);
   const [windowDragging, setWindowDragging] = useState(false);
 
@@ -161,6 +171,154 @@ export default function App() {
       }),
     [collapsedFolderIds, activeTarget, treeScrollTop, treeStateUpdatedAt]
   );
+
+  // Keep PC Direct Connect snapshot in sync while LAN server is active
+  useEffect(() => {
+    if (!lanRunning) return;
+    pushLanDirectState(folders, docs);
+  }, [lanRunning, folders, docs]);
+
+  // Stop LAN server on unmount
+  useEffect(() => {
+    return () => {
+      stopLanDirectServer();
+    };
+  }, []);
+
+  // Receive live edits / imports from PC browser while 电脑直连 is enabled
+  useEffect(() => {
+    if (!lanRunning) return;
+    return subscribeLanDirectActions(true, async (action: LanDirectAction) => {
+      const now = Date.now();
+      if (action.type === 'createFolder') {
+        const name = action.name?.trim();
+        if (!name) return;
+        setFolders((prev) => {
+          if (prev.some((f) => f.id === action.id)) return prev;
+          const maxOrder = prev.reduce((m, f) => Math.max(m, f.order), -1);
+          return [
+            ...prev,
+            {
+              id: action.id || `folder_${now}`,
+              name,
+              parentId: null,
+              order: maxOrder + 1,
+              updatedAt: now,
+            },
+          ];
+        });
+        setFoldersDirty(true);
+        return;
+      }
+
+      if (action.type === 'createDoc') {
+        const content = action.content ?? '';
+        const hash = await sha256Hex(content);
+        setDocs((prev) => {
+          if (prev.some((d) => d.id === action.id)) return prev;
+          const siblings = prev.filter((d) => !d.deleted && d.folderId === action.folderId);
+          const maxOrder = siblings.reduce((m, d) => Math.max(m, d.order), -1);
+          return [
+            ...prev,
+            {
+              id: action.id || `doc_${now}`,
+              title: action.title?.trim() || '无标题文档',
+              folderId: action.folderId ?? null,
+              order: maxOrder + 1,
+              content,
+              contentHash: hash,
+              excerpt: extractExcerpt(content),
+              tags: [],
+              starred: false,
+              readProgress: 0,
+              lastReadAt: null,
+              lastMode: 'read',
+              lastScrollTop: 0,
+              format: 'txt',
+              createdAt: now,
+              updatedAt: now,
+              syncStatus: 'dirty',
+              highlights: [],
+              byteSize: getByteSize(content),
+            },
+          ];
+        });
+        return;
+      }
+
+      if (action.type === 'saveDoc') {
+        const content = action.content ?? '';
+        const title = action.title?.trim() || '无标题文档';
+        const hash = await sha256Hex(content);
+        const byteSize = getByteSize(content);
+        const excerpt = extractExcerpt(content);
+        setDocs((prev) =>
+          prev.map((d) =>
+            d.id === action.docId
+              ? {
+                  ...d,
+                  title,
+                  content,
+                  contentHash: hash,
+                  byteSize,
+                  excerpt,
+                  updatedAt: now,
+                  syncStatus: 'dirty',
+                }
+              : d
+          )
+        );
+        return;
+      }
+
+      if (action.type === 'deleteDoc') {
+        setDocs((prev) =>
+          prev.map((d) =>
+            d.id === action.docId
+              ? { ...d, deleted: true, updatedAt: now, syncStatus: 'dirty' }
+              : d
+          )
+        );
+        if (selectedDocId === action.docId) {
+          setSelectedDocId(null);
+          setMainView('tree');
+        }
+        return;
+      }
+
+      if (action.type === 'importDocs' && Array.isArray(action.items) && action.items.length > 0) {
+        const created: ArticleDoc[] = [];
+        for (let i = 0; i < action.items.length; i++) {
+          const item = action.items[i];
+          const content = item.content ?? '';
+          const hash = await sha256Hex(content);
+          created.push({
+            id: `doc_${now + i}_${Math.random().toString(36).slice(2, 6)}`,
+            title: item.title?.trim() || '导入文档',
+            folderId: item.folderId ?? null,
+            order: now + i,
+            content,
+            contentHash: hash,
+            excerpt: extractExcerpt(content),
+            tags: [],
+            starred: false,
+            readProgress: 0,
+            lastReadAt: null,
+            lastMode: 'read',
+            lastScrollTop: 0,
+            format: 'txt',
+            createdAt: now + i,
+            updatedAt: now + i,
+            syncStatus: 'dirty',
+            highlights: [],
+            byteSize: getByteSize(content),
+          });
+        }
+        setDocs((prev) => [...prev, ...created]);
+        showToast(`电脑直连已导入 ${created.length} 篇文档`);
+      }
+    });
+  }, [lanRunning, selectedDocId]);
 
   const showToast = (msg: string) => {
     setToast({ msg });
@@ -720,6 +878,51 @@ export default function App() {
     showToast('同步设置已保存');
   };
 
+  const handleToggleLanDirect = async (next: boolean) => {
+    setLanLoading(true);
+    try {
+      if (next) {
+        const res = await startLanDirectServer(folders, docs);
+        setLanRunning(res.running);
+        setLanUrl(res.url);
+        if (res.running && res.url) {
+          showToast('电脑直连已开启');
+        }
+      } else {
+        await stopLanDirectServer();
+        setLanRunning(false);
+        setLanUrl('');
+        showToast('电脑直连已关闭');
+      }
+    } catch (err) {
+      setLanRunning(false);
+      setLanUrl('');
+      showToast(err instanceof Error ? err.message : '开启电脑直连失败');
+    } finally {
+      setLanLoading(false);
+    }
+  };
+
+  const handleCopyLanUrl = async (url: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = url;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      showToast('已复制直连地址');
+    } catch {
+      showToast('请长按地址手动复制');
+    }
+  };
+
   const handleRunLiveSync = async () => {
     setIsSyncing(true);
     try {
@@ -878,7 +1081,7 @@ export default function App() {
         if (e.currentTarget === e.target) setWindowDragging(false);
       }}
       onDrop={handleWindowDrop}
-      className="h-full w-full flex flex-col overflow-hidden bg-[var(--fei-bg)] text-[var(--fei-text-primary)]"
+      className="h-full w-full flex flex-col overflow-hidden bg-[var(--fei-bg)] text-[var(--fei-text-primary)] pt-[env(safe-area-inset-top,0px)]"
     >
       {/* Main Area (Above Bottom Toolbar) */}
       <main className="flex-1 min-h-0 overflow-hidden">
@@ -925,9 +1128,9 @@ export default function App() {
       {/* Bottom Toolbar */}
       <footer
         aria-label="底部工具栏"
-        className="h-[52px] shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)]"
+        className="shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)]"
       >
-        <div className="h-full max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-between">
+        <div className="h-[52px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-between">
           {/* Leftmost: Directory Tree Tab */}
           <button
             type="button"
@@ -1080,10 +1283,15 @@ export default function App() {
         />
       )}
 
-      {/* Two-Section Minimalist Sync & Encryption Settings Modal */}
+      {/* Sync Settings, PC Direct Connect & Encryption Modal */}
       {showSyncModal && (
         <SyncModal
           config={webDavConfig}
+          lanRunning={lanRunning}
+          lanUrl={lanUrl}
+          lanLoading={lanLoading}
+          onToggleLan={handleToggleLanDirect}
+          onCopyLanUrl={handleCopyLanUrl}
           onSaveConfig={handleSaveSyncConfig}
           onClose={() => setShowSyncModal(false)}
         />
