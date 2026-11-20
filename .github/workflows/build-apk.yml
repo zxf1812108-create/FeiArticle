@@ -32,7 +32,7 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Compute version (1.x this year, 2.1 next year, auto-increment x)
+      - name: Compute version (1.x this year, 2.1 next year)
         id: version
         run: |
           git fetch --tags --force
@@ -43,11 +43,7 @@ jobs:
             MAJOR=1
           fi
 
-          LAST_MINOR=$(git tag -l "v${MAJOR}.*" \
-            | sed -E "s/^v${MAJOR}\.([0-9]+)$/\1/" \
-            | grep -E '^[0-9]+$' \
-            | sort -n \
-            | tail -n 1 || true)
+          LAST_MINOR=$(git tag -l "v${MAJOR}.*" | sed -E "s/^v${MAJOR}\.([0-9]+)$/\1/" | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)
 
           if [ -z "$LAST_MINOR" ]; then
             MINOR=1
@@ -86,13 +82,11 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # Ensure internet permission in AndroidManifest.xml
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
             sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <application|' "$MANIFEST"
           fi
 
-          # Prepare Release Keystore (use repository Secrets if provided; otherwise generate a fallback signing key)
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
             echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
             echo "SIGNING_MODE=persistent" >> "$GITHUB_ENV"
@@ -112,47 +106,10 @@ jobs:
             echo "SIGNING_MODE=ephemeral" >> "$GITHUB_ENV"
           fi
 
-          # Write gradle.properties signing variables safely (never echoed)
-          cat <<EOF >> android/gradle.properties
+          printf "\nFEI_STORE_FILE=release.keystore\nFEI_STORE_PASSWORD=%s\nFEI_KEY_ALIAS=%s\nFEI_KEY_PASSWORD=%s\n" \
+            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" >> android/gradle.properties
 
-          FEI_STORE_FILE=release.keystore
-          FEI_STORE_PASSWORD=${KEYSTORE_PASSWORD}
-          FEI_KEY_ALIAS=${KEY_ALIAS}
-          FEI_KEY_PASSWORD=${KEY_PASSWORD}
-          EOF
-
-          # Patch android/app/build.gradle with computed versionCode, versionName, and release signingConfig
-          node -e '
-            const fs = require("fs");
-            const file = "android/app/build.gradle";
-            let content = fs.readFileSync(file, "utf8");
-            const versionCode = process.env.VERSION_CODE;
-            const versionName = process.env.VERSION_NAME;
-
-            content = content.replace(/versionCode\s+\d+/, `versionCode ${versionCode}`);
-            content = content.replace(/versionName\s+"[^"]*"/, `versionName "${versionName}"`);
-
-            const signingBlock = `
-    signingConfigs {
-        release {
-            storeFile file(project.findProperty("FEI_STORE_FILE"))
-            storePassword project.findProperty("FEI_STORE_PASSWORD")
-            keyAlias project.findProperty("FEI_KEY_ALIAS")
-            keyPassword project.findProperty("FEI_KEY_PASSWORD")
-        }
-    }
-    buildTypes {`;
-
-            if (!content.includes("signingConfigs")) {
-              content = content.replace(/buildTypes\s*\{/, signingBlock);
-            }
-            content = content.replace(
-              /release\s*\{/,
-              `release {\n            signingConfig signingConfigs.release`
-            );
-
-            fs.writeFileSync(file, content, "utf8");
-          '
+          node scripts/patch-android-gradle.mjs
 
       - name: Build signed Release APK
         run: |
@@ -160,13 +117,31 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
 
-      - name: Prepare APK artifact
+      - name: Prepare APK artifact and release notes
         env:
           VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
           mkdir -p release-output
-          cp android/app/build/outputs/apk/release/app-release.apk "release-output/FeiArtical-v${VERSION_NAME}-release.apk"
+          APK_FILE="release-output/FeiArtical-v${VERSION_NAME}-release.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "$APK_FILE"
           ls -lh release-output/
+
+          {
+            echo "### FeiArtical ${TAG_NAME} (Android Release APK)"
+            echo ""
+            echo "- **版本号**：\`${VERSION_NAME}\` (\`versionCode: ${VERSION_CODE}\`)"
+            echo "- **下载地址**：点击下方 \`FeiArtical-v${VERSION_NAME}-release.apk\` 直接下载安装。"
+            if [ -n "$RELEASE_NOTES" ]; then
+              echo "- **更新说明**：${RELEASE_NOTES}"
+            fi
+            if [ "${SIGNING_MODE}" = "ephemeral" ]; then
+              echo ""
+              echo "> 提示：本次使用自动生成的临时密钥签名；若希望后续版本直接覆盖升级，请在仓库 Settings → Secrets 中配置 \`ANDROID_KEYSTORE_BASE64\`、\`KEYSTORE_PASSWORD\`、\`KEY_ALIAS\`、\`KEY_PASSWORD\`。"
+            fi
+          } > release-output/release-notes.md
 
       - name: Upload Release APK Artifact
         uses: actions/upload-artifact@v4
@@ -179,11 +154,5 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag_name }}
           name: FeiArtical ${{ steps.version.outputs.tag_name }}
-          body: |
-            ### FeiArtical ${{ steps.version.outputs.tag_name }} (Android Release APK)
-
-            - **版本号**：`${{ steps.version.outputs.version_name }}` (`versionCode: ${{ steps.version.outputs.version_code }}`)
-            - **下载地址**：点击下方 `FeiArtical-v${{ steps.version.outputs.version_name }}-release.apk` 直接下载安装。
-            ${{ inputs.release_notes != '' && format('- **更新说明**：{0}', inputs.release_notes) || '' }}
-            ${{ env.SIGNING_MODE == 'ephemeral' && '> 提示：本次使用自动生成的临时密钥签名；若希望后续版本直接覆盖升级，请在仓库 Settings → Secrets 中配置 `ANDROID_KEYSTORE_BASE64`、`KEYSTORE_PASSWORD`、`KEY_ALIAS`、`KEY_PASSWORD`。' || '' }}
+          body_path: release-output/release-notes.md
           files: release-output/FeiArtical-v${{ steps.version.outputs.version_name }}-release.apk
