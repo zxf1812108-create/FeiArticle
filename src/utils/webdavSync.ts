@@ -3,6 +3,7 @@ import {
   ArticleDoc,
   FolderNode,
   ManifestDocEntry,
+  PurgedSyncRecords,
   QuotaStats,
   RemoteManifest,
   SyncedTreeState,
@@ -18,6 +19,7 @@ import {
   resolveDuplicateDocImport,
 } from './inbox';
 import { extractExcerpt, formatBytes, getByteSize, sha256Hex } from './textParser';
+import { isTrashExpired, purgeExpiredTrash } from './trash';
 
 interface ProxyResponse {
   ok: boolean;
@@ -424,6 +426,8 @@ export function buildLocalManifest(
       updatedAt: doc.updatedAt,
       createdAt: doc.createdAt,
       deleted: doc.deleted,
+      deletedAt: doc.deletedAt,
+      deletedByFolderId: doc.deletedByFolderId,
       byteSize: doc.byteSize,
     };
   }
@@ -474,8 +478,10 @@ export async function runIncrementalWebDavSync(
   localFolders: FolderNode[],
   localDocs: ArticleDoc[],
   localTreeState: SyncedTreeState,
-  metaDirty = false
+  metaDirty = false,
+  purgedRecords?: PurgedSyncRecords
 ): Promise<SyncOutcome> {
+  const syncNow = Date.now();
   const config: WebDavConfig = {
     ...rawConfig,
     baseUrl: normalizeWebDavBaseUrl(rawConfig.baseUrl),
@@ -552,7 +558,23 @@ export async function runIncrementalWebDavSync(
     inboxFiles = parseWebDavInboxXml(inboxPropRes.body, `${config.baseUrl}${INBOX_DIR}`);
   }
 
-  if (wasEtag304 && dirtyDocs.length === 0 && !metaDirty && inboxFiles.length === 0) {
+  const hasExpiredLocalTrash =
+    localFolders.some((f) => isTrashExpired(f, syncNow)) ||
+    localDocs.some((d) => isTrashExpired(d, syncNow));
+  const hasPendingPurges = Boolean(
+    purgedRecords &&
+      (Object.keys(purgedRecords.docs).length > 0 ||
+        Object.keys(purgedRecords.folders).length > 0)
+  );
+
+  if (
+    wasEtag304 &&
+    dirtyDocs.length === 0 &&
+    !metaDirty &&
+    inboxFiles.length === 0 &&
+    !hasExpiredLocalTrash &&
+    !hasPendingPurges
+  ) {
     return {
       folders: localFolders,
       docs: localDocs,
@@ -608,6 +630,11 @@ export async function runIncrementalWebDavSync(
   for (const f of localFolders) folderMap.set(f.id, f);
   if (remoteManifest?.folders) {
     for (const rf of remoteManifest.folders) {
+      const purgedAt = purgedRecords?.folders?.[rf.id];
+      if ((purgedAt && purgedAt >= rf.updatedAt) || isTrashExpired(rf, syncNow)) {
+        needManifestPush = true;
+        continue;
+      }
       const lf = folderMap.get(rf.id);
       if (!lf || rf.updatedAt > lf.updatedAt) {
         folderMap.set(rf.id, { ...rf, parentId: null });
@@ -700,8 +727,15 @@ export async function runIncrementalWebDavSync(
   }
 
   // 5b. Pull newer remote documents (or sync metadata + decrypt encrypted payloads)
+  const remotePurgedDocsToDelete: Array<{ id: string; format: 'txt' | 'md' }> = [];
   if (remoteManifest?.docs) {
     for (const [id, rEntry] of Object.entries(remoteManifest.docs)) {
+      const purgedAt = purgedRecords?.docs?.[id];
+      if ((purgedAt && purgedAt >= rEntry.updatedAt) || isTrashExpired(rEntry, syncNow)) {
+        remotePurgedDocsToDelete.push({ id, format: rEntry.format === 'md' ? 'md' : 'txt' });
+        needManifestPush = true;
+        continue;
+      }
       const localDoc = mergedDocsMap.get(id);
       if (!localDoc || rEntry.updatedAt > localDoc.updatedAt) {
         const hashMatchesLocal = localDoc && localDoc.contentHash === rEntry.contentHash;
@@ -730,6 +764,8 @@ export async function runIncrementalWebDavSync(
             createdAt: rEntry.createdAt,
             updatedAt: rEntry.updatedAt,
             deleted: rEntry.deleted,
+            deletedAt: rEntry.deletedAt,
+            deletedByFolderId: rEntry.deletedByFolderId,
             byteSize: rEntry.byteSize,
             syncStatus: 'synced',
           });
@@ -754,6 +790,8 @@ export async function runIncrementalWebDavSync(
             createdAt: rEntry.createdAt,
             updatedAt: rEntry.updatedAt,
             deleted: rEntry.deleted,
+            deletedAt: rEntry.deletedAt,
+            deletedByFolderId: rEntry.deletedByFolderId,
             highlights: localDoc?.highlights || [],
             byteSize: rEntry.byteSize,
             syncStatus: 'remote-only',
@@ -798,6 +836,8 @@ export async function runIncrementalWebDavSync(
               createdAt: rEntry.createdAt,
               updatedAt: rEntry.updatedAt,
               deleted: rEntry.deleted,
+              deletedAt: rEntry.deletedAt,
+              deletedByFolderId: rEntry.deletedByFolderId,
               highlights: localDoc?.highlights || [],
               byteSize: getByteSize(plainContent),
               syncStatus: 'synced',
@@ -904,11 +944,29 @@ export async function runIncrementalWebDavSync(
     }
   }
 
-  const finalDocs = Array.from(mergedDocsMap.values());
+  const purgedMerge = purgeExpiredTrash(
+    mergedFolders,
+    Array.from(mergedDocsMap.values()),
+    syncNow
+  );
+  const finalFolders = purgedMerge.folders;
+  const finalDocs = purgedMerge.docs;
+  if (purgedMerge.changed || hasPendingPurges) {
+    needManifestPush = true;
+    for (const d of purgedMerge.expiredDocs) {
+      remotePurgedDocsToDelete.push({ id: d.id, format: d.format === 'md' ? 'md' : 'txt' });
+    }
+    if (purgedRecords?.docs) {
+      for (const purgedId of Object.keys(purgedRecords.docs)) {
+        const fmt = purgedRecords.docFormats?.[purgedId] ?? 'txt';
+        remotePurgedDocsToDelete.push({ id: purgedId, format: fmt });
+      }
+    }
+  }
 
   // Step 6: Upload single updated _manifest.json containing all doc states, tree state & sync settings
   if (needManifestPush || metaDirty || (!remoteManifest && !wasEtag304)) {
-    const nextManifest = buildLocalManifest(mergedFolders, finalDocs, mergedTreeState, mergedConfig);
+    const nextManifest = buildLocalManifest(finalFolders, finalDocs, mergedTreeState, mergedConfig);
     const manifestJson = JSON.stringify(nextManifest);
     requestCount++;
     let putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
@@ -925,10 +983,26 @@ export async function runIncrementalWebDavSync(
     newEtag = putManifest.etag || newEtag;
   }
 
-  // Step 7: Delete processed inbox/ files on Jianguoyun ONLY AFTER docs/ and _manifest.json succeed
+  // Step 7: Delete processed inbox/ files & permanently purged remote doc files ONLY AFTER _manifest.json succeeds
   for (const relPath of inboxFilesToDelete) {
     requestCount++;
     await callWebDav(config, 'DELETE', relPath);
+  }
+  const seenPurgeIds = new Set<string>();
+  for (const item of remotePurgedDocsToDelete) {
+    if (seenPurgeIds.has(item.id)) continue;
+    seenPurgeIds.add(item.id);
+    requestCount++;
+    const delRes = await callWebDav(config, 'DELETE', `${DOCS_DIR}${item.id}.${item.format}`);
+    if (delRes.status === 404) {
+      const altFormat = item.format === 'txt' ? 'md' : 'txt';
+      requestCount++;
+      const altRes = await callWebDav(config, 'DELETE', `${DOCS_DIR}${item.id}.${altFormat}`);
+      if (altRes.status === 404) {
+        requestCount++;
+        await callWebDav(config, 'DELETE', `${item.id}.${item.format}`);
+      }
+    }
   }
 
   const summaryParts: string[] = [];
@@ -942,7 +1016,7 @@ export async function runIncrementalWebDavSync(
       : '同步完成';
 
   return {
-    folders: mergedFolders,
+    folders: finalFolders,
     docs: finalDocs,
     treeState: mergedTreeState,
     config: {

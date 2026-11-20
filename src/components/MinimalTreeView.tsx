@@ -56,9 +56,12 @@ interface MinimalTreeViewProps {
     targetDocId: string | null,
     position: InsertPosition
   ) => void;
+  onDragPayloadChange?: (payload: DragPayload | null) => void;
+  onTrashDrop?: (payload: DragPayload) => void;
+  onTrashDragHoverChange?: (hovering: boolean) => void;
 }
 
-type DragPayload =
+export type DragPayload =
   | { kind: 'folder'; id: string }
   | { kind: 'doc'; id: string };
 
@@ -84,12 +87,23 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
       onCreateDocInFolder,
       onMoveFolderToPosition,
       onMoveDocToPosition,
+      onDragPayloadChange,
+      onTrashDrop,
+      onTrashDragHoverChange,
     },
     ref
   ) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const debounceScrollRef = useRef<number | null>(null);
   const restoredScrollRef = useRef(false);
+  const touchHoldTimerRef = useRef<number | null>(null);
+  const touchStartRef = useRef<{
+    payload: DragPayload;
+    label: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
 
   const [addingFolder, setAddingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -141,9 +155,63 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     position: InsertPosition;
   } | null>(null);
 
+  const [touchDrag, setTouchDrag] = useState<{
+    payload: DragPayload;
+    label: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  React.useEffect(() => {
+    if (!touchDrag) return;
+
+    const checkOverTrash = (x: number, y: number): boolean => {
+      const el = document.elementFromPoint(x, y);
+      return Boolean(el?.closest('[data-trash-dropzone="true"]'));
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      const t = e.touches[0];
+      if (!t) return;
+      e.preventDefault();
+      setTouchDrag((prev) => (prev ? { ...prev, x: t.clientX, y: t.clientY } : null));
+      onTrashDragHoverChange?.(checkOverTrash(t.clientX, t.clientY));
+    };
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      const t = e.changedTouches[0];
+      const overTrash = t ? checkOverTrash(t.clientX, t.clientY) : false;
+      onTrashDragHoverChange?.(false);
+      setTouchDrag(null);
+      onDragPayloadChange?.(null);
+      if (overTrash) {
+        onTrashDrop?.(touchDrag.payload);
+      }
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 150);
+    };
+
+    const handleTouchCancel = () => {
+      onTrashDragHoverChange?.(false);
+      setTouchDrag(null);
+      onDragPayloadChange?.(null);
+      suppressClickRef.current = false;
+    };
+
+    window.addEventListener('touchmove', handleTouchMove, { passive: false });
+    window.addEventListener('touchend', handleTouchEnd);
+    window.addEventListener('touchcancel', handleTouchCancel);
+    return () => {
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleTouchEnd);
+      window.removeEventListener('touchcancel', handleTouchCancel);
+    };
+  }, [touchDrag, onTrashDrop, onTrashDragHoverChange, onDragPayloadChange]);
+
   const liveDocs = useMemo(() => docs.filter((d) => !d.deleted), [docs]);
   const sortedFolders = useMemo(
-    () => [...folders].sort((a, b) => a.order - b.order),
+    () => [...folders].filter((f) => !f.deleted).sort((a, b) => a.order - b.order),
     [folders]
   );
 
@@ -191,12 +259,62 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     setDragging(null);
     setFolderDrop(null);
     setDocDrop(null);
+    onDragPayloadChange?.(null);
+    onTrashDragHoverChange?.(false);
+  };
+
+  const cancelTouchHold = () => {
+    if (touchHoldTimerRef.current) {
+      window.clearTimeout(touchHoldTimerRef.current);
+      touchHoldTimerRef.current = null;
+    }
+    touchStartRef.current = null;
+  };
+
+  const handleRowTouchStart = (
+    e: React.TouchEvent,
+    payload: DragPayload,
+    label: string
+  ) => {
+    if (e.touches.length !== 1) {
+      cancelTouchHold();
+      return;
+    }
+    const t = e.touches[0];
+    touchStartRef.current = { payload, label, x: t.clientX, y: t.clientY };
+    if (touchHoldTimerRef.current) {
+      window.clearTimeout(touchHoldTimerRef.current);
+    }
+    touchHoldTimerRef.current = window.setTimeout(() => {
+      if (!touchStartRef.current) return;
+      suppressClickRef.current = true;
+      setTouchDrag(touchStartRef.current);
+      onDragPayloadChange?.(touchStartRef.current.payload);
+      try {
+        navigator.vibrate?.(12);
+      } catch {
+        // ignore
+      }
+      touchHoldTimerRef.current = null;
+    }, 320);
+  };
+
+  const handleRowTouchMove = (e: React.TouchEvent) => {
+    if (!touchHoldTimerRef.current || !touchStartRef.current) return;
+    const t = e.touches[0];
+    if (!t) return;
+    const dx = t.clientX - touchStartRef.current.x;
+    const dy = t.clientY - touchStartRef.current.y;
+    if (Math.hypot(dx, dy) > 8) {
+      cancelTouchHold();
+    }
   };
 
   // Folder Drag Handlers
   const handleFolderDragStart = (e: React.DragEvent, folderId: string) => {
     const payload: DragPayload = { kind: 'folder', id: folderId };
     setDragging(payload);
+    onDragPayloadChange?.(payload);
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('application/x-feiartical', JSON.stringify(payload));
   };
@@ -256,6 +374,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
   const handleDocDragStart = (e: React.DragEvent, docId: string) => {
     const payload: DragPayload = { kind: 'doc', id: docId };
     setDragging(payload);
+    onDragPayloadChange?.(payload);
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('application/x-feiartical', JSON.stringify(payload));
   };
@@ -316,6 +435,9 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     const isDropBefore = docDrop?.docId === doc.id && docDrop.position === 'before';
     const isDropAfter = docDrop?.docId === doc.id && docDrop.position === 'after';
 
+    const isTouchDragging =
+      touchDrag?.payload.kind === 'doc' && touchDrag.payload.id === doc.id;
+
     return (
       <div
         key={doc.id}
@@ -324,8 +446,18 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
         onDragEnd={clearDragState}
         onDragOver={(e) => handleDocDragOver(e, folderId, doc.id)}
         onDrop={(e) => handleDocDrop(e, folderId, doc.id)}
+        onTouchStart={(e) =>
+          handleRowTouchStart(
+            e,
+            { kind: 'doc', id: doc.id },
+            doc.title || '无标题文档'
+          )
+        }
+        onTouchMove={handleRowTouchMove}
+        onTouchEnd={cancelTouchHold}
+        onTouchCancel={cancelTouchHold}
         className={`relative group flex items-center gap-1.5 pl-9 pr-2 min-h-[44px] rounded-lg transition-colors duration-150 ${
-          isDragging ? 'opacity-35' : ''
+          isDragging || isTouchDragging ? 'opacity-35' : ''
         } ${
           isCut
             ? 'opacity-45 border border-dashed border-[var(--fei-text-muted)]'
@@ -344,6 +476,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
         <button
           type="button"
           onClick={() => {
+            if (suppressClickRef.current) return;
             if (pickCutMode || cutItem) {
               onSelectTarget({ kind: 'doc', id: doc.id });
               return;
@@ -461,6 +594,9 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           const isDocDropIntoFolder =
             docDrop?.folderId === folder.id && docDrop.docId === null;
 
+          const isTouchDraggingFolder =
+            touchDrag?.payload.kind === 'folder' && touchDrag.payload.id === folder.id;
+
           return (
             <div key={folder.id} className="relative space-y-0.5">
               {isFolderDropBefore && (
@@ -474,8 +610,15 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                 onDragEnd={clearDragState}
                 onDragOver={(e) => handleFolderDragOver(e, folder.id)}
                 onDrop={(e) => handleFolderDrop(e, folder.id)}
+                onTouchStart={(e) => {
+                  if (editingFolderId === folder.id) return;
+                  handleRowTouchStart(e, { kind: 'folder', id: folder.id }, folder.name);
+                }}
+                onTouchMove={handleRowTouchMove}
+                onTouchEnd={cancelTouchHold}
+                onTouchCancel={cancelTouchHold}
                 className={`group flex items-center gap-1.5 px-2 min-h-[44px] rounded-lg transition-colors duration-150 ${
-                  isDragging ? 'opacity-35' : ''
+                  isDragging || isTouchDraggingFolder ? 'opacity-35' : ''
                 } ${
                   isCut
                     ? 'opacity-45 border border-dashed border-[var(--fei-text-muted)]'
@@ -516,6 +659,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                   <button
                     type="button"
                     onClick={() => {
+                      if (suppressClickRef.current) return;
                       if (pickCutMode || cutItem) {
                         onSelectTarget({ kind: 'folder', id: folder.id });
                         return;
@@ -662,6 +806,15 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           )}
         </div>
       </div>
+
+      {touchDrag && (
+        <div
+          style={{ left: touchDrag.x, top: touchDrag.y }}
+          className="fixed -translate-x-1/2 -translate-y-full -mt-4 pointer-events-none z-50 max-w-[220px] px-3 py-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] shadow-lg truncate"
+        >
+          {touchDrag.payload.kind === 'folder' ? `目录：${touchDrag.label}` : touchDrag.label}
+        </div>
+      )}
     </div>
   );
 });

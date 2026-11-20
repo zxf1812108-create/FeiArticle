@@ -1,6 +1,7 @@
 import {
   ArticleDoc,
   FolderNode,
+  PurgedSyncRecords,
   QuotaStats,
   ReaderSettings,
   SyncLogEntry,
@@ -20,6 +21,7 @@ const KEYS = {
   TREE_STATE: 'feiartical_tree_state_v1',
   STORAGE_DIR: 'feiartical_storage_dir_v1',
   LAST_DOC_ID: 'feiartical_last_doc_id_v1',
+  PURGED_RECORDS: 'feiartical_purged_records_v1',
 };
 
 export interface StorageDirectoryConfig {
@@ -201,4 +203,21 @@ export function saveLastOpenedDocId(docId: string | null): void {
   } else {
     localStorage.removeItem(KEYS.LAST_DOC_ID);
   }
+}
+
+export function loadPurgedSyncRecords(): PurgedSyncRecords {
+  const parsed = safeParse<Partial<PurgedSyncRecords>>(
+    localStorage.getItem(KEYS.PURGED_RECORDS),
+    {}
+  );
+  return {
+    docs: parsed.docs && typeof parsed.docs === 'object' ? parsed.docs : {},
+    docFormats:
+      parsed.docFormats && typeof parsed.docFormats === 'object' ? parsed.docFormats : {},
+    folders: parsed.folders && typeof parsed.folders === 'object' ? parsed.folders : {},
+  };
+}
+
+export function savePurgedSyncRecords(records: PurgedSyncRecords): void {
+  localStorage.setItem(KEYS.PURGED_RECORDS, JSON.stringify(records));
 }

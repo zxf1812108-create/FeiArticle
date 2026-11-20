@@ -16,6 +16,8 @@ export interface FolderNode {
   parentId: string | null;
   order: number;
   updatedAt: number;
+  deleted?: boolean;
+  deletedAt?: number;
 }
 
 export interface ArticleDoc {
@@ -38,6 +40,8 @@ export interface ArticleDoc {
   updatedAt: number;
   syncStatus: SyncStatus;
   deleted?: boolean;
+  deletedAt?: number;
+  deletedByFolderId?: string;
   highlights: HighlightItem[];
   byteSize: number;
 }
@@ -60,7 +64,15 @@ export interface ManifestDocEntry {
   updatedAt: number;
   createdAt: number;
   deleted?: boolean;
+  deletedAt?: number;
+  deletedByFolderId?: string;
   byteSize: number;
+}
+
+export interface PurgedSyncRecords {
+  docs: Record<string, number>;
+  docFormats?: Record<string, 'txt' | 'md'>;
+  folders: Record<string, number>;
 }
 
 export interface SyncedTreeState {

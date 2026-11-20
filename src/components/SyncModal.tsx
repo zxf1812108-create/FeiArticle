@@ -112,7 +112,10 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                   账号
                 </span>
                 <input
-                  type="email"
+                  type="text"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder="输入账号"

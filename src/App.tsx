@@ -13,6 +13,7 @@ import {
   Pencil,
   RefreshCw,
   Scissors,
+  Trash2,
 } from 'lucide-react';
 import { ImportModal } from './components/ImportModal';
 import {
@@ -21,6 +22,7 @@ import {
   MinimalDocViewHandle,
 } from './components/MinimalDocView';
 import {
+  DragPayload,
   InsertPosition,
   MinimalTreeView,
   MinimalTreeViewHandle,
@@ -28,9 +30,11 @@ import {
 } from './components/MinimalTreeView';
 import { StorageFolderModal } from './components/StorageFolderModal';
 import { SyncModal } from './components/SyncModal';
+import { TrashModal } from './components/TrashModal';
 import {
   ArticleDoc,
   FolderNode,
+  PurgedSyncRecords,
   QuotaStats,
   SyncedTreeState,
   SyncLogEntry,
@@ -41,6 +45,7 @@ import {
   loadFolders,
   loadFoldersDirty,
   loadLastOpenedDocId,
+  loadPurgedSyncRecords,
   loadQuotaStats,
   loadStorageDirConfig,
   loadSyncLogs,
@@ -50,6 +55,7 @@ import {
   saveFolders,
   saveFoldersDirty,
   saveLastOpenedDocId,
+  savePurgedSyncRecords,
   saveQuotaStats,
   saveStorageDirConfig,
   saveSyncLogs,
@@ -68,6 +74,7 @@ import {
   isReservedInboxName,
   resolveDuplicateDocImport,
 } from './utils/inbox';
+import { purgeExpiredTrash } from './utils/trash';
 import {
   fetchRemoteDocBody,
   runIncrementalWebDavSync,
@@ -133,6 +140,9 @@ export default function App() {
   const [folders, setFolders] = useState<FolderNode[]>(() => loadFolders());
   const [docs, setDocs] = useState<ArticleDoc[]>(() => loadDocs());
   const [foldersDirty, setFoldersDirty] = useState<boolean>(() => loadFoldersDirty());
+  const [purgedRecords, setPurgedRecords] = useState<PurgedSyncRecords>(() =>
+    loadPurgedSyncRecords()
+  );
   const [webDavConfig, setWebDavConfig] = useState<WebDavConfig>(() => loadWebDavConfig());
   const [quotaStats, setQuotaStats] = useState<QuotaStats>(() => loadQuotaStats());
   const [syncLogs, setSyncLogs] = useState<SyncLogEntry[]>(() => loadSyncLogs());
@@ -161,6 +171,9 @@ export default function App() {
   );
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showTrashModal, setShowTrashModal] = useState(false);
+  const [activeDragPayload, setActiveDragPayload] = useState<DragPayload | null>(null);
+  const [trashDragOver, setTrashDragOver] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lanRunning, setLanRunning] = useState(false);
   const [lanUrl, setLanUrl] = useState('');
@@ -174,7 +187,10 @@ export default function App() {
   const syncLongPressedRef = useRef(false);
   const docsRef = useRef<ArticleDoc[]>(docs);
   docsRef.current = docs;
+  const foldersRef = useRef<FolderNode[]>(folders);
+  foldersRef.current = folders;
 
+  const activeFolders = useMemo(() => folders.filter((f) => !f.deleted), [folders]);
   const collapsedFolderSet = useMemo(() => new Set(collapsedFolderIds), [collapsedFolderIds]);
 
   // Automatically follow OS light/dark system theme
@@ -201,6 +217,7 @@ export default function App() {
   useEffect(() => saveFolders(folders), [folders]);
   useEffect(() => saveDocs(docs), [docs]);
   useEffect(() => saveFoldersDirty(foldersDirty), [foldersDirty]);
+  useEffect(() => savePurgedSyncRecords(purgedRecords), [purgedRecords]);
   useEffect(() => saveWebDavConfig(webDavConfig), [webDavConfig]);
   useEffect(() => saveQuotaStats(quotaStats), [quotaStats]);
   useEffect(() => saveSyncLogs(syncLogs), [syncLogs]);
@@ -216,11 +233,38 @@ export default function App() {
     [collapsedFolderIds, activeTarget, treeScrollTop, treeStateUpdatedAt]
   );
 
+  // Automatically permanently delete Trash items older than 30 days on launch and periodically
+  const runExpiredTrashCleanup = () => {
+    const now = Date.now();
+    const res = purgeExpiredTrash(foldersRef.current, docsRef.current, now);
+    if (!res.changed) return;
+    setFolders(res.folders);
+    setDocs(res.docs);
+    setPurgedRecords((prev) => {
+      const nextDocs = { ...prev.docs };
+      const nextDocFormats = { ...(prev.docFormats || {}) };
+      const nextFolders = { ...prev.folders };
+      for (const fid of res.expiredFolderIds) nextFolders[fid] = now;
+      for (const d of res.expiredDocs) {
+        nextDocs[d.id] = now;
+        nextDocFormats[d.id] = d.format === 'md' ? 'md' : 'txt';
+      }
+      return { docs: nextDocs, docFormats: nextDocFormats, folders: nextFolders };
+    });
+    setFoldersDirty(true);
+  };
+
+  useEffect(() => {
+    runExpiredTrashCleanup();
+    const interval = window.setInterval(runExpiredTrashCleanup, 60 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   // Keep PC Direct Connect snapshot in sync while LAN server is active
   useEffect(() => {
     if (!lanRunning) return;
-    pushLanDirectState(folders, docs);
-  }, [lanRunning, folders, docs]);
+    pushLanDirectState(activeFolders, docs);
+  }, [lanRunning, activeFolders, docs]);
 
   // Stop LAN server on unmount
   useEffect(() => {
@@ -399,7 +443,7 @@ export default function App() {
       showToast('inbox 为云端投递箱保留名称');
       return null;
     }
-    const maxOrder = folders.reduce((m, f) => Math.max(m, f.order), -1);
+    const maxOrder = activeFolders.reduce((m, f) => Math.max(m, f.order), -1);
     const next: FolderNode = {
       id: `folder_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       name: trimmed,
@@ -426,23 +470,208 @@ export default function App() {
     setFoldersDirty(true);
   };
 
-  const handleDeleteFolder = (folderId: string) => {
-    setFolders((prev) => prev.filter((f) => f.id !== folderId));
+  // Trash: Move Doc or Folder (with all docs inside it) to 30-day Trash
+  const handleMoveToTrash = (payload: DragPayload) => {
+    const now = Date.now();
+    if (payload.kind === 'doc') {
+      setDocs((prev) =>
+        prev.map((d) =>
+          d.id === payload.id
+            ? {
+                ...d,
+                deleted: true,
+                deletedAt: now,
+                deletedByFolderId: undefined,
+                updatedAt: now,
+                syncStatus: 'dirty',
+              }
+            : d
+        )
+      );
+      if (selectedDocId === payload.id) setSelectedDocId(null);
+      if (activeTarget?.kind === 'doc' && activeTarget.id === payload.id) {
+        setActiveTarget(null);
+      }
+      if (cutItem?.kind === 'doc' && cutItem.id === payload.id) {
+        setCutItem(null);
+      }
+      return;
+    }
+
+    const folderId = payload.id;
+    if (folderId === INBOX_FOLDER_ID) {
+      showToast('inbox 目录不可删除');
+      return;
+    }
+
+    const docIdsInFolder = new Set(
+      docsRef.current.filter((d) => !d.deleted && d.folderId === folderId).map((d) => d.id)
+    );
+
+    setFolders((prev) =>
+      prev.map((f) =>
+        f.id === folderId
+          ? { ...f, deleted: true, deletedAt: now, updatedAt: now }
+          : f
+      )
+    );
     setDocs((prev) =>
       prev.map((d) =>
-        d.folderId === folderId
-          ? { ...d, folderId: null, updatedAt: Date.now(), syncStatus: 'dirty' }
+        docIdsInFolder.has(d.id)
+          ? {
+              ...d,
+              deleted: true,
+              deletedAt: now,
+              deletedByFolderId: folderId,
+              updatedAt: now,
+              syncStatus: 'dirty',
+            }
           : d
       )
     );
     setFoldersDirty(true);
     setCollapsedFolderIds((prev) => prev.filter((id) => id !== folderId));
-    if (activeTarget?.kind === 'folder' && activeTarget.id === folderId) {
+
+    if (selectedDocId && docIdsInFolder.has(selectedDocId)) {
+      setSelectedDocId(null);
+    }
+    if (
+      activeTarget &&
+      ((activeTarget.kind === 'folder' && activeTarget.id === folderId) ||
+        (activeTarget.kind === 'doc' && docIdsInFolder.has(activeTarget.id)))
+    ) {
       setActiveTarget(null);
     }
-    if (cutItem?.kind === 'folder' && cutItem.id === folderId) {
+    if (
+      cutItem &&
+      ((cutItem.kind === 'folder' && cutItem.id === folderId) ||
+        (cutItem.kind === 'doc' && docIdsInFolder.has(cutItem.id)))
+    ) {
       setCutItem(null);
     }
+  };
+
+  const handleRestoreFolderFromTrash = (folderId: string) => {
+    const now = Date.now();
+    const maxOrder = activeFolders.reduce((m, f) => Math.max(m, f.order), -1);
+    setFolders((prev) =>
+      prev.map((f) =>
+        f.id === folderId
+          ? {
+              ...f,
+              deleted: false,
+              deletedAt: undefined,
+              order: maxOrder + 1,
+              updatedAt: now,
+            }
+          : f
+      )
+    );
+    setDocs((prev) =>
+      prev.map((d) =>
+        d.deleted &&
+        (d.deletedByFolderId === folderId || (!d.deletedByFolderId && d.folderId === folderId))
+          ? {
+              ...d,
+              folderId,
+              deleted: false,
+              deletedAt: undefined,
+              deletedByFolderId: undefined,
+              updatedAt: now,
+              syncStatus: 'dirty',
+            }
+          : d
+      )
+    );
+    setFoldersDirty(true);
+  };
+
+  const handleRestoreDocFromTrash = (docId: string) => {
+    const now = Date.now();
+    const activeFolderIdSet = new Set(activeFolders.map((f) => f.id));
+    setDocs((prev) =>
+      prev.map((d) => {
+        if (d.id !== docId) return d;
+        const canKeepOriginFolder =
+          d.folderId === INBOX_FOLDER_ID ||
+          (d.folderId !== null && activeFolderIdSet.has(d.folderId));
+        return {
+          ...d,
+          folderId: canKeepOriginFolder ? d.folderId : null,
+          deleted: false,
+          deletedAt: undefined,
+          deletedByFolderId: undefined,
+          updatedAt: now,
+          syncStatus: 'dirty',
+        };
+      })
+    );
+  };
+
+  const handlePermanentDeleteFolder = (folderId: string) => {
+    const now = Date.now();
+    const childDocs = docsRef.current.filter(
+      (d) =>
+        d.deleted &&
+        (d.deletedByFolderId === folderId || d.folderId === folderId)
+    );
+    const childIdSet = new Set(childDocs.map((d) => d.id));
+
+    setFolders((prev) => prev.filter((f) => f.id !== folderId));
+    setDocs((prev) => prev.filter((d) => !childIdSet.has(d.id)));
+    setPurgedRecords((prev) => {
+      const nextDocs = { ...prev.docs };
+      const nextDocFormats = { ...(prev.docFormats || {}) };
+      for (const d of childDocs) {
+        nextDocs[d.id] = now;
+        nextDocFormats[d.id] = d.format === 'md' ? 'md' : 'txt';
+      }
+      return {
+        docs: nextDocs,
+        docFormats: nextDocFormats,
+        folders: { ...prev.folders, [folderId]: now },
+      };
+    });
+    setFoldersDirty(true);
+  };
+
+  const handlePermanentDeleteDoc = (docId: string) => {
+    const now = Date.now();
+    const targetDoc = docsRef.current.find((d) => d.id === docId);
+    const fmt: 'txt' | 'md' = targetDoc?.format === 'md' ? 'md' : 'txt';
+    setDocs((prev) => prev.filter((d) => d.id !== docId));
+    setPurgedRecords((prev) => ({
+      ...prev,
+      docs: { ...prev.docs, [docId]: now },
+      docFormats: { ...(prev.docFormats || {}), [docId]: fmt },
+    }));
+    setFoldersDirty(true);
+  };
+
+  const handleEmptyTrash = () => {
+    const now = Date.now();
+    const deletedFolderIds = foldersRef.current.filter((f) => f.deleted).map((f) => f.id);
+    const deletedDocs = docsRef.current.filter((d) => d.deleted);
+    if (deletedFolderIds.length === 0 && deletedDocs.length === 0) return;
+
+    setFolders((prev) => prev.filter((f) => !f.deleted));
+    setDocs((prev) => prev.filter((d) => !d.deleted));
+    setPurgedRecords((prev) => {
+      const nextDocs = { ...prev.docs };
+      const nextDocFormats = { ...(prev.docFormats || {}) };
+      const nextFolders = { ...prev.folders };
+      for (const d of deletedDocs) {
+        nextDocs[d.id] = now;
+        nextDocFormats[d.id] = d.format === 'md' ? 'md' : 'txt';
+      }
+      for (const id of deletedFolderIds) nextFolders[id] = now;
+      return { docs: nextDocs, docFormats: nextDocFormats, folders: nextFolders };
+    });
+    setFoldersDirty(true);
+  };
+
+  const handleDeleteFolder = (folderId: string) => {
+    handleMoveToTrash({ kind: 'folder', id: folderId });
   };
 
   const handleToggleFolderCollapse = (id: string) => {
@@ -461,7 +690,11 @@ export default function App() {
   };
 
   const handleCollapseAllFolders = () => {
-    setCollapsedFolderIds([...folders.map((f) => f.id), INBOX_FOLDER_ID, '__uncategorized__']);
+    setCollapsedFolderIds([
+      ...activeFolders.map((f) => f.id),
+      INBOX_FOLDER_ID,
+      '__uncategorized__',
+    ]);
     setTreeStateUpdatedAt(Date.now());
     setFoldersDirty(true);
   };
@@ -761,9 +994,9 @@ export default function App() {
   // Document CRUD & View State Persistence
   const handleCreateDoc = async (targetFolderId?: string | null) => {
     const requestedFolderId =
-      targetFolderId !== undefined ? targetFolderId : folders[0]?.id ?? null;
+      targetFolderId !== undefined ? targetFolderId : activeFolders[0]?.id ?? null;
     const folderId =
-      requestedFolderId === INBOX_FOLDER_ID ? (folders[0]?.id ?? null) : requestedFolderId;
+      requestedFolderId === INBOX_FOLDER_ID ? (activeFolders[0]?.id ?? null) : requestedFolderId;
     const now = Date.now();
     const hash = await sha256Hex('');
     const siblings = docs.filter((d) => !d.deleted && d.folderId === folderId);
@@ -1004,7 +1237,7 @@ export default function App() {
     setLanLoading(true);
     try {
       if (next) {
-        const res = await startLanDirectServer(folders, docs);
+        const res = await startLanDirectServer(activeFolders, docs);
         setLanRunning(res.running);
         setLanUrl(res.url);
         if (res.running && res.url) {
@@ -1063,7 +1296,8 @@ export default function App() {
         folders,
         docs,
         localTreeState,
-        foldersDirty
+        foldersDirty,
+        purgedRecords
       );
       setFolders(outcome.folders.map((f) => ({ ...f, parentId: null })));
       setDocs(outcome.docs);
@@ -1072,6 +1306,7 @@ export default function App() {
       setTreeScrollTop(outcome.treeState.scrollTop);
       setTreeStateUpdatedAt(outcome.treeState.updatedAt);
       setFoldersDirty(false);
+      setPurgedRecords({ docs: {}, docFormats: {}, folders: {} });
       setWebDavConfig(outcome.config);
       applyQuotaDelta(outcome.quotaDelta);
       setSyncLogs((prev) => [outcome.log, ...prev].slice(0, 20));
@@ -1165,17 +1400,21 @@ export default function App() {
   };
 
   const defaultImportFolderId = useMemo(() => {
-    const regularFolders = folders.filter((f) => f.id !== INBOX_FOLDER_ID);
+    const regularFolders = activeFolders.filter((f) => f.id !== INBOX_FOLDER_ID);
     const fallbackId = regularFolders[0]?.id ?? null;
     if (activeTarget?.kind === 'folder') {
-      return activeTarget.id === INBOX_FOLDER_ID ? fallbackId : activeTarget.id;
+      if (activeTarget.id === INBOX_FOLDER_ID) return fallbackId;
+      if (regularFolders.some((f) => f.id === activeTarget.id)) return activeTarget.id;
+      return fallbackId;
     }
     if (activeTarget?.kind === 'doc') {
       const docFolder = docs.find((d) => d.id === activeTarget.id)?.folderId ?? null;
-      if (docFolder && docFolder !== INBOX_FOLDER_ID) return docFolder;
+      if (docFolder && docFolder !== INBOX_FOLDER_ID && regularFolders.some((f) => f.id === docFolder)) {
+        return docFolder;
+      }
     }
     return fallbackId;
-  }, [activeTarget, docs, folders]);
+  }, [activeTarget, docs, activeFolders]);
 
   const handleWindowDrop = async (e: React.DragEvent) => {
     if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
@@ -1222,7 +1461,7 @@ export default function App() {
         ) : (
           <MinimalTreeView
             ref={treeViewRef}
-            folders={folders}
+            folders={activeFolders}
             docs={docs}
             collapsedIds={collapsedFolderSet}
             initialScrollTop={treeScrollTop}
@@ -1244,6 +1483,9 @@ export default function App() {
             onCreateDocInFolder={(folderId) => handleCreateDoc(folderId)}
             onMoveFolderToPosition={handleMoveFolderToPosition}
             onMoveDocToPosition={handleMoveDocToPosition}
+            onDragPayloadChange={setActiveDragPayload}
+            onTrashDrop={handleMoveToTrash}
+            onTrashDragHoverChange={setTrashDragOver}
           />
         )}
       </main>
@@ -1362,6 +1604,49 @@ export default function App() {
                   />
                 )}
               </button>
+
+              {/* 7. 最右侧：回收站图标（拖入文档/目录即删除，点击打开回收站） */}
+              <button
+                type="button"
+                data-trash-dropzone="true"
+                onClick={() => {
+                  runExpiredTrashCleanup();
+                  setShowTrashModal(true);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  if (!trashDragOver) setTrashDragOver(true);
+                }}
+                onDragLeave={() => setTrashDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setTrashDragOver(false);
+                  let payload = activeDragPayload;
+                  if (!payload) {
+                    try {
+                      payload = JSON.parse(
+                        e.dataTransfer.getData('application/x-feiartical')
+                      ) as DragPayload;
+                    } catch {
+                      payload = null;
+                    }
+                  }
+                  if (payload) {
+                    handleMoveToTrash(payload);
+                  }
+                  setActiveDragPayload(null);
+                }}
+                aria-label="回收站（拖入目录或文档可删除，点击查看回收站）"
+                title="回收站（拖入文档或目录可删除，内容保留 30 天）"
+                className={`ml-auto w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-all duration-150 shrink-0 ${
+                  trashDragOver
+                    ? 'bg-[var(--fei-bg-selected)] text-[var(--fei-text-primary)] scale-105'
+                    : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
+                }`}
+              >
+                <Trash2 className="w-[19px] h-[19px]" strokeWidth={1.75} />
+              </button>
             </>
           ) : (
             /* 文档模式：文档图标后面放置 浏览(Eye) <-> 编辑(Pencil) 图标；编辑状态下后面依次放置 一级标题、二级标题、无序列表、分割线 */
@@ -1449,11 +1734,25 @@ export default function App() {
       {/* Import Directory Picker + Paste Box + Multi-file Modal */}
       {showImportModal && (
         <ImportModal
-          folders={folders}
+          folders={activeFolders}
           defaultFolderId={defaultImportFolderId}
           onCreateFolder={handleCreateFolder}
           onImportDocs={handleImportDocs}
           onClose={() => setShowImportModal(false)}
+        />
+      )}
+
+      {/* FeiNote-styled 30-Day Trash Modal */}
+      {showTrashModal && (
+        <TrashModal
+          folders={folders}
+          docs={docs}
+          onRestoreFolder={handleRestoreFolderFromTrash}
+          onRestoreDoc={handleRestoreDocFromTrash}
+          onPermanentDeleteFolder={handlePermanentDeleteFolder}
+          onPermanentDeleteDoc={handlePermanentDeleteDoc}
+          onEmptyTrash={handleEmptyTrash}
+          onClose={() => setShowTrashModal(false)}
         />
       )}
 
