@@ -88,7 +88,7 @@ jobs:
           fi
 
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > android/app/release.keystore
             KEY_ALIAS="${KEY_ALIAS:-feiartical}"
             KEY_PASSWORD="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
             echo "SIGNING_MODE=persistent" >> "$GITHUB_ENV"
@@ -108,8 +108,18 @@ jobs:
             echo "SIGNING_MODE=ephemeral" >> "$GITHUB_ENV"
           fi
 
-          printf "\nFEI_STORE_FILE=release.keystore\nFEI_STORE_PASSWORD=%s\nFEI_KEY_ALIAS=%s\nFEI_KEY_PASSWORD=%s\n" \
-            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" >> android/gradle.properties
+          {
+            echo "FEI_STORE_FILE=release.keystore"
+            echo "FEI_STORE_PASSWORD<<FEI_ENV_EOF"
+            printf '%s\n' "$KEYSTORE_PASSWORD"
+            echo "FEI_ENV_EOF"
+            echo "FEI_KEY_ALIAS<<FEI_ENV_EOF"
+            printf '%s\n' "$KEY_ALIAS"
+            echo "FEI_ENV_EOF"
+            echo "FEI_KEY_PASSWORD<<FEI_ENV_EOF"
+            printf '%s\n' "$KEY_PASSWORD"
+            echo "FEI_ENV_EOF"
+          } >> "$GITHUB_ENV"
 
           node scripts/patch-android-gradle.mjs
 
