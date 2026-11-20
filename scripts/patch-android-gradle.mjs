@@ -60,7 +60,25 @@ if (!content.includes('com.squareup.okhttp3:okhttp')) {
 fs.writeFileSync(gradlePath, content, 'utf8');
 console.log(`Patched ${gradlePath}: versionName=${versionName}, versionCode=${versionCode}`);
 
+// Prepend Google's Maven Central mirror before mavenCentral() to avoid repo.maven.apache.org 429 rate-limits in CI
+const MAVEN_MIRROR_GROOVY = 'maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }';
+function injectMavenMirror(targetFile) {
+  if (!fs.existsSync(targetFile)) return;
+  let txt = fs.readFileSync(targetFile, 'utf8');
+  if (txt.includes('maven-central.storage-download.googleapis.com/maven2')) return;
+  if (/mavenCentral\(\)/.test(txt)) {
+    txt = txt.replace(/^([ \t]*)mavenCentral\(\)/gm, `$1${MAVEN_MIRROR_GROOVY}\n$1mavenCentral()`);
+    fs.writeFileSync(targetFile, txt, 'utf8');
+    console.log(`Added Google Maven Central mirror in ${targetFile}`);
+  }
+}
+
 const appDir = path.dirname(gradlePath);
+const androidRootDir = path.dirname(appDir);
+injectMavenMirror(path.join(androidRootDir, 'build.gradle'));
+injectMavenMirror(path.join(androidRootDir, 'settings.gradle'));
+injectMavenMirror(gradlePath);
+injectMavenMirror(path.resolve('node_modules/@capacitor/android/capacitor/build.gradle'));
 
 // Ensure required network permissions in AndroidManifest.xml (for WebDAV + LAN IP discovery)
 const manifestPath = path.join(appDir, 'src', 'main', 'AndroidManifest.xml');

@@ -32,6 +32,16 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('package.json', 'scripts/patch-android-gradle.mjs') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
       - name: Compute version (1.x this year, 2.1 next year)
         id: version
         run: |
@@ -127,7 +137,17 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
+          for attempt in 1 2 3; do
+            echo "Gradle assembleRelease attempt ${attempt}/3..."
+            if ./gradlew assembleRelease --no-daemon --max-workers=2; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Gradle build failed, retrying in $((attempt * 15))s..."
+              sleep $((attempt * 15))
+            fi
+          done
+          exit 1
 
       - name: Prepare APK artifact and release notes
         env:
