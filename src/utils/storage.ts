@@ -1,0 +1,191 @@
+import { INITIAL_DOCUMENTS, INITIAL_FOLDERS } from '../data/sampleDocuments';
+import {
+  ArticleDoc,
+  FolderNode,
+  QuotaStats,
+  ReaderSettings,
+  SyncLogEntry,
+  WebDavConfig,
+} from '../types';
+import { createInitialQuotaStats, getCurrentMonthKey } from './webdavSync';
+
+const KEYS = {
+  FOLDERS: 'feiartical_folders_v1',
+  DOCS: 'feiartical_docs_v1',
+  READER: 'feiartical_reader_v1',
+  WEBDAV: 'feiartical_webdav_v1',
+  QUOTA: 'feiartical_quota_v1',
+  LOGS: 'feiartical_sync_logs_v1',
+  THEME: 'feiartical_theme_v1',
+  FOLDERS_DIRTY: 'feiartical_folders_dirty_v1',
+  TREE_STATE: 'feiartical_tree_state_v1',
+  STORAGE_DIR: 'feiartical_storage_dir_v1',
+};
+
+export interface StorageDirectoryConfig {
+  initialized: boolean;
+  folderPath: string;
+  selectedAt: number;
+}
+
+export interface PersistedTreeState {
+  collapsedIds: string[];
+  activeTarget: { kind: 'folder' | 'doc'; id: string } | null;
+  scrollTop: number;
+  updatedAt: number;
+}
+
+export const DEFAULT_READER_SETTINGS: ReaderSettings = {
+  fontFamily: 'serif',
+  fontSize: 17,
+  lineHeight: 1.85,
+  width: 'medium',
+  paper: 'white',
+  indentFirstLine: false,
+};
+
+export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {
+  provider: 'jianguoyun',
+  enabled: false,
+  baseUrl: 'https://dav.jianguoyun.com/dav/FeiArtical/',
+  username: '',
+  password: '',
+  encryptionPassword: '',
+  settingsUpdatedAt: 0,
+  lazyFetch: true,
+};
+
+function safeParse<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export function loadFolders(): FolderNode[] {
+  const loaded = safeParse<FolderNode[]>(localStorage.getItem(KEYS.FOLDERS), INITIAL_FOLDERS);
+  return loaded.map((f, idx) => ({
+    ...f,
+    parentId: null,
+    order: typeof f.order === 'number' ? f.order : idx,
+  }));
+}
+
+export function saveFolders(folders: FolderNode[]): void {
+  localStorage.setItem(KEYS.FOLDERS, JSON.stringify(folders));
+}
+
+export function loadDocs(): ArticleDoc[] {
+  return safeParse<ArticleDoc[]>(localStorage.getItem(KEYS.DOCS), INITIAL_DOCUMENTS);
+}
+
+export function saveDocs(docs: ArticleDoc[]): void {
+  localStorage.setItem(KEYS.DOCS, JSON.stringify(docs));
+}
+
+export function loadReaderSettings(): ReaderSettings {
+  return {
+    ...DEFAULT_READER_SETTINGS,
+    ...safeParse<Partial<ReaderSettings>>(localStorage.getItem(KEYS.READER), {}),
+  };
+}
+
+export function saveReaderSettings(settings: ReaderSettings): void {
+  localStorage.setItem(KEYS.READER, JSON.stringify(settings));
+}
+
+export function loadWebDavConfig(): WebDavConfig {
+  return {
+    ...DEFAULT_WEBDAV_CONFIG,
+    ...safeParse<Partial<WebDavConfig>>(localStorage.getItem(KEYS.WEBDAV), {}),
+  };
+}
+
+export function saveWebDavConfig(config: WebDavConfig): void {
+  localStorage.setItem(KEYS.WEBDAV, JSON.stringify(config));
+}
+
+export function loadQuotaStats(): QuotaStats {
+  const stats = safeParse<QuotaStats>(localStorage.getItem(KEYS.QUOTA), createInitialQuotaStats());
+  const currentMonth = getCurrentMonthKey();
+  if (stats.monthKey !== currentMonth) {
+    return createInitialQuotaStats();
+  }
+  return stats;
+}
+
+export function saveQuotaStats(stats: QuotaStats): void {
+  localStorage.setItem(KEYS.QUOTA, JSON.stringify(stats));
+}
+
+export function loadSyncLogs(): SyncLogEntry[] {
+  return safeParse<SyncLogEntry[]>(localStorage.getItem(KEYS.LOGS), []);
+}
+
+export function saveSyncLogs(logs: SyncLogEntry[]): void {
+  localStorage.setItem(KEYS.LOGS, JSON.stringify(logs.slice(0, 20)));
+}
+
+export function loadTheme(): 'light' | 'dark' {
+  const saved = localStorage.getItem(KEYS.THEME);
+  if (saved === 'dark' || saved === 'light') return saved;
+  return 'light';
+}
+
+export function saveTheme(theme: 'light' | 'dark'): void {
+  localStorage.setItem(KEYS.THEME, theme);
+}
+
+export function loadFoldersDirty(): boolean {
+  return localStorage.getItem(KEYS.FOLDERS_DIRTY) === '1';
+}
+
+export function saveFoldersDirty(dirty: boolean): void {
+  localStorage.setItem(KEYS.FOLDERS_DIRTY, dirty ? '1' : '0');
+}
+
+export function loadTreeViewState(): PersistedTreeState {
+  const parsed = safeParse<Partial<PersistedTreeState>>(localStorage.getItem(KEYS.TREE_STATE), {});
+  const collapsedIds = Array.isArray(parsed.collapsedIds)
+    ? parsed.collapsedIds.filter((id): id is string => typeof id === 'string')
+    : [];
+  const rawTarget = parsed.activeTarget;
+  const activeTarget =
+    rawTarget &&
+    (rawTarget.kind === 'folder' || rawTarget.kind === 'doc') &&
+    typeof rawTarget.id === 'string'
+      ? { kind: rawTarget.kind, id: rawTarget.id }
+      : null;
+  const scrollTop =
+    typeof parsed.scrollTop === 'number' && Number.isFinite(parsed.scrollTop) && parsed.scrollTop >= 0
+      ? parsed.scrollTop
+      : 0;
+  const updatedAt =
+    typeof parsed.updatedAt === 'number' && Number.isFinite(parsed.updatedAt) ? parsed.updatedAt : 0;
+  return { collapsedIds, activeTarget, scrollTop, updatedAt };
+}
+
+export function saveTreeViewState(state: PersistedTreeState): void {
+  localStorage.setItem(KEYS.TREE_STATE, JSON.stringify(state));
+}
+
+export function loadStorageDirConfig(): StorageDirectoryConfig {
+  const parsed = safeParse<Partial<StorageDirectoryConfig>>(
+    localStorage.getItem(KEYS.STORAGE_DIR),
+    {}
+  );
+  return {
+    initialized: parsed.initialized === true,
+    folderPath:
+      typeof parsed.folderPath === 'string' && parsed.folderPath.trim()
+        ? parsed.folderPath.trim()
+        : '/Documents/FeiArtical',
+    selectedAt: typeof parsed.selectedAt === 'number' ? parsed.selectedAt : 0,
+  };
+}
+
+export function saveStorageDirConfig(config: StorageDirectoryConfig): void {
+  localStorage.setItem(KEYS.STORAGE_DIR, JSON.stringify(config));
+}

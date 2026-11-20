@@ -1,0 +1,6 @@
+{
+  "name": "FeiArtical",
+  "description": "简洁优雅的文本文档管理与沉浸式阅读空间，支持 Markdown 与纯文本导入、目录导航、高亮批注与排版定制。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
