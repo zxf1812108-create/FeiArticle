@@ -22,6 +22,7 @@ const KEYS = {
   STORAGE_DIR: 'feiartical_storage_dir_v1',
   LAST_DOC_ID: 'feiartical_last_doc_id_v1',
   PURGED_RECORDS: 'feiartical_purged_records_v1',
+  ACTIVE_MDICT: 'feiartical_active_mdict_v1',
 };
 
 export interface StorageDirectoryConfig {
@@ -221,3 +222,17 @@ export function loadPurgedSyncRecords(): PurgedSyncRecords {
 export function savePurgedSyncRecords(records: PurgedSyncRecords): void {
   localStorage.setItem(KEYS.PURGED_RECORDS, JSON.stringify(records));
 }
+
+export function loadActiveMdictId(): string | null {
+  const val = localStorage.getItem(KEYS.ACTIVE_MDICT);
+  return val && val.trim() ? val.trim() : null;
+}
+
+export function saveActiveMdictId(dictId: string | null): void {
+  if (dictId) {
+    localStorage.setItem(KEYS.ACTIVE_MDICT, dictId);
+  } else {
+    localStorage.removeItem(KEYS.ACTIVE_MDICT);
+  }
+}
+

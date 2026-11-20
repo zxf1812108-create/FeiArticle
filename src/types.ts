@@ -148,3 +148,53 @@ export interface ReaderSettings {
 
 export type SmartView = 'all' | 'recent' | 'starred' | 'dirty' | 'highlights' | 'trash';
 export type SortMode = 'custom' | 'updated' | 'title' | 'length';
+
+export interface MdictKeyBlockMeta {
+  numEntries: number;
+  firstKey: string;
+  lastKey: string;
+  compressedOffset: number;
+  compressedSize: number;
+  decompressedSize: number;
+}
+
+export interface MdictRecordBlockMeta {
+  compressedOffset: number;
+  compressedSize: number;
+  decompressedOffset: number;
+  decompressedSize: number;
+}
+
+export type MdictEncoding = 'utf-8' | 'utf-16le' | 'gb18030' | 'big5';
+
+export interface MdictDictionaryRecord {
+  id: string;
+  fileName: string;
+  title: string;
+  description: string;
+  encoding: MdictEncoding;
+  version: number;
+  encrypt: number;
+  isStripKey: boolean;
+  isCaseSensitive: boolean;
+  numEntries: number;
+  fileSize: number;
+  addedAt: number;
+  totalRecordDecompressedSize: number;
+  keyBlocks: MdictKeyBlockMeta[];
+  recordBlocks: MdictRecordBlockMeta[];
+}
+
+export type MdictDictionarySummary = Pick<
+  MdictDictionaryRecord,
+  'id' | 'fileName' | 'title' | 'description' | 'numEntries' | 'fileSize' | 'addedAt'
+>;
+
+export interface MdictLookupResult {
+  dictId: string;
+  dictTitle: string;
+  queryWord: string;
+  matchedHeadword: string;
+  htmlDefinitions: string[];
+}
+

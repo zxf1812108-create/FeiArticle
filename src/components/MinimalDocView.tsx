@@ -9,6 +9,7 @@ import React, {
 } from 'react';
 import { CloudDownload } from 'lucide-react';
 import { ArticleDoc } from '../types';
+import { extractEnglishLookupWord } from '../utils/mdict';
 import { BlockNode, formatBytes, parseDocumentBlocks } from '../utils/textParser';
 
 export type EditFormatKind = 'h1' | 'h2' | 'ul' | 'hr';
@@ -22,6 +23,10 @@ export interface MinimalDocViewHandle {
 interface MinimalDocViewProps {
   doc: ArticleDoc;
   isEditing: boolean;
+  hasActiveMdict?: boolean;
+  isMdictPopupOpen?: boolean;
+  onEnglishWordSelected?: (payload: { word: string; placement: 'top' | 'bottom' }) => void;
+  onClearMdictLookup?: () => void;
   onSaveDraft: (updates: { title: string; content: string }) => void;
   onViewStateChange: (state: { mode: 'read' | 'edit'; scrollTop: number }) => void;
   onFetchRemoteBody: () => Promise<void>;
@@ -230,7 +235,17 @@ type PendingAnchor =
 
 export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewProps>(
   function MinimalDocView(
-    { doc, isEditing, onSaveDraft, onViewStateChange, onFetchRemoteBody },
+    {
+      doc,
+      isEditing,
+      hasActiveMdict = false,
+      isMdictPopupOpen = false,
+      onEnglishWordSelected,
+      onClearMdictLookup,
+      onSaveDraft,
+      onViewStateChange,
+      onFetchRemoteBody,
+    },
     ref
   ) {
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -255,6 +270,19 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const hadSelectionOnDownRef = useRef(false);
     const lastPointerDownAtRef = useRef(0);
     const lastTouchStartAtRef = useRef(0);
+    const isPointerActiveRef = useRef(false);
+    const selectionCheckTimerRef = useRef<number | null>(null);
+
+    const hasActiveMdictRef = useRef(hasActiveMdict);
+    hasActiveMdictRef.current = hasActiveMdict;
+    const isMdictPopupOpenRef = useRef(isMdictPopupOpen);
+    isMdictPopupOpenRef.current = isMdictPopupOpen;
+    const isEditingRef = useRef(isEditing);
+    isEditingRef.current = isEditing;
+    const onEnglishWordSelectedRef = useRef(onEnglishWordSelected);
+    onEnglishWordSelectedRef.current = onEnglishWordSelected;
+    const onClearMdictLookupRef = useRef(onClearMdictLookup);
+    onClearMdictLookupRef.current = onClearMdictLookup;
 
     // Sync local buffer only when switching documents
     useEffect(() => {
@@ -579,6 +607,77 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }, 220);
     };
 
+    const evaluateSelectionForMdict = () => {
+      if (isEditingRef.current || !hasActiveMdictRef.current) return;
+      const articleEl = articleRef.current;
+      const sel = window.getSelection();
+      if (!articleEl || !sel || sel.isCollapsed || sel.rangeCount === 0) {
+        return;
+      }
+
+      const range = sel.getRangeAt(0);
+      const commonAncestor = range.commonAncestorContainer;
+      if (!articleEl.contains(commonAncestor)) return;
+
+      const word = extractEnglishLookupWord(sel.toString());
+      if (!word) {
+        if (isMdictPopupOpenRef.current) {
+          onClearMdictLookupRef.current?.();
+        }
+        return;
+      }
+
+      const rect = range.getBoundingClientRect();
+      const vh = window.innerHeight || 800;
+      const wordMidY = rect.height > 0 ? (rect.top + rect.bottom) / 2 : vh * 0.25;
+      const placement: 'top' | 'bottom' = wordMidY >= vh * 0.5 ? 'top' : 'bottom';
+      onEnglishWordSelectedRef.current?.({ word, placement });
+    };
+
+    const scheduleMdictSelectionCheck = (delayMs: number) => {
+      if (selectionCheckTimerRef.current) {
+        window.clearTimeout(selectionCheckTimerRef.current);
+      }
+      selectionCheckTimerRef.current = window.setTimeout(() => {
+        selectionCheckTimerRef.current = null;
+        evaluateSelectionForMdict();
+      }, delayMs);
+    };
+
+    useEffect(() => {
+      const handleSelectionChange = () => {
+        if (isEditingRef.current || !hasActiveMdictRef.current) return;
+
+        const activeEl = document.activeElement as HTMLElement | null;
+        if (activeEl?.closest('[data-mdict-popup="true"]')) return;
+
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+          if (selectionCheckTimerRef.current) {
+            window.clearTimeout(selectionCheckTimerRef.current);
+            selectionCheckTimerRef.current = null;
+          }
+          if (isMdictPopupOpenRef.current) {
+            onClearMdictLookupRef.current?.();
+          }
+          return;
+        }
+
+        if (!isPointerActiveRef.current) {
+          scheduleMdictSelectionCheck(220);
+        }
+      };
+
+      document.addEventListener('selectionchange', handleSelectionChange);
+      return () => {
+        document.removeEventListener('selectionchange', handleSelectionChange);
+        if (selectionCheckTimerRef.current) {
+          window.clearTimeout(selectionCheckTimerRef.current);
+          selectionCheckTimerRef.current = null;
+        }
+      };
+    }, []);
+
     const hasActiveSelection = () => {
       const sel = window.getSelection();
       return Boolean(sel && !sel.isCollapsed && sel.toString().length > 0);
@@ -586,8 +685,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     const handleReadPointerDownCapture = () => {
       if (isEditing) return;
+      isPointerActiveRef.current = true;
       const now = performance.now();
-      const active = hasActiveSelection();
+      const active = hasActiveSelection() || isMdictPopupOpenRef.current;
       if (now - lastTouchStartAtRef.current < 40) {
         if (active) hadSelectionOnDownRef.current = true;
       } else {
@@ -598,14 +698,22 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     const handleReadTouchStartCapture = () => {
       if (isEditing) return;
+      isPointerActiveRef.current = true;
       const now = performance.now();
-      const active = hasActiveSelection();
+      const active = hasActiveSelection() || isMdictPopupOpenRef.current;
       if (now - lastPointerDownAtRef.current < 40) {
         if (active) hadSelectionOnDownRef.current = true;
       } else {
         hadSelectionOnDownRef.current = active;
       }
       lastTouchStartAtRef.current = now;
+    };
+
+    const handleReadPointerEnd = () => {
+      isPointerActiveRef.current = false;
+      if (!isEditingRef.current && hasActiveMdictRef.current) {
+        scheduleMdictSelectionCheck(80);
+      }
     };
 
     // Exact visual-line-accurate tap pagination in Read mode:
@@ -619,8 +727,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const target = e.target as HTMLElement | null;
       if (target?.closest('button, a, input, textarea, select')) return;
 
-      // Do not turn page if text is currently selected OR this tap dismissed an active selection
-      if (hadSelectionOnDown || hasActiveSelection()) return;
+      // Do not turn page if text is currently selected OR this tap dismissed an active selection/popup
+      if (hadSelectionOnDown || hasActiveSelection() || isMdictPopupOpenRef.current) {
+        if (isMdictPopupOpenRef.current) {
+          onClearMdictLookupRef.current?.();
+        }
+        return;
+      }
 
       const el = scrollRef.current;
       const articleEl = articleRef.current;
@@ -904,6 +1017,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             ref={scrollRef}
             onPointerDownCapture={handleReadPointerDownCapture}
             onTouchStartCapture={handleReadTouchStartCapture}
+            onPointerUp={handleReadPointerEnd}
+            onTouchEnd={handleReadPointerEnd}
+            onPointerCancel={() => {
+              isPointerActiveRef.current = false;
+            }}
+            onTouchCancel={() => {
+              isPointerActiveRef.current = false;
+            }}
             onClick={handleContainerClick}
             onScroll={handleScroll}
             className="flex-1 min-h-0 w-full overflow-y-auto"

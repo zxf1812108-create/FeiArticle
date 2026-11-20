@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BookA,
   ChevronsUp,
   Download,
   Eye,
@@ -16,6 +17,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ImportModal } from './components/ImportModal';
+import { MdictDictModal } from './components/MdictDictModal';
+import { MdictLookupPopup } from './components/MdictLookupPopup';
 import {
   EditFormatKind,
   MinimalDocView,
@@ -34,6 +37,8 @@ import { TrashModal } from './components/TrashModal';
 import {
   ArticleDoc,
   FolderNode,
+  MdictDictionarySummary,
+  MdictLookupResult,
   PurgedSyncRecords,
   QuotaStats,
   SyncedTreeState,
@@ -41,6 +46,13 @@ import {
   WebDavConfig,
 } from './types';
 import {
+  deleteMdictDictionary,
+  importMdictFile,
+  listMdictDictionaries,
+  lookupMdictWord,
+} from './utils/mdictStorage';
+import {
+  loadActiveMdictId,
   loadDocs,
   loadFolders,
   loadFoldersDirty,
@@ -51,6 +63,7 @@ import {
   loadSyncLogs,
   loadTreeViewState,
   loadWebDavConfig,
+  saveActiveMdictId,
   saveDocs,
   saveFolders,
   saveFoldersDirty,
@@ -172,6 +185,16 @@ export default function App() {
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTrashModal, setShowTrashModal] = useState(false);
+  const [showMdictModal, setShowMdictModal] = useState(false);
+  const [mdictDicts, setMdictDicts] = useState<MdictDictionarySummary[]>([]);
+  const [activeMdictId, setActiveMdictId] = useState<string | null>(() => loadActiveMdictId());
+  const [mdictLookup, setMdictLookup] = useState<{
+    queryWord: string;
+    placement: 'top' | 'bottom';
+    loading: boolean;
+    result: MdictLookupResult | null;
+    error: string | null;
+  } | null>(null);
   const [activeDragPayload, setActiveDragPayload] = useState<DragPayload | null>(null);
   const [trashDragOver, setTrashDragOver] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -185,10 +208,35 @@ export default function App() {
   const treeViewRef = useRef<MinimalTreeViewHandle>(null);
   const syncLongPressTimerRef = useRef<number | null>(null);
   const syncLongPressedRef = useRef(false);
+  const mdictLookupReqRef = useRef(0);
   const docsRef = useRef<ArticleDoc[]>(docs);
   docsRef.current = docs;
   const foldersRef = useRef<FolderNode[]>(folders);
   foldersRef.current = folders;
+
+  useEffect(() => {
+    let cancelled = false;
+    listMdictDictionaries()
+      .then((list) => {
+        if (cancelled) return;
+        setMdictDicts(list);
+        setActiveMdictId((prev) => {
+          if (list.length === 0) {
+            saveActiveMdictId(null);
+            return null;
+          }
+          if (prev && list.some((d) => d.id === prev)) return prev;
+          saveActiveMdictId(list[0].id);
+          return list[0].id;
+        });
+      })
+      .catch(() => {
+        // Ignore IndexedDB unavailable errors on startup
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const activeFolders = useMemo(() => folders.filter((f) => !f.deleted), [folders]);
   const collapsedFolderSet = useMemo(() => new Set(collapsedFolderIds), [collapsedFolderIds]);
@@ -1074,6 +1122,7 @@ export default function App() {
       const captured = docViewRef.current.flushAndCaptureViewState();
       handleUpdateDocViewState(selectedDoc.id, captured);
     }
+    setMdictLookup(null);
     setMainView('tree');
   };
 
@@ -1104,8 +1153,85 @@ export default function App() {
 
   const handleToggleEditMode = () => {
     const nextEditing = !isEditing;
+    if (nextEditing) {
+      setMdictLookup(null);
+    }
     docViewRef.current?.prepareModeSwitch(nextEditing);
     setIsEditing(nextEditing);
+  };
+
+  const runMdictLookup = async (
+    word: string,
+    placement: 'top' | 'bottom',
+    targetDictId?: string | null
+  ) => {
+    const resolvedDictId =
+      targetDictId ||
+      (activeMdictId && mdictDicts.some((d) => d.id === activeMdictId)
+        ? activeMdictId
+        : mdictDicts[0]?.id || null);
+    if (!resolvedDictId) return;
+
+    const reqId = ++mdictLookupReqRef.current;
+    setMdictLookup({
+      queryWord: word,
+      placement,
+      loading: true,
+      result: null,
+      error: null,
+    });
+
+    try {
+      const res = await lookupMdictWord(resolvedDictId, word);
+      if (mdictLookupReqRef.current !== reqId) return;
+      setMdictLookup({
+        queryWord: word,
+        placement,
+        loading: false,
+        result: res,
+        error: null,
+      });
+    } catch (err) {
+      if (mdictLookupReqRef.current !== reqId) return;
+      setMdictLookup({
+        queryWord: word,
+        placement,
+        loading: false,
+        result: null,
+        error: err instanceof Error ? err.message : '查词失败',
+      });
+    }
+  };
+
+  const handleSelectActiveMdict = (dictId: string) => {
+    setActiveMdictId(dictId);
+    saveActiveMdictId(dictId);
+  };
+
+  const handleImportMdictFiles = async (files: FileList) => {
+    const imported: MdictDictionarySummary[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const summary = await importMdictFile(files[i]);
+      imported.push(summary);
+    }
+    const updatedList = await listMdictDictionaries();
+    setMdictDicts(updatedList);
+    if (imported.length > 0 && (!activeMdictId || !updatedList.some((d) => d.id === activeMdictId))) {
+      const nextId = imported[0].id;
+      setActiveMdictId(nextId);
+      saveActiveMdictId(nextId);
+    }
+  };
+
+  const handleDeleteMdictDict = async (id: string) => {
+    await deleteMdictDictionary(id);
+    const updatedList = await listMdictDictionaries();
+    setMdictDicts(updatedList);
+    if (activeMdictId === id) {
+      const fallbackId = updatedList[0]?.id || null;
+      setActiveMdictId(fallbackId);
+      saveActiveMdictId(fallbackId);
+    }
   };
 
   // Batch Import .txt / .md / pasted text (defaults to .txt storage format, silently deduplicates)
@@ -1414,6 +1540,12 @@ export default function App() {
             ref={docViewRef}
             doc={selectedDoc}
             isEditing={isEditing}
+            hasActiveMdict={mdictDicts.length > 0}
+            isMdictPopupOpen={mdictLookup !== null}
+            onEnglishWordSelected={({ word, placement }) => {
+              void runMdictLookup(word, placement);
+            }}
+            onClearMdictLookup={() => setMdictLookup(null)}
             onSaveDraft={(updates) => handleSaveDraft(selectedDoc.id, updates)}
             onViewStateChange={(state) => handleUpdateDocViewState(selectedDoc.id, state)}
             onFetchRemoteBody={() => handleFetchRemoteBody(selectedDoc.id)}
@@ -1626,6 +1758,19 @@ export default function App() {
                 )}
               </button>
 
+              {/* 浏览状态下，浏览图标后面放置词典图标（导入/切换 .mdx 词库） */}
+              {!isEditing && (
+                <button
+                  type="button"
+                  onClick={() => setShowMdictModal(true)}
+                  aria-label="词典设置与切换"
+                  title="词典（导入与切换 .mdx 词库）"
+                  className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+                >
+                  <BookA className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                </button>
+              )}
+
               {/* 3–6. 编辑状态下，编辑图标后面依次放置：一级标题、二级标题、无序列表、分割线 */}
               {isEditing && (
                 <>
@@ -1711,6 +1856,44 @@ export default function App() {
           onRestoreDoc={handleRestoreDocFromTrash}
           onEmptyTrash={handleEmptyTrash}
           onClose={() => setShowTrashModal(false)}
+        />
+      )}
+
+      {/* MDict Dictionary Import & Switch Modal */}
+      {showMdictModal && (
+        <MdictDictModal
+          dictionaries={mdictDicts}
+          activeDictId={activeMdictId}
+          onImportFiles={handleImportMdictFiles}
+          onSelectDict={(id) => {
+            handleSelectActiveMdict(id);
+            if (mdictLookup) {
+              void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, id);
+            }
+          }}
+          onDeleteDict={handleDeleteMdictDict}
+          onClose={() => setShowMdictModal(false)}
+        />
+      )}
+
+      {/* Adaptive MDict Lookup Popup in Read Mode */}
+      {mainView === 'doc' && !isEditing && mdictLookup && (
+        <MdictLookupPopup
+          queryWord={mdictLookup.queryWord}
+          placement={mdictLookup.placement}
+          loading={mdictLookup.loading}
+          result={mdictLookup.result}
+          error={mdictLookup.error}
+          dictionaries={mdictDicts}
+          activeDictId={activeMdictId}
+          onSwitchDict={(dictId) => {
+            handleSelectActiveMdict(dictId);
+            void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, dictId);
+          }}
+          onLookupWord={(nextWord) => {
+            void runMdictLookup(nextWord, mdictLookup.placement);
+          }}
+          onClose={() => setMdictLookup(null)}
         />
       )}
 
