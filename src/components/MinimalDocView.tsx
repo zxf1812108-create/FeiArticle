@@ -11,9 +11,12 @@ import { CloudDownload } from 'lucide-react';
 import { ArticleDoc } from '../types';
 import { BlockNode, formatBytes, parseDocumentBlocks } from '../utils/textParser';
 
+export type EditFormatKind = 'h1' | 'h2' | 'ul' | 'ol' | 'hr';
+
 export interface MinimalDocViewHandle {
   prepareModeSwitch: (nextEditing: boolean) => void;
   flushAndCaptureViewState: () => { mode: 'read' | 'edit'; scrollTop: number };
+  applyMarkdownFormat: (kind: EditFormatKind) => void;
 }
 
 interface MinimalDocViewProps {
@@ -231,14 +234,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const articleRef = useRef<HTMLElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    const [title, setTitle] = useState(doc.title);
     const [content, setContent] = useState(doc.content);
     const [fetching, setFetching] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
 
-    const titleRef = useRef(title);
+    const titleRef = useRef(doc.title);
     const contentRef = useRef(content);
-    titleRef.current = title;
+    titleRef.current = doc.title;
     contentRef.current = content;
 
     const debounceSaveRef = useRef<number | null>(null);
@@ -249,13 +251,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     // Sync local buffer when switching documents
     useEffect(() => {
-      setTitle(doc.title);
       setContent(doc.content);
       titleRef.current = doc.title;
       contentRef.current = doc.content;
       hasUnsavedDraftRef.current = false;
       setFetchError(null);
-    }, [doc.id]);
+    }, [doc.id, doc.title]);
 
     // Sync content if remote body arrives lazily while document is open
     useEffect(() => {
@@ -433,6 +434,103 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           mode: isEditing ? 'edit' : 'read',
           scrollTop: scrollRef.current?.scrollTop ?? 0,
         };
+      },
+      applyMarkdownFormat(kind: EditFormatKind) {
+        const ta = textareaRef.current;
+        if (!ta) return;
+
+        const current = contentRef.current;
+        const selStart = ta.selectionStart ?? current.length;
+        const selEnd = ta.selectionEnd ?? selStart;
+
+        let nextContent = current;
+        let nextSelStart = selStart;
+        let nextSelEnd = selEnd;
+
+        if (kind === 'hr') {
+          const lineStart = current.lastIndexOf('\n', Math.max(0, selStart - 1)) + 1;
+          const lineEndRaw = current.indexOf('\n', selEnd);
+          const lineEnd = lineEndRaw === -1 ? current.length : lineEndRaw;
+          const currentLine = current.slice(lineStart, lineEnd);
+
+          if (currentLine.trim().length === 0) {
+            const insert = '---\n';
+            nextContent = current.slice(0, lineStart) + insert + current.slice(lineEnd);
+            nextSelStart = lineStart + insert.length;
+            nextSelEnd = nextSelStart;
+          } else {
+            const needsLeadingNewline = selStart > 0 && current[selStart - 1] !== '\n';
+            const insert = `${needsLeadingNewline ? '\n' : ''}---\n`;
+            nextContent = current.slice(0, selStart) + insert + current.slice(selEnd);
+            nextSelStart = selStart + insert.length;
+            nextSelEnd = nextSelStart;
+          }
+        } else {
+          const blockStart = current.lastIndexOf('\n', Math.max(0, selStart - 1)) + 1;
+          const blockEndRaw = current.indexOf('\n', selEnd);
+          const blockEnd = blockEndRaw === -1 ? current.length : blockEndRaw;
+          const selectedBlock = current.slice(blockStart, blockEnd);
+          const lines = selectedBlock.split('\n');
+
+          const targetPrefix =
+            kind === 'h1'
+              ? '# '
+              : kind === 'h2'
+                ? '## '
+                : kind === 'ul'
+                  ? '- '
+                  : '1. ';
+
+          const transformed = lines.map((line, idx) => {
+            const stripMatch = line.match(/^(\s*)(#{1,6}\s+|[-*+]\s+|\d+\.\s+)/);
+            const indent = stripMatch ? stripMatch[1] : '';
+            const existingPrefix = stripMatch ? stripMatch[2] : '';
+            const body = stripMatch ? line.slice(stripMatch[0].length) : line;
+
+            if (kind === 'h1' && existingPrefix === '# ') {
+              return indent + body;
+            }
+            if (kind === 'h2' && existingPrefix === '## ') {
+              return indent + body;
+            }
+            if (kind === 'ul' && /^[-*+]\s+$/.test(existingPrefix)) {
+              return indent + body;
+            }
+            if (kind === 'ol' && /^\d+\.\s+$/.test(existingPrefix)) {
+              return indent + body;
+            }
+            const prefix = kind === 'ol' ? `${idx + 1}. ` : targetPrefix;
+            return `${indent}${prefix}${body}`;
+          });
+
+          const replacedBlock = transformed.join('\n');
+          nextContent = current.slice(0, blockStart) + replacedBlock + current.slice(blockEnd);
+
+          if (selStart === selEnd) {
+            const delta = replacedBlock.length - selectedBlock.length;
+            nextSelStart = Math.max(blockStart, selStart + delta);
+            nextSelEnd = nextSelStart;
+          } else {
+            nextSelStart = blockStart;
+            nextSelEnd = blockStart + replacedBlock.length;
+          }
+        }
+
+        contentRef.current = nextContent;
+        setContent(nextContent);
+        scheduleSave(titleRef.current, nextContent);
+
+        requestAnimationFrame(() => {
+          const el = textareaRef.current;
+          if (!el) return;
+          resizeTextarea();
+          try {
+            el.focus({ preventScroll: true });
+            el.setSelectionRange(nextSelStart, nextSelEnd);
+          } catch {
+            // ignore focus errors on mobile
+          }
+        });
       },
     }));
 
@@ -655,6 +753,63 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               ))}
             </ul>
           );
+        case 'table':
+          return (
+            <div
+              key={idx}
+              className="my-5 w-full overflow-x-auto rounded-lg border border-[var(--fei-border)]"
+            >
+              <table className="w-full border-collapse text-[14.5px] leading-relaxed text-[var(--fei-text-primary)]">
+                <thead>
+                  <tr className="bg-[var(--fei-bg-subtle)] border-b border-[var(--fei-border)]">
+                    {block.headers.map((header, colIdx) => {
+                      const align = block.alignments[colIdx] || 'left';
+                      const alignCls =
+                        align === 'center'
+                          ? 'text-center'
+                          : align === 'right'
+                            ? 'text-right'
+                            : 'text-left';
+                      return (
+                        <th
+                          key={colIdx}
+                          className={`px-3 py-2 font-semibold border-r last:border-r-0 border-[var(--fei-border)] ${alignCls}`}
+                        >
+                          {renderInline(header)}
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIdx) => (
+                    <tr
+                      key={rowIdx}
+                      className="border-b last:border-b-0 border-[var(--fei-border)]"
+                    >
+                      {row.map((cell, colIdx) => {
+                        const align = block.alignments[colIdx] || 'left';
+                        const alignCls =
+                          align === 'center'
+                            ? 'text-center'
+                            : align === 'right'
+                              ? 'text-right'
+                              : 'text-left';
+                        return (
+                          <td
+                            key={colIdx}
+                            className={`px-3 py-2 border-r last:border-r-0 border-[var(--fei-border)] align-top ${alignCls}`}
+                          >
+                            {renderInline(cell)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
         case 'hr':
           return <hr key={idx} className="my-7 border-t border-[var(--fei-border)]" />;
       }
@@ -681,67 +836,53 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           className="flex-1 min-h-0 w-full overflow-y-auto"
         >
           <div className="max-w-[720px] mx-auto px-5 sm:px-8 pt-1 pb-[calc(100vh-110px)]">
-          {isEditing ? (
-            <div className="space-y-5">
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => {
-                  setTitle(e.target.value);
-                  scheduleSave(e.target.value, content);
-                }}
-                placeholder="标题"
-                className="w-full bg-transparent text-[23px] font-semibold tracking-tight leading-snug text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none"
-              />
-              <textarea
-                ref={textareaRef}
-                value={content}
-                onChange={(e) => {
-                  setContent(e.target.value);
-                  scheduleSave(title, e.target.value);
-                }}
-                placeholder="开始输入正文…"
-                className="w-full bg-transparent text-[16px] leading-[1.85] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none resize-none overflow-hidden"
-              />
-            </div>
-          ) : (
-            <article ref={articleRef}>
-              <h1 className="text-[23px] font-semibold tracking-tight leading-snug text-[var(--fei-text-primary)] mb-6 text-balance">
-                {title || '无标题文档'}
-              </h1>
-
-              {doc.syncStatus === 'remote-only' && !content ? (
-                <div className="py-12 text-center space-y-3">
-                  <p className="text-[14px] text-[var(--fei-text-muted)]">
-                    正文位于坚果云（约 {formatBytes(doc.byteSize)}），按需拉取后将缓存在本地。
-                  </p>
-                  {fetchError && (
-                    <p className="text-[13px] text-[var(--fei-text-muted)]">{fetchError}</p>
-                  )}
-                  <button
-                    type="button"
-                    onClick={handleFetch}
-                    disabled={fetching}
-                    className="h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium disabled:opacity-60"
-                  >
-                    <CloudDownload className="w-4 h-4" />
-                    <span>{fetching ? '拉取中…' : '拉取正文'}</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="text-[16px] leading-[1.85] text-[var(--fei-text-primary)]">
-                  {blocks.length === 0 ? (
-                    <p className="text-[var(--fei-text-muted)]">
-                      暂无内容，点击右下角编辑图标开始写作。
+            {isEditing ? (
+              <div>
+                <textarea
+                  ref={textareaRef}
+                  value={content}
+                  onChange={(e) => {
+                    setContent(e.target.value);
+                    scheduleSave(titleRef.current, e.target.value);
+                  }}
+                  placeholder="开始输入正文…"
+                  className="w-full bg-transparent text-[16px] leading-[1.85] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none resize-none overflow-hidden"
+                />
+              </div>
+            ) : (
+              <article ref={articleRef}>
+                {doc.syncStatus === 'remote-only' && !content ? (
+                  <div className="py-12 text-center space-y-3">
+                    <p className="text-[14px] text-[var(--fei-text-muted)]">
+                      正文位于坚果云（约 {formatBytes(doc.byteSize)}），按需拉取后将缓存在本地。
                     </p>
-                  ) : (
-                    blocks.map((b, i) => renderBlock(b, i))
-                  )}
-                </div>
-              )}
-            </article>
-          )}
-        </div>
+                    {fetchError && (
+                      <p className="text-[13px] text-[var(--fei-text-muted)]">{fetchError}</p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleFetch}
+                      disabled={fetching}
+                      className="h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium disabled:opacity-60"
+                    >
+                      <CloudDownload className="w-4 h-4" />
+                      <span>{fetching ? '拉取中…' : '拉取正文'}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="text-[16px] leading-[1.85] text-[var(--fei-text-primary)]">
+                    {blocks.length === 0 ? (
+                      <p className="text-[var(--fei-text-muted)]">
+                        暂无内容，点击右下角编辑图标开始写作。
+                      </p>
+                    ) : (
+                      blocks.map((b, i) => renderBlock(b, i))
+                    )}
+                  </div>
+                )}
+              </article>
+            )}
+          </div>
         </div>
       </div>
     );

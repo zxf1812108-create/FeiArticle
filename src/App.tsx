@@ -4,13 +4,22 @@ import {
   ChevronsUp,
   Download,
   FolderTree,
+  Heading1,
+  Heading2,
+  List,
+  ListOrdered,
   Lock,
+  Minus,
   Pencil,
   RefreshCw,
   Scissors,
 } from 'lucide-react';
 import { ImportModal } from './components/ImportModal';
-import { MinimalDocView, MinimalDocViewHandle } from './components/MinimalDocView';
+import {
+  EditFormatKind,
+  MinimalDocView,
+  MinimalDocViewHandle,
+} from './components/MinimalDocView';
 import {
   InsertPosition,
   MinimalTreeView,
@@ -1001,7 +1010,7 @@ export default function App() {
     syncLongPressTimerRef.current = window.setTimeout(() => {
       syncLongPressedRef.current = true;
       setShowSyncModal(true);
-    }, 500);
+    }, 300);
   };
 
   const cancelSyncLongPress = () => {
@@ -1247,20 +1256,51 @@ export default function App() {
                 </button>
               </>
             ) : (
-              /* 文档模式：右侧仅保留编辑模式切换图标 */
-              <button
-                type="button"
-                onClick={handleToggleEditMode}
-                aria-label={isEditing ? '退出编辑' : '进入编辑'}
-                title={isEditing ? '完成编辑' : '编辑文章'}
-                className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
-              >
-                {isEditing ? (
-                  <Check className="w-[19px] h-[19px]" strokeWidth={1.75} />
-                ) : (
-                  <Pencil className="w-[18px] h-[18px]" strokeWidth={1.75} />
+              /* 文档模式：编辑态在对勾前提供 一级标题 / 二级标题 / 无序列表 / 有序列表 / 分割线；浏览态仅保留编辑图标 */
+              <div className="flex items-center gap-0.5 sm:gap-1">
+                {isEditing && (
+                  <>
+                    {(
+                      [
+                        { kind: 'h1', label: '一级标题', Icon: Heading1 },
+                        { kind: 'h2', label: '二级标题', Icon: Heading2 },
+                        { kind: 'ul', label: '无序列表', Icon: List },
+                        { kind: 'ol', label: '有序列表', Icon: ListOrdered },
+                        { kind: 'hr', label: '分割线', Icon: Minus },
+                      ] as Array<{
+                        kind: EditFormatKind;
+                        label: string;
+                        Icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
+                      }>
+                    ).map(({ kind, label, Icon }) => (
+                      <button
+                        key={kind}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => docViewRef.current?.applyMarkdownFormat(kind)}
+                        aria-label={label}
+                        title={label}
+                        className="w-[40px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] active:bg-[var(--fei-bg-selected)] transition-colors"
+                      >
+                        <Icon className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                      </button>
+                    ))}
+                  </>
                 )}
-              </button>
+                <button
+                  type="button"
+                  onClick={handleToggleEditMode}
+                  aria-label={isEditing ? '退出编辑' : '进入编辑'}
+                  title={isEditing ? '完成编辑' : '编辑文章'}
+                  className="w-[40px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
+                >
+                  {isEditing ? (
+                    <Check className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                  ) : (
+                    <Pencil className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                  )}
+                </button>
+              </div>
             )}
           </div>
         </div>

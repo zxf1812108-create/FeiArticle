@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { installFeiArticalAndroidIcons } from './generate-android-icons.mjs';
 
 const versionCode = process.env.VERSION_CODE;
 const versionName = process.env.VERSION_NAME;
@@ -80,6 +81,8 @@ if (fs.existsSync(manifestPath)) {
   }
   fs.writeFileSync(manifestPath, manifest, 'utf8');
 }
+
+installFeiArticalAndroidIcons(appDir);
 
 // Inject native OkHttp WebDavPlugin, pure-Java LanServerPlugin & camera-cutout-safe MainActivity
 const javaPkgDir = path.join(appDir, 'src', 'main', 'java', 'com', 'feiartical', 'app');

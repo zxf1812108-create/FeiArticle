@@ -147,61 +147,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
             </div>
           </section>
 
-          {/* 区域二：电脑直连（同飞记局域网直连） */}
-          <section className="space-y-2">
-            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] divide-y divide-[var(--fei-border)] overflow-hidden">
-              <div className="flex items-center justify-between gap-3 px-3.5 h-11">
-                <span className="text-[13.5px] font-medium text-[var(--fei-text-primary)]">
-                  电脑直连
-                </span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={lanRunning}
-                  aria-label="切换电脑直连"
-                  disabled={lanLoading}
-                  onClick={() => onToggleLan(!lanRunning)}
-                  className={`relative inline-flex h-[22px] w-[40px] shrink-0 items-center rounded-full transition-colors duration-150 disabled:opacity-50 ${
-                    lanRunning
-                      ? 'bg-[var(--fei-btn-primary-bg)]'
-                      : 'bg-[var(--fei-border-strong)]'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-[16px] w-[16px] rounded-full transition-transform duration-150 ${
-                      lanRunning
-                        ? 'translate-x-[21px] bg-[var(--fei-btn-primary-text)]'
-                        : 'translate-x-[3px] bg-[var(--fei-bg-surface)]'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              {lanRunning && lanUrl && (
-                <div className="px-3.5 py-2.5 space-y-1.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[12.5px] font-code text-[var(--fei-text-primary)] truncate select-all">
-                      {lanUrl}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => onCopyLanUrl(lanUrl)}
-                      aria-label="复制直连地址"
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[12px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>复制</span>
-                    </button>
-                  </div>
-                  <p className="text-[11.5px] leading-relaxed text-[var(--fei-text-muted)]">
-                    手机与电脑连入同一 Wi-Fi，在电脑浏览器打开上方地址即可管理文档
-                  </p>
-                </div>
-              )}
-            </div>
-          </section>
-
-          {/* 区域三：加密密码 */}
+          {/* 区域二：加密密码 */}
           <section className="space-y-2">
             <h3 className="px-0.5 text-[13.5px] font-medium text-[var(--fei-text-primary)]">
               加密密码
@@ -270,6 +216,60 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                 {errorMsg}
               </p>
             )}
+          </section>
+
+          {/* 区域三：电脑直连（同飞记局域网直连） */}
+          <section className="space-y-2">
+            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] divide-y divide-[var(--fei-border)] overflow-hidden">
+              <div className="flex items-center justify-between gap-3 px-3.5 h-11">
+                <span className="text-[13.5px] font-medium text-[var(--fei-text-primary)]">
+                  电脑直连
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={lanRunning}
+                  aria-label="切换电脑直连"
+                  disabled={lanLoading}
+                  onClick={() => onToggleLan(!lanRunning)}
+                  className={`relative inline-flex h-[22px] w-[40px] shrink-0 items-center rounded-full transition-colors duration-150 disabled:opacity-50 ${
+                    lanRunning
+                      ? 'bg-[var(--fei-btn-primary-bg)]'
+                      : 'bg-[var(--fei-border-strong)]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-[16px] w-[16px] rounded-full transition-transform duration-150 ${
+                      lanRunning
+                        ? 'translate-x-[21px] bg-[var(--fei-btn-primary-text)]'
+                        : 'translate-x-[3px] bg-[var(--fei-bg-surface)]'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {lanRunning && lanUrl && (
+                <div className="px-3.5 py-2.5 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12.5px] font-code text-[var(--fei-text-primary)] truncate select-all">
+                      {lanUrl}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onCopyLanUrl(lanUrl)}
+                      aria-label="复制直连地址"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[12px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>复制</span>
+                    </button>
+                  </div>
+                  <p className="text-[11.5px] leading-relaxed text-[var(--fei-text-muted)]">
+                    手机与电脑连入同一 Wi-Fi，在电脑浏览器打开上方地址即可管理文档
+                  </p>
+                </div>
+              )}
+            </div>
           </section>
 
           {/* Compact Footer Actions */}

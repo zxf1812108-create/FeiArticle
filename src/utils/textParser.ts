@@ -4,17 +4,81 @@ export interface TocItem {
   level: 1 | 2 | 3;
 }
 
+export type TableAlignment = 'left' | 'center' | 'right';
+
 export type BlockNode =
   | { type: 'heading'; level: 1 | 2 | 3; id: string; text: string }
   | { type: 'paragraph'; text: string }
   | { type: 'blockquote'; text: string }
   | { type: 'code'; language: string; code: string }
   | { type: 'list'; ordered: boolean; items: string[] }
+  | {
+      type: 'table';
+      headers: string[];
+      alignments: TableAlignment[];
+      rows: string[][];
+    }
   | { type: 'hr' };
+
+function splitTableCells(rawLine: string): string[] {
+  let line = rawLine.trim();
+  if (line.startsWith('|')) line = line.slice(1);
+  if (line.endsWith('|') && !line.endsWith('\\|')) line = line.slice(0, -1);
+
+  const cells: string[] = [];
+  let current = '';
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '\\' && i + 1 < line.length && line[i + 1] === '|') {
+      current += '|';
+      i++;
+    } else if (ch === '|') {
+      cells.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function parseTableDelimiterRow(rawLine: string): TableAlignment[] | null {
+  const trimmed = rawLine.trim();
+  if (!trimmed.includes('|')) return null;
+  const cells = splitTableCells(trimmed);
+  if (cells.length === 0) return null;
+
+  const alignments: TableAlignment[] = [];
+  for (const cell of cells) {
+    if (!/^:?-{1,}:?$/.test(cell)) {
+      return null;
+    }
+    if (cell.startsWith(':') && cell.endsWith(':')) {
+      alignments.push('center');
+    } else if (cell.endsWith(':')) {
+      alignments.push('right');
+    } else {
+      alignments.push('left');
+    }
+  }
+  return alignments;
+}
+
+function isTableStart(lines: string[], index: number): boolean {
+  if (index + 1 >= lines.length) return false;
+  const headerLine = lines[index].trim();
+  const sepLine = lines[index + 1].trim();
+  if (!headerLine.includes('|') || !sepLine.includes('|')) return false;
+  const alignments = parseTableDelimiterRow(sepLine);
+  if (!alignments) return false;
+  const headers = splitTableCells(headerLine);
+  return headers.length > 0 && headers.length === alignments.length;
+}
 
 export function countWords(text: string): number {
   if (!text) return 0;
-  const cleaned = text.replace(/[#*`>~\-[\]()_]/g, ' ').trim();
+  const cleaned = text.replace(/[#*`>~\-[\]()_|]/g, ' ').trim();
   const cjkMatches = cleaned.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g);
   const cjkCount = cjkMatches ? cjkMatches.length : 0;
   const nonCjk = cleaned.replace(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g, ' ');
@@ -30,7 +94,7 @@ export function extractExcerpt(content: string, maxLen = 96): string {
   const plain = content
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/^#{1,6}\s+/gm, '')
-    .replace(/[*_`>~]/g, '')
+    .replace(/[*_`>~|]/g, ' ')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/\s+/g, ' ')
     .trim();
@@ -111,6 +175,35 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
       continue;
     }
 
+    // GFM Markdown table
+    if (isTableStart(lines, i)) {
+      const headers = splitTableCells(lines[i]);
+      const alignments = parseTableDelimiterRow(lines[i + 1])!;
+      const colCount = headers.length;
+      const rows: string[][] = [];
+      i += 2;
+
+      while (i < lines.length) {
+        const rowLine = lines[i].trim();
+        if (!rowLine || !rowLine.includes('|')) break;
+        if (
+          rowLine.startsWith('```') ||
+          rowLine.startsWith('#') ||
+          rowLine.startsWith('>') ||
+          /^(-{3,}|\*{3,}|_{3,})$/.test(rowLine)
+        ) {
+          break;
+        }
+        const cells = splitTableCells(rowLine);
+        const normalizedRow = Array.from({ length: colCount }, (_, colIdx) => cells[colIdx] ?? '');
+        rows.push(normalizedRow);
+        i++;
+      }
+
+      blocks.push({ type: 'table', headers, alignments, rows });
+      continue;
+    }
+
     // Horizontal rule
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
       blocks.push({ type: 'hr' });
@@ -188,6 +281,7 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
         /^[-*+]\s+/.test(next) ||
         /^\d+\.\s+/.test(next) ||
         /^(-{3,}|\*{3,}|_{3,})$/.test(next) ||
+        isTableStart(lines, i) ||
         (CN_CHAPTER_RE.test(next) && next.length <= 36)
       ) {
         break;
