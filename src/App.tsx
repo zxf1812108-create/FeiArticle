@@ -352,7 +352,6 @@ export default function App() {
           });
         }
         setDocs((prev) => [...prev, ...created]);
-        showToast(`电脑直连已导入 ${created.length} 篇文档`);
       }
     });
   }, [lanRunning, selectedDocId]);
@@ -686,7 +685,6 @@ export default function App() {
       handleMoveFolderToPosition(cutItem.id, targetFolderId, 'after');
       setActiveTarget(cutItem);
       setCutItem(null);
-      showToast('已插入到目标目录下方');
       return;
     }
 
@@ -700,13 +698,11 @@ export default function App() {
       handleMoveDocToPosition(cutItem.id, targetDoc.folderId, targetDoc.id, 'after');
       setActiveTarget(cutItem);
       setCutItem(null);
-      showToast('已插入到目标文章下方');
     } else {
       handleMoveDocToPosition(cutItem.id, activeTarget.id, null, 'before');
       handleExpandFolder(activeTarget.id);
       setActiveTarget(cutItem);
       setCutItem(null);
-      showToast('已插入到所选目录下方');
     }
   };
 
@@ -900,10 +896,6 @@ export default function App() {
     }
 
     setDocs((prev) => [...prev, ...created]);
-    const targetFolderName = items[0]?.folderId
-      ? folders.find((f) => f.id === items[0].folderId)?.name || '所选目录'
-      : '未分类';
-    showToast(`已导入 ${created.length} 篇 .txt 文档至「${targetFolderName}」`);
   };
 
   // WebDAV Manual Sync
@@ -1020,7 +1012,6 @@ export default function App() {
       setWebDavConfig(outcome.config);
       applyQuotaDelta(outcome.quotaDelta);
       setSyncLogs((prev) => [outcome.log, ...prev].slice(0, 20));
-      showToast(outcome.log.summary);
     } catch (err) {
       const msg = err instanceof Error ? err.message : '坚果云同步失败';
       setSyncLogs((prev) =>
