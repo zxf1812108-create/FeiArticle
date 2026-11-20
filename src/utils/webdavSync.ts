@@ -1,3 +1,4 @@
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import {
   ArticleDoc,
   FolderNode,
@@ -25,12 +26,95 @@ interface ProxyResponse {
 const MANIFEST_PATH = '_manifest.json';
 const DOCS_DIR = 'docs/';
 
+function encodeBasicAuthUtf8(username: string, password: string): string {
+  const bytes = new TextEncoder().encode(`${username}:${password}`);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return `Basic ${btoa(binary)}`;
+}
+
+function getHeaderCaseInsensitive(
+  headers: Record<string, string> | undefined,
+  name: string
+): string {
+  if (!headers) return '';
+  const target = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === target) return v;
+  }
+  return '';
+}
+
+async function callWebDavNative(
+  config: WebDavConfig,
+  method: 'GET' | 'PUT' | 'MKCOL' | 'DELETE' | 'PROPFIND' | 'HEAD',
+  relativePath: string,
+  options?: { body?: string; ifNoneMatch?: string; depth?: '0' | '1' }
+): Promise<ProxyResponse> {
+  const cleanBase = config.baseUrl.endsWith('/') ? config.baseUrl : `${config.baseUrl}/`;
+  const cleanRel = relativePath.replace(/^\/+/, '');
+  const url = `${cleanBase}${cleanRel}`;
+
+  const headers: Record<string, string> = {
+    Authorization: encodeBasicAuthUtf8(config.username, config.password),
+    'User-Agent': 'FeiArtical-Android/1.0',
+  };
+  if (options?.ifNoneMatch) headers['If-None-Match'] = options.ifNoneMatch;
+  if (options?.depth) headers['Depth'] = options.depth;
+  if (method === 'PUT') {
+    headers['Content-Type'] = cleanRel.endsWith('.json')
+      ? 'application/json; charset=utf-8'
+      : 'text/plain; charset=utf-8';
+  }
+
+  try {
+    const res = await CapacitorHttp.request({
+      url,
+      method,
+      headers,
+      data: method === 'PUT' ? (options?.body ?? '') : undefined,
+      responseType: 'text',
+    });
+
+    const status = res.status || 0;
+    const rawBody =
+      typeof res.data === 'string'
+        ? res.data
+        : res.data != null
+          ? JSON.stringify(res.data)
+          : '';
+    const etag = getHeaderCaseInsensitive(res.headers, 'etag');
+    const lastModified = getHeaderCaseInsensitive(res.headers, 'last-modified');
+
+    return {
+      ok: (status >= 200 && status < 300) || status === 304,
+      status,
+      etag,
+      lastModified,
+      body: status === 304 ? '' : rawBody,
+      bytesTransferred: status === 304 ? 0 : getByteSize(rawBody),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : '坚果云网络请求失败',
+    };
+  }
+}
+
 async function callWebDav(
   config: WebDavConfig,
   method: 'GET' | 'PUT' | 'MKCOL' | 'DELETE' | 'PROPFIND' | 'HEAD',
   relativePath: string,
   options?: { body?: string; ifNoneMatch?: string; depth?: '0' | '1' }
 ): Promise<ProxyResponse> {
+  if (Capacitor.isNativePlatform()) {
+    return callWebDavNative(config, method, relativePath, options);
+  }
+
   const res = await fetch('/api/webdav/proxy', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -287,9 +371,16 @@ export async function runIncrementalWebDavSync(
 
         const docExt = doc.format === 'md' ? 'md' : 'txt';
         requestCount++;
-        const putRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${doc.id}.${docExt}`, {
+        let putRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${doc.id}.${docExt}`, {
           body: uploadBody,
         });
+        if (!putRes.ok && (putRes.status === 404 || putRes.status === 409)) {
+          // Fallback to root sync directory if remote docs/ subfolder cannot be created via MKCOL
+          requestCount++;
+          putRes = await callWebDav(config, 'PUT', `${doc.id}.${docExt}`, {
+            body: uploadBody,
+          });
+        }
         if (!putRes.ok) {
           throw new Error(`上传《${doc.title}》失败（HTTP ${putRes.status}）`);
         }
@@ -373,6 +464,10 @@ export async function runIncrementalWebDavSync(
           if (!getDoc.ok && getDoc.status === 404) {
             requestCount++;
             getDoc = await callWebDav(config, 'GET', `${DOCS_DIR}${id}.${fallbackExt}`);
+          }
+          if (!getDoc.ok && getDoc.status === 404) {
+            requestCount++;
+            getDoc = await callWebDav(config, 'GET', `${id}.${primaryExt}`);
           }
           if (getDoc.ok && typeof getDoc.body === 'string') {
             downloadBytes += getDoc.bytesTransferred || getByteSize(getDoc.body);
@@ -478,6 +573,9 @@ export async function fetchRemoteDocBody(
   let res = await callWebDav(config, 'GET', `${DOCS_DIR}${docId}.${primaryExt}`);
   if (!res.ok && res.status === 404) {
     res = await callWebDav(config, 'GET', `${DOCS_DIR}${docId}.${fallbackExt}`);
+  }
+  if (!res.ok && res.status === 404) {
+    res = await callWebDav(config, 'GET', `${docId}.${primaryExt}`);
   }
   if (!res.ok || typeof res.body !== 'string') {
     throw new Error(res.error || `拉取正文失败（HTTP ${res.status}）`);

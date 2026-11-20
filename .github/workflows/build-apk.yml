@@ -1,0 +1,189 @@
+name: Build Android Release APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: '可选：本次发布说明'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-release-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java 21 (Android Gradle)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Compute version (1.x this year, 2.1 next year, auto-increment x)
+        id: version
+        run: |
+          git fetch --tags --force
+          BASE_YEAR=2026
+          CURRENT_YEAR=$(TZ='Asia/Shanghai' date +%Y)
+          MAJOR=$((CURRENT_YEAR - BASE_YEAR + 1))
+          if [ "$MAJOR" -lt 1 ]; then
+            MAJOR=1
+          fi
+
+          LAST_MINOR=$(git tag -l "v${MAJOR}.*" \
+            | sed -E "s/^v${MAJOR}\.([0-9]+)$/\1/" \
+            | grep -E '^[0-9]+$' \
+            | sort -n \
+            | tail -n 1 || true)
+
+          if [ -z "$LAST_MINOR" ]; then
+            MINOR=1
+          else
+            MINOR=$((LAST_MINOR + 1))
+          fi
+
+          VERSION_NAME="${MAJOR}.${MINOR}"
+          VERSION_CODE=$((MAJOR * 10000 + MINOR))
+          TAG_NAME="v${VERSION_NAME}"
+
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Computed release version: ${VERSION_NAME} (versionCode=${VERSION_CODE}, tag=${TAG_NAME})"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Generate and sync Capacitor Android project
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Configure Android permissions, version, and signing
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          # Ensure internet permission in AndroidManifest.xml
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <application|' "$MANIFEST"
+          fi
+
+          # Prepare Release Keystore (use repository Secrets if provided; otherwise generate a fallback signing key)
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+            echo "SIGNING_MODE=persistent" >> "$GITHUB_ENV"
+          else
+            KEYSTORE_PASSWORD="feiartical-auto-keystore"
+            KEY_ALIAS="feiartical"
+            KEY_PASSWORD="feiartical-auto-keystore"
+            keytool -genkey -v \
+              -keystore android/app/release.keystore \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              -dname "CN=FeiArtical, OU=Mobile, O=FeiArtical, L=Beijing, S=Beijing, C=CN"
+            echo "SIGNING_MODE=ephemeral" >> "$GITHUB_ENV"
+          fi
+
+          # Write gradle.properties signing variables safely (never echoed)
+          cat <<EOF >> android/gradle.properties
+
+          FEI_STORE_FILE=release.keystore
+          FEI_STORE_PASSWORD=${KEYSTORE_PASSWORD}
+          FEI_KEY_ALIAS=${KEY_ALIAS}
+          FEI_KEY_PASSWORD=${KEY_PASSWORD}
+          EOF
+
+          # Patch android/app/build.gradle with computed versionCode, versionName, and release signingConfig
+          node -e '
+            const fs = require("fs");
+            const file = "android/app/build.gradle";
+            let content = fs.readFileSync(file, "utf8");
+            const versionCode = process.env.VERSION_CODE;
+            const versionName = process.env.VERSION_NAME;
+
+            content = content.replace(/versionCode\s+\d+/, `versionCode ${versionCode}`);
+            content = content.replace(/versionName\s+"[^"]*"/, `versionName "${versionName}"`);
+
+            const signingBlock = `
+    signingConfigs {
+        release {
+            storeFile file(project.findProperty("FEI_STORE_FILE"))
+            storePassword project.findProperty("FEI_STORE_PASSWORD")
+            keyAlias project.findProperty("FEI_KEY_ALIAS")
+            keyPassword project.findProperty("FEI_KEY_PASSWORD")
+        }
+    }
+    buildTypes {`;
+
+            if (!content.includes("signingConfigs")) {
+              content = content.replace(/buildTypes\s*\{/, signingBlock);
+            }
+            content = content.replace(
+              /release\s*\{/,
+              `release {\n            signingConfig signingConfigs.release`
+            );
+
+            fs.writeFileSync(file, content, "utf8");
+          '
+
+      - name: Build signed Release APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Prepare APK artifact
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+        run: |
+          mkdir -p release-output
+          cp android/app/build/outputs/apk/release/app-release.apk "release-output/FeiArtical-v${VERSION_NAME}-release.apk"
+          ls -lh release-output/
+
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FeiArtical-v${{ steps.version.outputs.version_name }}-release-apk
+          path: release-output/FeiArtical-v${{ steps.version.outputs.version_name }}-release.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: FeiArtical ${{ steps.version.outputs.tag_name }}
+          body: |
+            ### FeiArtical ${{ steps.version.outputs.tag_name }} (Android Release APK)
+
+            - **版本号**：`${{ steps.version.outputs.version_name }}` (`versionCode: ${{ steps.version.outputs.version_code }}`)
+            - **下载地址**：点击下方 `FeiArtical-v${{ steps.version.outputs.version_name }}-release.apk` 直接下载安装。
+            ${{ inputs.release_notes != '' && format('- **更新说明**：{0}', inputs.release_notes) || '' }}
+            ${{ env.SIGNING_MODE == 'ephemeral' && '> 提示：本次使用自动生成的临时密钥签名；若希望后续版本直接覆盖升级，请在仓库 Settings → Secrets 中配置 `ANDROID_KEYSTORE_BASE64`、`KEYSTORE_PASSWORD`、`KEY_ALIAS`、`KEY_PASSWORD`。' || '' }}
+          files: release-output/FeiArtical-v${{ steps.version.outputs.version_name }}-release.apk
