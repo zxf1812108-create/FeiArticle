@@ -61,7 +61,7 @@ jobs:
           echo "Computed release version: ${VERSION_NAME} (versionCode=${VERSION_CODE}, tag=${TAG_NAME})"
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Build web assets
         run: npm run build
