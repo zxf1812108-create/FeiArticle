@@ -367,7 +367,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           <div className="mb-3 px-3.5 py-2.5 rounded-lg bg-[var(--fei-bg-subtle)] flex items-center justify-between gap-3 text-[13px]">
             <span className="text-[var(--fei-text-muted)] truncate">
               {cutLabel
-                ? `已剪切 ${cutLabel} — 点选目标目录或文章后，点击底部粘贴图标插入其后`
+                ? `已剪切 ${cutLabel} — 点选目标位置后，点击底部插入图标插入其下方`
                 : '请点击要剪切的目录或文章'}
             </span>
             <button

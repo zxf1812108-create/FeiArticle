@@ -39,6 +39,7 @@ import {
   loadDocs,
   loadFolders,
   loadFoldersDirty,
+  loadLastOpenedDocId,
   loadQuotaStats,
   loadStorageDirConfig,
   loadSyncLogs,
@@ -47,6 +48,7 @@ import {
   saveDocs,
   saveFolders,
   saveFoldersDirty,
+  saveLastOpenedDocId,
   saveQuotaStats,
   saveStorageDirConfig,
   saveSyncLogs,
@@ -74,7 +76,8 @@ import {
 
 type MainView = 'tree' | 'doc';
 
-const PasteInIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
+// Document mode icon styled after FeiArtical's folded-page + tree-line emblem in toolbar monochrome stroke style
+const ArticleDocIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
   className = 'w-[19px] h-[19px]',
   strokeWidth = 1.75,
 }) => (
@@ -88,11 +91,35 @@ const PasteInIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
     className={className}
     aria-hidden="true"
   >
-    <rect x="6" y="2" width="6" height="3.5" rx="1" />
-    <path d="M6 4H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h5" />
-    <path d="M12 4h1a2 2 0 0 1 2 2v2.5" />
-    <path d="M11.5 8.5H17l4 4V20a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 10 20V10a1.5 1.5 0 0 1 1.5-1.5Z" />
-    <path d="M17 8.5v4h4" />
+    <path d="M6.5 3.5h8L19 8v11.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19.5V5a1.5 1.5 0 0 1 1.5-1.5Z" />
+    <path d="M14.5 3.5V8H19" />
+    <path d="M8.5 11.2h7" />
+    <circle cx="8.8" cy="14.3" r="0.9" fill="currentColor" stroke="none" />
+    <path d="M11.3 14.3h4.2" />
+    <circle cx="8.8" cy="17.3" r="0.9" fill="currentColor" stroke="none" />
+    <path d="M11.3 17.3h3.2" />
+  </svg>
+);
+
+// Insert-below icon depicting placing the cut folder/article beneath the currently selected row
+const InsertBelowIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
+  className = 'w-[19px] h-[19px]',
+  strokeWidth = 1.75,
+}) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={strokeWidth}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M5 4h14" />
+    <path d="M12 7.5V13" />
+    <path d="m9.5 10.5 2.5 2.5 2.5-2.5" />
+    <rect x="5" y="16.5" width="14" height="3.8" rx="1.2" />
   </svg>
 );
 
@@ -107,7 +134,7 @@ export default function App() {
   const initialTreeState = useMemo(() => loadTreeViewState(), []);
 
   const [mainView, setMainView] = useState<MainView>('tree');
-  const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
+  const [selectedDocId, setSelectedDocId] = useState<string | null>(() => loadLastOpenedDocId());
   const [isEditing, setIsEditing] = useState(false);
 
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<string[]>(
@@ -169,6 +196,7 @@ export default function App() {
   useEffect(() => saveWebDavConfig(webDavConfig), [webDavConfig]);
   useEffect(() => saveQuotaStats(quotaStats), [quotaStats]);
   useEffect(() => saveSyncLogs(syncLogs), [syncLogs]);
+  useEffect(() => saveLastOpenedDocId(selectedDocId), [selectedDocId]);
   useEffect(
     () =>
       saveTreeViewState({
@@ -610,26 +638,23 @@ export default function App() {
     }
   };
 
-  const handleCutButtonClick = () => {
-    if (cutItem || pickCutMode) {
-      setCutItem(null);
-      setPickCutMode(false);
-      return;
-    }
-    if (activeTarget) {
-      setCutItem(activeTarget);
-    } else {
-      setPickCutMode(true);
-    }
-  };
-
-  const handlePasteButtonClick = () => {
+  const handleCutOrInsertClick = () => {
     if (!cutItem) {
-      showToast('请先点击剪切图标选择要移动的目录或文章');
+      if (pickCutMode) {
+        setPickCutMode(false);
+        return;
+      }
+      if (activeTarget) {
+        setCutItem(activeTarget);
+      } else {
+        setPickCutMode(true);
+        showToast('请点选要剪切的目录或文章');
+      }
       return;
     }
+
     if (!activeTarget) {
-      showToast('请先点选一个目标目录或文章');
+      showToast('请先点选要插入其下方的目标目录或文章');
       return;
     }
 
@@ -643,7 +668,7 @@ export default function App() {
       }
 
       if (!targetFolderId) {
-        showToast('请点选一个目标目录以插入其后');
+        showToast('请点选一个目标目录以插入其下方');
         return;
       }
       if (targetFolderId === cutItem.id) {
@@ -653,7 +678,7 @@ export default function App() {
       handleMoveFolderToPosition(cutItem.id, targetFolderId, 'after');
       setActiveTarget(cutItem);
       setCutItem(null);
-      showToast('已粘贴目录到目标之后');
+      showToast('已插入到目标目录下方');
       return;
     }
 
@@ -667,12 +692,13 @@ export default function App() {
       handleMoveDocToPosition(cutItem.id, targetDoc.folderId, targetDoc.id, 'after');
       setActiveTarget(cutItem);
       setCutItem(null);
-      showToast('已粘贴文章到目标之后');
+      showToast('已插入到目标文章下方');
     } else {
       handleMoveDocToPosition(cutItem.id, activeTarget.id, null, 'before');
+      handleExpandFolder(activeTarget.id);
       setActiveTarget(cutItem);
       setCutItem(null);
-      showToast('已粘贴文章到所选目录下方');
+      showToast('已插入到所选目录下方');
     }
   };
 
@@ -798,6 +824,31 @@ export default function App() {
       handleUpdateDocViewState(selectedDoc.id, captured);
     }
     setMainView('tree');
+  };
+
+  const handleToggleTreeDocView = () => {
+    if (mainView === 'doc') {
+      handleExitDocToTree();
+      return;
+    }
+    const liveDocs = docs.filter((d) => !d.deleted);
+    let targetDoc = selectedDocId
+      ? liveDocs.find((d) => d.id === selectedDocId) ?? null
+      : null;
+    if (!targetDoc && activeTarget?.kind === 'doc') {
+      targetDoc = liveDocs.find((d) => d.id === activeTarget.id) ?? null;
+    }
+    if (!targetDoc && liveDocs.length > 0) {
+      targetDoc = [...liveDocs].sort(
+        (a, b) => (b.lastReadAt ?? 0) - (a.lastReadAt ?? 0) || b.updatedAt - a.updatedAt
+      )[0];
+    }
+    if (!targetDoc) {
+      showToast('暂无可打开的文档');
+      return;
+    }
+    setPickCutMode(false);
+    handleOpenDoc(targetDoc.id);
   };
 
   const handleToggleEditMode = () => {
@@ -1138,169 +1189,158 @@ export default function App() {
         aria-label="底部工具栏"
         className="shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)]"
       >
-        <div className="h-[52px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-between">
-          {/* Leftmost: Directory Tree Tab */}
+        <div className="h-[52px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-end gap-0.5 sm:gap-1">
+          {mainView === 'tree' ? (
+            <>
+              {/* 收起符号：收起所有内容，只显示目录 */}
+              <button
+                type="button"
+                onClick={handleCollapseAllFolders}
+                aria-label="收起所有目录"
+                title="收起所有内容，只显示目录"
+                className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
+              >
+                <ChevronsUp className="w-[19px] h-[19px]" strokeWidth={1.75} />
+              </button>
+
+              {/* 剪切 / 插入切换图标：剪切后变为插入图标，点击插入到选中位置下方并变回剪切图标 */}
+              <button
+                type="button"
+                onClick={handleCutOrInsertClick}
+                aria-label={cutItem ? '插入到当前选中位置的下方' : '剪切目录或文章'}
+                title={
+                  cutItem
+                    ? '插入到当前选中位置的下方'
+                    : pickCutMode
+                      ? '取消选择剪切项'
+                      : '剪切选定的目录或文章'
+                }
+                className={`w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-colors ${
+                  cutItem || pickCutMode
+                    ? 'text-[var(--fei-text-primary)] bg-[var(--fei-bg-selected)]'
+                    : 'text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)]'
+                }`}
+              >
+                {cutItem ? (
+                  <InsertBelowIcon className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                ) : (
+                  <Scissors className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                )}
+              </button>
+
+              {/* 导入图标 */}
+              <button
+                type="button"
+                onClick={() => setShowImportModal(true)}
+                aria-label="导入文本文档"
+                title="导入 .txt / .md 文档或粘贴文本"
+                className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
+              >
+                <Download className="w-[19px] h-[19px]" strokeWidth={1.75} />
+              </button>
+
+              {/* 加密图标 */}
+              <button
+                type="button"
+                onClick={handleEncryptButtonClick}
+                aria-label="加密或解密选中的文档或目录"
+                title="加密 / 解密选中的文档或目录"
+                className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
+              >
+                <Lock className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
+              </button>
+
+              {/* 同步图标（点击直接同步，长按打开同步设置） */}
+              <button
+                type="button"
+                onClick={handleDirectSyncClick}
+                onPointerDown={handleSyncPointerDown}
+                onPointerUp={cancelSyncLongPress}
+                onPointerLeave={cancelSyncLongPress}
+                onPointerCancel={cancelSyncLongPress}
+                onContextMenu={(e) => e.preventDefault()}
+                disabled={isSyncing}
+                aria-label={hasPendingSync ? '点击同步，长按打开同步设置（有未同步变更）' : '点击同步，长按打开同步设置'}
+                title={
+                  hasPendingSync
+                    ? '有内容未同步至坚果云，点击直接同步，长按打开同步设置'
+                    : '点击直接同步，长按打开同步设置'
+                }
+                className="relative w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors disabled:opacity-50 select-none"
+              >
+                <RefreshCw
+                  className={`w-[19px] h-[19px] ${isSyncing ? 'animate-spin' : ''}`}
+                  strokeWidth={1.75}
+                />
+                {hasPendingSync && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute top-[10px] right-[10px] w-[5.5px] h-[5.5px] rounded-full bg-[var(--fei-text-primary)]"
+                  />
+                )}
+              </button>
+            </>
+          ) : (
+            /* 文档模式：编辑态在对勾前提供 一级标题 / 二级标题 / 无序列表 / 分割线；浏览态保留编辑图标 */
+            <>
+              {isEditing && (
+                <>
+                  {(
+                    [
+                      { kind: 'h1', label: '一级标题', Icon: Heading1 },
+                      { kind: 'h2', label: '二级标题', Icon: Heading2 },
+                      { kind: 'ul', label: '无序列表', Icon: List },
+                      { kind: 'hr', label: '分割线', Icon: Minus },
+                    ] as Array<{
+                      kind: EditFormatKind;
+                      label: string;
+                      Icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
+                    }>
+                  ).map(({ kind, label, Icon }) => (
+                    <button
+                      key={kind}
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => docViewRef.current?.applyMarkdownFormat(kind)}
+                      aria-label={label}
+                      title={label}
+                      className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] active:bg-[var(--fei-bg-selected)] transition-colors"
+                    >
+                      <Icon className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                    </button>
+                  ))}
+                </>
+              )}
+              <button
+                type="button"
+                onClick={handleToggleEditMode}
+                aria-label={isEditing ? '退出编辑' : '进入编辑'}
+                title={isEditing ? '完成编辑' : '编辑文章'}
+                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
+              >
+                {isEditing ? (
+                  <Check className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                ) : (
+                  <Pencil className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                )}
+              </button>
+            </>
+          )}
+
+          {/* Far Right: Directory Tree <-> Document Mode Toggle */}
           <button
             type="button"
-            onClick={handleExitDocToTree}
-            aria-label="目录树"
-            title="目录树"
-            className={`min-w-[44px] h-[44px] px-2.5 inline-flex items-center justify-center rounded-lg transition-colors duration-150 shrink-0 ${
-              mainView === 'tree'
-                ? 'text-[var(--fei-text-primary)]'
-                : 'text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)]'
-            }`}
+            onClick={handleToggleTreeDocView}
+            aria-label={mainView === 'tree' ? '切换到文档模式' : '切换到目录树'}
+            title={mainView === 'tree' ? '切换到文档模式（打开上次文档）' : '返回目录树'}
+            className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0"
           >
-            <FolderTree
-              className="w-[20px] h-[20px]"
-              strokeWidth={mainView === 'tree' ? 2.1 : 1.75}
-            />
-          </button>
-
-          {/* Right Side Icons (Strict Monochrome Black/White/Gray) */}
-          <div className="flex items-center gap-1">
             {mainView === 'tree' ? (
-              <>
-                {/* 收起符号：收起所有内容，只显示目录 */}
-                <button
-                  type="button"
-                  onClick={handleCollapseAllFolders}
-                  aria-label="收起所有目录"
-                  title="收起所有内容，只显示目录"
-                  className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
-                >
-                  <ChevronsUp className="w-[19px] h-[19px]" strokeWidth={1.75} />
-                </button>
-
-                {/* 剪切图标 */}
-                <button
-                  type="button"
-                  onClick={handleCutButtonClick}
-                  aria-label="剪切目录或文章"
-                  title={cutItem || pickCutMode ? '取消剪切' : '剪切选定的目录或文章'}
-                  className={`w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-colors ${
-                    cutItem || pickCutMode
-                      ? 'text-[var(--fei-text-primary)] bg-[var(--fei-bg-selected)]'
-                      : 'text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)]'
-                  }`}
-                >
-                  <Scissors className="w-[19px] h-[19px]" strokeWidth={1.75} />
-                </button>
-
-                {/* 粘贴图标 */}
-                <button
-                  type="button"
-                  onClick={handlePasteButtonClick}
-                  aria-label="粘贴到选定项之后"
-                  title="粘贴插入到选定的目录或文章之后"
-                  className={`w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-colors ${
-                    cutItem
-                      ? 'text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)]'
-                      : 'text-[var(--fei-text-muted)] opacity-50 hover:opacity-100'
-                  }`}
-                >
-                  <PasteInIcon className="w-[19px] h-[19px]" strokeWidth={1.75} />
-                </button>
-
-                {/* 导入图标 */}
-                <button
-                  type="button"
-                  onClick={() => setShowImportModal(true)}
-                  aria-label="导入文本文档"
-                  title="导入 .txt / .md 文档或粘贴文本"
-                  className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
-                >
-                  <Download className="w-[19px] h-[19px]" strokeWidth={1.75} />
-                </button>
-
-                {/* 加密图标（位于导入图标右侧） */}
-                <button
-                  type="button"
-                  onClick={handleEncryptButtonClick}
-                  aria-label="加密或解密选中的文档或目录"
-                  title="加密 / 解密选中的文档或目录"
-                  className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
-                >
-                  <Lock className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
-                </button>
-
-                {/* 同步图标（点击直接同步，长按打开同步设置；待同步时右上方显示极简黑白小圆点） */}
-                <button
-                  type="button"
-                  onClick={handleDirectSyncClick}
-                  onPointerDown={handleSyncPointerDown}
-                  onPointerUp={cancelSyncLongPress}
-                  onPointerLeave={cancelSyncLongPress}
-                  onPointerCancel={cancelSyncLongPress}
-                  onContextMenu={(e) => e.preventDefault()}
-                  disabled={isSyncing}
-                  aria-label={hasPendingSync ? '点击同步，长按打开同步设置（有未同步变更）' : '点击同步，长按打开同步设置'}
-                  title={
-                    hasPendingSync
-                      ? '有内容未同步至坚果云，点击直接同步，长按打开同步设置'
-                      : '点击直接同步，长按打开同步设置'
-                  }
-                  className="relative w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors disabled:opacity-50 select-none"
-                >
-                  <RefreshCw
-                    className={`w-[19px] h-[19px] ${isSyncing ? 'animate-spin' : ''}`}
-                    strokeWidth={1.75}
-                  />
-                  {hasPendingSync && (
-                    <span
-                      aria-hidden="true"
-                      className="absolute top-[10px] right-[10px] w-[5.5px] h-[5.5px] rounded-full bg-[var(--fei-text-primary)]"
-                    />
-                  )}
-                </button>
-              </>
+              <FolderTree className="w-[19.5px] h-[19.5px]" strokeWidth={1.85} />
             ) : (
-              /* 文档模式：编辑态在对勾前提供 一级标题 / 二级标题 / 无序列表 / 分割线；浏览态仅保留编辑图标 */
-              <div className="flex items-center gap-0.5 sm:gap-1">
-                {isEditing && (
-                  <>
-                    {(
-                      [
-                        { kind: 'h1', label: '一级标题', Icon: Heading1 },
-                        { kind: 'h2', label: '二级标题', Icon: Heading2 },
-                        { kind: 'ul', label: '无序列表', Icon: List },
-                        { kind: 'hr', label: '分割线', Icon: Minus },
-                      ] as Array<{
-                        kind: EditFormatKind;
-                        label: string;
-                        Icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
-                      }>
-                    ).map(({ kind, label, Icon }) => (
-                      <button
-                        key={kind}
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => docViewRef.current?.applyMarkdownFormat(kind)}
-                        aria-label={label}
-                        title={label}
-                        className="w-[40px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] active:bg-[var(--fei-bg-selected)] transition-colors"
-                      >
-                        <Icon className="w-[18px] h-[18px]" strokeWidth={1.75} />
-                      </button>
-                    ))}
-                  </>
-                )}
-                <button
-                  type="button"
-                  onClick={handleToggleEditMode}
-                  aria-label={isEditing ? '退出编辑' : '进入编辑'}
-                  title={isEditing ? '完成编辑' : '编辑文章'}
-                  className="w-[40px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
-                >
-                  {isEditing ? (
-                    <Check className="w-[19px] h-[19px]" strokeWidth={1.75} />
-                  ) : (
-                    <Pencil className="w-[18px] h-[18px]" strokeWidth={1.75} />
-                  )}
-                </button>
-              </div>
+              <ArticleDocIcon className="w-[19.5px] h-[19.5px]" strokeWidth={1.85} />
             )}
-          </div>
+          </button>
         </div>
       </footer>
 

@@ -19,6 +19,7 @@ const KEYS = {
   FOLDERS_DIRTY: 'feiartical_folders_dirty_v1',
   TREE_STATE: 'feiartical_tree_state_v1',
   STORAGE_DIR: 'feiartical_storage_dir_v1',
+  LAST_DOC_ID: 'feiartical_last_doc_id_v1',
 };
 
 export interface StorageDirectoryConfig {
@@ -187,4 +188,17 @@ export function loadStorageDirConfig(): StorageDirectoryConfig {
 
 export function saveStorageDirConfig(config: StorageDirectoryConfig): void {
   localStorage.setItem(KEYS.STORAGE_DIR, JSON.stringify(config));
+}
+
+export function loadLastOpenedDocId(): string | null {
+  const val = localStorage.getItem(KEYS.LAST_DOC_ID);
+  return val && val.trim() ? val.trim() : null;
+}
+
+export function saveLastOpenedDocId(docId: string | null): void {
+  if (docId) {
+    localStorage.setItem(KEYS.LAST_DOC_ID, docId);
+  } else {
+    localStorage.removeItem(KEYS.LAST_DOC_ID);
+  }
 }
