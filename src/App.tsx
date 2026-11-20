@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Check,
   ChevronsUp,
   Download,
+  Eye,
   FolderTree,
   Heading1,
   Heading2,
   List,
   Lock,
+  LockOpen,
   Minus,
   Pencil,
   RefreshCw,
@@ -573,9 +574,19 @@ export default function App() {
     }
   };
 
+  const isSelectedEncrypted = useMemo(() => {
+    if (!activeTarget) return false;
+    if (activeTarget.kind === 'doc') {
+      const targetDoc = docs.find((d) => d.id === activeTarget.id && !d.deleted);
+      return Boolean(targetDoc?.encrypted);
+    }
+    const folderDocs = docs.filter((d) => !d.deleted && d.folderId === activeTarget.id);
+    return folderDocs.length > 0 && folderDocs.every((d) => Boolean(d.encrypted));
+  }, [activeTarget, docs]);
+
   const handleEncryptButtonClick = () => {
     if (!activeTarget) {
-      showToast('请先点选要加密的文档或目录');
+      showToast('请先点选要加密或解密的文档或目录');
       return;
     }
 
@@ -608,16 +619,13 @@ export default function App() {
 
     // Selected target is a directory
     const folderDocs = docs.filter((d) => !d.deleted && d.folderId === activeTarget.id);
-    if (folderDocs.length === 0) return;
-
-    const encryptedCount = folderDocs.filter((d) => d.encrypted).length;
-
-    // Partially encrypted => perform no operation
-    if (encryptedCount > 0 && encryptedCount < folderDocs.length) {
+    if (folderDocs.length === 0) {
+      showToast('该目录下暂无文档');
       return;
     }
 
-    const nextEncrypted = encryptedCount === 0;
+    const encryptedCount = folderDocs.filter((d) => d.encrypted).length;
+    const nextEncrypted = encryptedCount < folderDocs.length;
     const targetIds = new Set(folderDocs.map((d) => d.id));
 
     setDocs((prev) =>
@@ -1184,26 +1192,41 @@ export default function App() {
         )}
       </main>
 
-      {/* Bottom Toolbar */}
+      {/* Bottom Toolbar (All icons use FeiNote muted trash-can monochrome tone, anchored from the right edge) */}
       <footer
         aria-label="底部工具栏"
         className="shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)]"
       >
-        <div className="h-[52px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-end gap-0.5 sm:gap-1">
+        <div className="h-[52px] max-w-[760px] mx-auto px-3 sm:px-6 flex flex-row-reverse items-center justify-start gap-0.5 sm:gap-1">
+          {/* 1. 最右侧：目录图标 <-> 文档图标 */}
+          <button
+            type="button"
+            onClick={handleToggleTreeDocView}
+            aria-label={mainView === 'tree' ? '切换到文档模式' : '切换到目录树'}
+            title={mainView === 'tree' ? '切换到文档模式（打开上次文档）' : '返回目录树'}
+            className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0"
+          >
+            {mainView === 'tree' ? (
+              <FolderTree className="w-[19px] h-[19px]" strokeWidth={1.75} />
+            ) : (
+              <ArticleDocIcon className="w-[19px] h-[19px]" strokeWidth={1.75} />
+            )}
+          </button>
+
           {mainView === 'tree' ? (
             <>
-              {/* 收起符号：收起所有内容，只显示目录 */}
+              {/* 2. 目录图标后面：导入图标 */}
               <button
                 type="button"
-                onClick={handleCollapseAllFolders}
-                aria-label="收起所有目录"
-                title="收起所有内容，只显示目录"
-                className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
+                onClick={() => setShowImportModal(true)}
+                aria-label="导入文本文档"
+                title="导入 .txt / .md 文档或粘贴文本"
+                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
               >
-                <ChevronsUp className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                <Download className="w-[19px] h-[19px]" strokeWidth={1.75} />
               </button>
 
-              {/* 剪切 / 插入切换图标：剪切后变为插入图标，点击插入到选中位置下方并变回剪切图标 */}
+              {/* 3. 剪切 / 插入切换图标 */}
               <button
                 type="button"
                 onClick={handleCutOrInsertClick}
@@ -1215,10 +1238,10 @@ export default function App() {
                       ? '取消选择剪切项'
                       : '剪切选定的目录或文章'
                 }
-                className={`w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-colors ${
+                className={`w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] transition-colors ${
                   cutItem || pickCutMode
-                    ? 'text-[var(--fei-text-primary)] bg-[var(--fei-bg-selected)]'
-                    : 'text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)]'
+                    ? 'bg-[var(--fei-bg-selected)]'
+                    : 'hover:bg-[var(--fei-bg-hover)]'
                 }`}
               >
                 {cutItem ? (
@@ -1228,29 +1251,33 @@ export default function App() {
                 )}
               </button>
 
-              {/* 导入图标 */}
-              <button
-                type="button"
-                onClick={() => setShowImportModal(true)}
-                aria-label="导入文本文档"
-                title="导入 .txt / .md 文档或粘贴文本"
-                className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
-              >
-                <Download className="w-[19px] h-[19px]" strokeWidth={1.75} />
-              </button>
-
-              {/* 加密图标 */}
+              {/* 4. 加密 / 解密切换图标（闭锁代表已加密，开锁代表未加密/已解密） */}
               <button
                 type="button"
                 onClick={handleEncryptButtonClick}
-                aria-label="加密或解密选中的文档或目录"
-                title="加密 / 解密选中的文档或目录"
-                className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
+                aria-label={isSelectedEncrypted ? '解密选中的文档或目录' : '加密选中的文档或目录'}
+                title={isSelectedEncrypted ? '当前已加密，点击解密' : '当前未加密，点击加密'}
+                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
               >
-                <Lock className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
+                {isSelectedEncrypted ? (
+                  <Lock className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
+                ) : (
+                  <LockOpen className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
+                )}
               </button>
 
-              {/* 同步图标（点击直接同步，长按打开同步设置） */}
+              {/* 5. 收起图标：收起所有内容，只显示目录 */}
+              <button
+                type="button"
+                onClick={handleCollapseAllFolders}
+                aria-label="收起所有目录"
+                title="收起所有内容，只显示目录"
+                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+              >
+                <ChevronsUp className="w-[19px] h-[19px]" strokeWidth={1.75} />
+              </button>
+
+              {/* 6. 同步图标（点击直接同步，长按打开同步设置；右上角淡化小圆点提示待同步） */}
               <button
                 type="button"
                 onClick={handleDirectSyncClick}
@@ -1266,7 +1293,7 @@ export default function App() {
                     ? '有内容未同步至坚果云，点击直接同步，长按打开同步设置'
                     : '点击直接同步，长按打开同步设置'
                 }
-                className="relative w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors disabled:opacity-50 select-none"
+                className="relative w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors disabled:opacity-50 select-none"
               >
                 <RefreshCw
                   className={`w-[19px] h-[19px] ${isSyncing ? 'animate-spin' : ''}`}
@@ -1275,14 +1302,30 @@ export default function App() {
                 {hasPendingSync && (
                   <span
                     aria-hidden="true"
-                    className="absolute top-[10px] right-[10px] w-[5.5px] h-[5.5px] rounded-full bg-[var(--fei-text-primary)]"
+                    className="absolute top-[10px] right-[10px] w-[5.5px] h-[5.5px] rounded-full bg-[var(--fei-text-muted)]"
                   />
                 )}
               </button>
             </>
           ) : (
-            /* 文档模式：编辑态在对勾前提供 一级标题 / 二级标题 / 无序列表 / 分割线；浏览态保留编辑图标 */
+            /* 文档模式：文档图标后面放置 浏览(Eye) <-> 编辑(Pencil) 图标；编辑状态下后面依次放置 一级标题、二级标题、无序列表、分割线 */
             <>
+              {/* 2. 文档图标后面：浏览态显示 Eye，点击进入编辑变为 Pencil；再点击回到 Eye 并切回浏览 */}
+              <button
+                type="button"
+                onClick={handleToggleEditMode}
+                aria-label={isEditing ? '当前处于编辑状态，点击切回浏览' : '当前处于浏览状态，点击进入编辑'}
+                title={isEditing ? '编辑状态（点击切回浏览）' : '浏览状态（点击进入编辑）'}
+                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+              >
+                {isEditing ? (
+                  <Pencil className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                ) : (
+                  <Eye className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                )}
+              </button>
+
+              {/* 3–6. 编辑状态下，编辑图标后面依次放置：一级标题、二级标题、无序列表、分割线 */}
               {isEditing && (
                 <>
                   {(
@@ -1304,43 +1347,15 @@ export default function App() {
                       onClick={() => docViewRef.current?.applyMarkdownFormat(kind)}
                       aria-label={label}
                       title={label}
-                      className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] active:bg-[var(--fei-bg-selected)] transition-colors"
+                      className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] transition-colors"
                     >
                       <Icon className="w-[18px] h-[18px]" strokeWidth={1.75} />
                     </button>
                   ))}
                 </>
               )}
-              <button
-                type="button"
-                onClick={handleToggleEditMode}
-                aria-label={isEditing ? '退出编辑' : '进入编辑'}
-                title={isEditing ? '完成编辑' : '编辑文章'}
-                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"
-              >
-                {isEditing ? (
-                  <Check className="w-[19px] h-[19px]" strokeWidth={1.75} />
-                ) : (
-                  <Pencil className="w-[18px] h-[18px]" strokeWidth={1.75} />
-                )}
-              </button>
             </>
           )}
-
-          {/* Far Right: Directory Tree <-> Document Mode Toggle */}
-          <button
-            type="button"
-            onClick={handleToggleTreeDocView}
-            aria-label={mainView === 'tree' ? '切换到文档模式' : '切换到目录树'}
-            title={mainView === 'tree' ? '切换到文档模式（打开上次文档）' : '返回目录树'}
-            className="w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0"
-          >
-            {mainView === 'tree' ? (
-              <FolderTree className="w-[19.5px] h-[19.5px]" strokeWidth={1.85} />
-            ) : (
-              <ArticleDocIcon className="w-[19.5px] h-[19.5px]" strokeWidth={1.85} />
-            )}
-          </button>
         </div>
       </footer>
 
