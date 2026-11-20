@@ -82,7 +82,8 @@ function sdRoundedBox(px, py, cx, cy, halfW, halfH, r) {
 
 /**
  * Evaluate FeiArtical's monochrome folded-document + tree-line glyph in normalized 108x108 space.
- * Returns [r, g, b, alpha] where alpha is 0..1.
+ * Document frame spans [33..75] x [29..79] so its exact geometric center is (54, 54),
+ * fitting comfortably inside Android's 66dp adaptive icon safe zone.
  */
 function sampleGlyph(u, v) {
   let outR = 0;
@@ -99,41 +100,38 @@ function sampleGlyph(u, v) {
     outA = a + outA * (1 - a);
   };
 
-  // Smooth AA half-width in 108-grid units
   const aa = 0.85;
-  const strokeHalf = 2.0;
+  const strokeHalf = 1.9;
 
-  // Folded document outline segments (inset nicely for adaptive icon safe zone):
-  // Left edge (29, 31)->(29, 79), Bottom (33, 83)->(71, 83), Right (75, 39)->(75, 79),
-  // Top (33, 27)->(63, 27), Fold diagonal (63, 27)->(75, 39), Fold inner L (63, 27)->(63, 39)->(75, 39)
+  // Centered folded document outline: X=[33..75] (center 54), Y=[29..79] (center 54)
   const docOutlineDist = Math.min(
-    distToSegment(u, v, 32, 27, 63, 27),
-    distToSegment(u, v, 63, 27, 75, 39),
-    distToSegment(u, v, 75, 39, 75, 80),
-    distToSegment(u, v, 72, 83, 32, 83),
-    distToSegment(u, v, 29, 80, 29, 30),
-    distToSegment(u, v, 29, 30, 32, 27),
-    distToSegment(u, v, 75, 80, 72, 83),
-    distToSegment(u, v, 32, 83, 29, 80),
-    distToSegment(u, v, 63, 27, 63, 39),
-    distToSegment(u, v, 63, 39, 75, 39)
+    distToSegment(u, v, 36, 29, 64, 29),
+    distToSegment(u, v, 64, 29, 75, 40),
+    distToSegment(u, v, 75, 40, 75, 76),
+    distToSegment(u, v, 72, 79, 36, 79),
+    distToSegment(u, v, 33, 76, 33, 32),
+    distToSegment(u, v, 33, 32, 36, 29),
+    distToSegment(u, v, 75, 76, 72, 79),
+    distToSegment(u, v, 36, 79, 33, 76),
+    distToSegment(u, v, 64, 29, 64, 40),
+    distToSegment(u, v, 64, 40, 75, 40)
   );
   blend(FG_PRIMARY, clamp01(0.5 - (docOutlineDist - strokeHalf) / aa));
 
-  // Heading bar inside page: x=[38..64], y=[47..51]
-  const headDist = sdRoundedBox(u, v, 51, 49, 13, 2.0, 1.8);
+  // Primary heading bar centered horizontally at x=54: x=[39.6..68.4], y=[47.6..51.4]
+  const headDist = sdRoundedBox(u, v, 54, 49.5, 14.4, 1.9, 1.9);
   blend(FG_PRIMARY, clamp01(0.5 - headDist / aa));
 
   // Directory tree dot 1 + indented line 1
-  const dot1Dist = Math.hypot(u - 39.5, v - 58.8) - 1.85;
+  const dot1Dist = Math.hypot(u - 41.35, v - 58.5) - 1.75;
   blend(FG_DOT, clamp01(0.5 - dot1Dist / aa));
-  const line1Dist = sdRoundedBox(u, v, 55, 58.8, 11, 1.8, 1.6);
+  const line1Dist = sdRoundedBox(u, v, 56.85, 58.5, 11.55, 1.7, 1.7);
   blend(FG_LINE, clamp01(0.5 - line1Dist / aa));
 
   // Directory tree dot 2 + indented line 2
-  const dot2Dist = Math.hypot(u - 39.5, v - 68.3) - 1.85;
+  const dot2Dist = Math.hypot(u - 41.35, v - 67.5) - 1.75;
   blend(FG_DOT, clamp01(0.5 - dot2Dist / aa));
-  const line2Dist = sdRoundedBox(u, v, 53, 68.3, 9, 1.8, 1.6);
+  const line2Dist = sdRoundedBox(u, v, 54.75, 67.5, 9.45, 1.7, 1.7);
   blend(FG_LINE, clamp01(0.5 - line2Dist / aa));
 
   return [outR, outG, outB, outA];
@@ -150,16 +148,23 @@ function renderIconPng(size, mode) {
       if (mode === 'square') {
         const pad = size * 0.06;
         const r = size * 0.22;
-        const d = sdRoundedBox(x + 0.5, y + 0.5, size / 2, size / 2, size / 2 - pad, size / 2 - pad, r);
+        const d = sdRoundedBox(
+          x + 0.5,
+          y + 0.5,
+          size / 2,
+          size / 2,
+          size / 2 - pad,
+          size / 2 - pad,
+          r
+        );
         bgMask = clamp01(0.5 - d);
-        // Scale glyph slightly up for legacy pre-Oreo launcher canvas
-        u = 54 + (u - 54) * 0.88;
-        v = 54 + (v - 54) * 0.88;
+        u = 54 + (u - 54) * 0.85;
+        v = 54 + (v - 54) * 0.85;
       } else if (mode === 'round') {
-        const d = Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) - (size * 0.46);
+        const d = Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) - size * 0.46;
         bgMask = clamp01(0.5 - d);
-        u = 54 + (u - 54) * 0.88;
-        v = 54 + (v - 54) * 0.88;
+        u = 54 + (u - 54) * 0.85;
+        v = 54 + (v - 54) * 0.85;
       }
 
       const [gr, gg, gb, ga] = sampleGlyph(u, v);
@@ -201,48 +206,48 @@ export function installFeiArticalAndroidIcons(appDir) {
     'utf8'
   );
 
-  // 2. Vector foreground drawable for sharp adaptive icons on all resolutions
+  // 2. Vector foreground drawable strictly centered at (54, 54) inside 108x108 adaptive viewport
   const fgVectorXml = `<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Minimalist folded document page -->
+    <!-- Centered folded document outline: X=[33..75], Y=[29..79], center=(54,54) -->
     <path
-        android:pathData="M32,27 H63 L75,39 V80 A3,3 0 0,1 72,83 H32 A3,3 0 0,1 29,80 V30 A3,3 0 0,1 32,27 Z"
-        android:strokeWidth="4"
+        android:pathData="M36,29 H64 L75,40 V76 A3,3 0 0,1 72,79 H36 A3,3 0 0,1 33,76 V32 A3,3 0 0,1 36,29 Z"
+        android:strokeWidth="3.8"
         android:strokeColor="#E8E8E8"
         android:strokeLineJoin="round"
         android:fillColor="#00000000" />
     <path
-        android:pathData="M63,27 V39 H75"
-        android:strokeWidth="4"
+        android:pathData="M64,29 V40 H75"
+        android:strokeWidth="3.8"
         android:strokeColor="#E8E8E8"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
         android:fillColor="#00000000" />
-    <!-- Primary heading line -->
+    <!-- Primary heading line centered at X=54 -->
     <path
-        android:pathData="M38,49 H64"
-        android:strokeWidth="4"
+        android:pathData="M41.5,49.5 H66.5"
+        android:strokeWidth="3.8"
         android:strokeColor="#E8E8E8"
         android:strokeLineCap="round" />
     <!-- Directory tree bullets + indented article lines -->
     <path
-        android:pathData="M39.5,58.8 m-1.85,0 a1.85,1.85 0 1,0 3.7,0 a1.85,1.85 0 1,0 -3.7,0"
+        android:pathData="M41.35,58.5 m-1.75,0 a1.75,1.75 0 1,0 3.5,0 a1.75,1.75 0 1,0 -3.5,0"
         android:fillColor="#8A8A8A" />
     <path
-        android:pathData="M45,58.8 H65"
-        android:strokeWidth="3.6"
+        android:pathData="M47,58.5 H66.7"
+        android:strokeWidth="3.4"
         android:strokeColor="#B8B8B8"
         android:strokeLineCap="round" />
     <path
-        android:pathData="M39.5,68.3 m-1.85,0 a1.85,1.85 0 1,0 3.7,0 a1.85,1.85 0 1,0 -3.7,0"
+        android:pathData="M41.35,67.5 m-1.75,0 a1.75,1.75 0 1,0 3.5,0 a1.75,1.75 0 1,0 -3.5,0"
         android:fillColor="#8A8A8A" />
     <path
-        android:pathData="M45,68.3 H61"
-        android:strokeWidth="3.6"
+        android:pathData="M47,67.5 H62.5"
+        android:strokeWidth="3.4"
         android:strokeColor="#B8B8B8"
         android:strokeLineCap="round" />
 </vector>
