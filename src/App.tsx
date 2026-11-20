@@ -1192,13 +1192,13 @@ export default function App() {
         )}
       </main>
 
-      {/* Bottom Toolbar (All icons use FeiNote muted trash-can monochrome tone, anchored from the right edge) */}
+      {/* Bottom Toolbar (All icons use FeiNote muted trash-can monochrome tone, ordered left-to-right) */}
       <footer
         aria-label="底部工具栏"
         className="shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)]"
       >
-        <div className="h-[52px] max-w-[760px] mx-auto px-3 sm:px-6 flex flex-row-reverse items-center justify-start gap-0.5 sm:gap-1">
-          {/* 1. 最右侧：目录图标 <-> 文档图标 */}
+        <div className="h-[52px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-start gap-0.5 sm:gap-1">
+          {/* 1. 最左侧：目录图标 <-> 文档图标 */}
           <button
             type="button"
             onClick={handleToggleTreeDocView}
