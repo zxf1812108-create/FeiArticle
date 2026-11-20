@@ -89,6 +89,8 @@ jobs:
 
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
             echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+            KEY_ALIAS="${KEY_ALIAS:-feiartical}"
+            KEY_PASSWORD="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
             echo "SIGNING_MODE=persistent" >> "$GITHUB_ENV"
           else
             KEYSTORE_PASSWORD="feiartical-auto-keystore"
@@ -139,7 +141,7 @@ jobs:
             fi
             if [ "${SIGNING_MODE}" = "ephemeral" ]; then
               echo ""
-              echo "> 提示：本次使用自动生成的临时密钥签名；若希望后续版本直接覆盖升级，请在仓库 Settings → Secrets 中配置 \`ANDROID_KEYSTORE_BASE64\`、\`KEYSTORE_PASSWORD\`、\`KEY_ALIAS\`、\`KEY_PASSWORD\`。"
+              echo "> 提示：本次使用自动生成的临时密钥签名；若希望后续版本直接覆盖升级，可先运行一次「Generate Android Signing Keystore」工作流生成密钥，再在 Settings → Secrets → Repository secrets 中添加 \`ANDROID_KEYSTORE_BASE64\` 和 \`KEYSTORE_PASSWORD\`。"
             fi
           } > release-output/release-notes.md
 
