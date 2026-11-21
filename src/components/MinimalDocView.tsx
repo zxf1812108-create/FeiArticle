@@ -25,6 +25,7 @@ interface MinimalDocViewProps {
   doc: ArticleDoc;
   isEditing: boolean;
   fontSize?: number;
+  docFontFamily?: string;
   hasActiveMdict?: boolean;
   isMdictPopupOpen?: boolean;
   onEnglishWordSelected?: (payload: { word: string; placement: 'top' | 'bottom' }) => void;
@@ -241,6 +242,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       doc,
       isEditing,
       fontSize = 16,
+      docFontFamily,
       hasActiveMdict = false,
       isMdictPopupOpen = false,
       onEnglishWordSelected,
@@ -384,7 +386,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }
       measureReadOverflow();
       updateBottomClip();
-    }, [isEditing, content, doc.id, fontSize, articleOverflow]);
+    }, [isEditing, content, doc.id, fontSize, docFontFamily, articleOverflow]);
 
     useEffect(() => {
       if (isEditing) return;
@@ -399,7 +401,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       ro.observe(el);
       ro.observe(articleEl);
       return () => ro.disconnect();
-    }, [isEditing, doc.id, fontSize]);
+    }, [isEditing, doc.id, fontSize, docFontFamily]);
 
     // Restore saved scrollTop when opening a document
     useLayoutEffect(() => {
@@ -1022,7 +1024,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                 key={idx}
                 data-toc-id={block.id}
                 data-block-idx={idx}
-                className="text-[1.375em] font-semibold leading-snug mt-6 mb-2.5 first:mt-0 text-[var(--fei-text-primary)] text-balance"
+                className="text-[1.15em] font-semibold leading-snug mt-5 mb-2 first:mt-0 text-[var(--fei-text-primary)] text-balance"
               >
                 {block.text}
               </h1>
@@ -1034,7 +1036,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                 key={idx}
                 data-toc-id={block.id}
                 data-block-idx={idx}
-                className="text-[1.15em] font-semibold leading-snug mt-5 mb-2 text-[var(--fei-text-primary)] text-balance"
+                className="text-[1.03em] font-semibold leading-snug mt-4 mb-1.5 first:mt-0 text-[var(--fei-text-primary)]"
               >
                 {block.text}
               </h2>
@@ -1197,7 +1199,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               scheduleSave(titleRef.current, nextVal);
             }}
             placeholder="开始输入正文…"
-            style={{ fontSize: `${fontSize}px` }}
+            style={{
+              fontSize: `${fontSize}px`,
+              fontFamily: docFontFamily || 'var(--font-doc-body)',
+            }}
             className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none pt-1 pb-[40vh] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent font-doc-body leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none"
           />
         ) : (
@@ -1244,7 +1249,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                     </div>
                   ) : (
                     <div
-                      style={{ fontSize: `${fontSize}px` }}
+                      style={{
+                        fontSize: `${fontSize}px`,
+                        fontFamily: docFontFamily || 'var(--font-doc-body)',
+                      }}
                       className="leading-[1.62] text-[var(--fei-text-primary)] break-words [overflow-wrap:anywhere]"
                     >
                       {blocks.length === 0 ? (

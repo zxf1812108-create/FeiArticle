@@ -23,6 +23,7 @@ const KEYS = {
   LAST_DOC_ID: 'feiartical_last_doc_id_v1',
   PURGED_RECORDS: 'feiartical_purged_records_v1',
   ACTIVE_MDICT: 'feiartical_active_mdict_v1',
+  DOC_FONTS: 'feiartical_doc_fonts_v1',
 };
 
 export interface StorageDirectoryConfig {
@@ -48,6 +49,8 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   width: 'medium',
   paper: 'white',
   indentFirstLine: false,
+  defaultZhFont: 'system',
+  defaultEnFont: 'system',
 };
 
 export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {
@@ -238,4 +241,25 @@ export function saveActiveMdictId(dictId: string | null): void {
     localStorage.removeItem(KEYS.ACTIVE_MDICT);
   }
 }
+
+export interface StoredDocFontEntry {
+  zhFont?: string;
+  enFont?: string;
+}
+
+export function loadDocFontsMap(): Record<string, StoredDocFontEntry> {
+  const parsed = safeParse<Record<string, StoredDocFontEntry>>(
+    localStorage.getItem(KEYS.DOC_FONTS),
+    {}
+  );
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {};
+  }
+  return parsed;
+}
+
+export function saveDocFontsMap(map: Record<string, StoredDocFontEntry>): void {
+  localStorage.setItem(KEYS.DOC_FONTS, JSON.stringify(map));
+}
+
 

@@ -2,16 +2,18 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BookA, X } from 'lucide-react';
 import { MdictDictionarySummary, MdictLookupResult } from '../types';
 import { sanitizeMdictCss } from '../utils/mdict';
+import { stripDictExt } from '../utils/mdictStorage';
 
 interface MdictLookupPopupProps {
   queryWord: string;
   placement: 'top' | 'bottom';
   loading: boolean;
   result: MdictLookupResult | null;
+  matchCount: number;
   error: string | null;
   dictionaries: MdictDictionarySummary[];
   activeDictId: string | null;
-  onSwitchDict: (dictId: string) => void;
+  onCycleDict: () => void;
   onLookupWord: (word: string) => void;
   onClose: () => void;
 }
@@ -142,9 +144,7 @@ const MdictShadowDefinition: React.FC<{
       :host {
         display: block;
         color: var(--fei-text-primary, #2E2D2A);
-        font-family: var(--font-doc-body, "PT Serif", Georgia, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif);
-        font-variant-ligatures: none;
-        font-feature-settings: "liga" 0, "clig" 0, "dlig" 0;
+        font-family: var(--font-doc-body, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif);
         font-size: 13.5px;
         line-height: 1.55;
         word-break: break-word;
@@ -214,14 +214,22 @@ export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
   placement,
   loading,
   result,
+  matchCount,
   error,
   dictionaries,
   activeDictId,
-  onSwitchDict,
+  onCycleDict,
   onLookupWord,
   onClose,
 }) => {
-  const activeDict = dictionaries.find((d) => d.id === activeDictId) || dictionaries[0] || null;
+  const displayedDict =
+    (result && dictionaries.find((d) => d.id === result.dictId)) ||
+    dictionaries.find((d) => d.id === activeDictId) ||
+    dictionaries[0] ||
+    null;
+  const displayedDictName = displayedDict
+    ? stripDictExt(displayedDict.fileName) || displayedDict.title
+    : result?.dictTitle || '';
   const showMappedHeadword =
     result &&
     result.matchedHeadword &&
@@ -265,24 +273,23 @@ export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            {dictionaries.length > 1 ? (
-              <select
-                aria-label="切换查询词典"
-                value={activeDict?.id || ''}
-                onMouseDown={(e) => e.stopPropagation()}
-                onChange={(e) => onSwitchDict(e.target.value)}
-                className="h-7 max-w-[140px] px-2 rounded-lg bg-[#DCD7CA]/90 dark:bg-[#353535] border border-[#C8C2B3] dark:border-[#454545] text-[11.5px] text-[var(--fei-text-muted)] outline-none truncate"
-              >
-                {dictionaries.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.title}
-                  </option>
-                ))}
-              </select>
-            ) : activeDict ? (
-              <span className="text-[11.5px] text-[var(--fei-text-muted)] truncate max-w-[130px]">
-                {activeDict.title}
-              </span>
+            {displayedDictName ? (
+              matchCount > 1 ? (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={onCycleDict}
+                  title="点击切换下一个包含该词的词典"
+                  aria-label={`当前词典 ${displayedDictName}，点击切换词典`}
+                  className="text-[11.5px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate max-w-[160px] hover:opacity-75 transition-opacity cursor-pointer"
+                >
+                  {displayedDictName}
+                </button>
+              ) : (
+                <span className="text-[11.5px] text-[var(--fei-text-muted)] truncate max-w-[160px]">
+                  {displayedDictName}
+                </span>
+              )
             ) : null}
 
             <button
@@ -311,8 +318,7 @@ export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
             />
           ) : (
             <div className="py-3 text-[12.5px] text-[var(--fei-text-muted)]">
-              当前词典中未收录「{queryWord}」
-              {dictionaries.length > 1 ? '，可在右上角切换其他词典查看。' : '。'}
+              已导入的词典中未收录「{queryWord}」。
             </div>
           )}
         </div>

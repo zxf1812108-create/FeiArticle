@@ -421,12 +421,9 @@ function splitKeyBlockEntries(
 // ---------------------------------------------------------------------------
 
 interface ParsedMdictContainer {
-  headerTag: 'Dictionary' | 'Library_Data';
-  fileExt: 'mdx' | 'mdd';
   title: string;
   description: string;
   encoding: MdictEncoding;
-  keyEncoding: MdictEncoding;
   version: number;
   encrypt: number;
   isStripKey: boolean;
@@ -442,31 +439,28 @@ async function parseMdictContainerFromBlob(
   blob: Blob,
   fileName: string
 ): Promise<ParsedMdictContainer> {
-  const fileExt: 'mdx' | 'mdd' = fileName.toLowerCase().endsWith('.mdd') ? 'mdd' : 'mdx';
   if (blob.size < 32) {
-    throw new Error(`文件过小，不是有效的 .${fileExt} 词典文件`);
+    throw new Error('文件过小，不是有效的 .mdx 词典文件');
   }
 
   const headPrefix = new DataView(await blob.slice(0, 4).arrayBuffer());
   const headerBytesSize = headPrefix.getUint32(0, false);
   if (headerBytesSize <= 0 || headerBytesSize > 4 * 1024 * 1024 || 8 + headerBytesSize >= blob.size) {
-    throw new Error(`文件头格式无效，不是标准的 .${fileExt} 词典文件`);
+    throw new Error('文件头格式无效，不是标准的 .mdx 词典文件');
   }
 
   const headerBytes = new Uint8Array(await blob.slice(4, 4 + headerBytesSize).arrayBuffer());
   const headerXml = new TextDecoder('utf-16le').decode(headerBytes).replace(/\0+$/, '');
   const trimmedHeader = headerXml.trimStart();
-  const isLibraryData = /^<Library_Data\b/i.test(trimmedHeader);
-  const isDictionary = /^<Dictionary\b/i.test(trimmedHeader);
-  if (!isLibraryData && !isDictionary) {
-    throw new Error(`文件头结构无法识别，不是标准的 .mdx / .mdd 词典文件`);
+  if (/^<Library_Data\b/i.test(trimmedHeader)) {
+    throw new Error('该文件为 .mdd 资源包，仅支持导入 .mdx 词典文件');
   }
 
   const attrs = parseHeaderAttributes(headerXml);
 
   const version = parseFloat(attrs.GeneratedByEngineVersion || '1.2') || 1.2;
   if (version >= 3.0) {
-    throw new Error('暂不支持 MDict 3.0 格式词库，请使用标准 v1.2 / v2.0 文件');
+    throw new Error('暂不支持 MDict 3.0 格式词库，请使用标准 v1.2 / v2.0 .mdx 文件');
   }
 
   const encAttr = (attrs.Encrypted || '0').trim().toLowerCase();
@@ -479,15 +473,11 @@ async function parseMdictContainerFromBlob(
     throw new Error('该词库启用了个人注册码加密（Encrypted=1），暂不支持解密');
   }
 
-  const encoding: MdictEncoding = normalizeEncoding(attrs.Encoding);
-  // Standard <Library_Data> files store keys in UTF-16LE even when record payloads are UTF-8 HTML
-  const keyEncoding: MdictEncoding = isLibraryData ? 'utf-16le' : encoding;
-  const isStripKey = isLibraryData
-    ? (attrs.StripKey || 'No').trim().toLowerCase() === 'yes'
-    : (attrs.StripKey || 'Yes').trim().toLowerCase() !== 'no';
+  const encoding = normalizeEncoding(attrs.Encoding);
+  const isStripKey = (attrs.StripKey || 'Yes').trim().toLowerCase() !== 'no';
   const isCaseSensitive = (attrs.KeyCaseSensitive || 'No').trim().toLowerCase() === 'yes';
   const styleSheet = parseStyleSheetMap(attrs.StyleSheet);
-  const fallbackTitle = fileName.replace(/\.(mdx|mdd)$/i, '') || '未命名词典';
+  const fallbackTitle = fileName.replace(/\.mdx$/i, '') || '未命名词典';
   const title = stripHtmlTagsPlain(attrs.Title || '') || fallbackTitle;
   const description = stripHtmlTagsPlain(attrs.Description || '').slice(0, 240);
 
@@ -550,7 +540,7 @@ async function parseMdictContainerFromBlob(
     keyBlockInfoBytes.byteLength
   );
   const textTerm = version >= 2.0 ? 1 : 0;
-  const charUnit = keyEncoding === 'utf-16le' ? 2 : 1;
+  const charUnit = encoding === 'utf-16le' ? 2 : 1;
   const keyDataStart = keyBlockInfoStart + keyBlockInfoSize;
 
   const keyBlocks: MdictKeyBlockMeta[] = [];
@@ -566,7 +556,7 @@ async function parseMdictContainerFromBlob(
     const firstKeyByteLen = (firstKeyLen + textTerm) * charUnit;
     const firstKey = decodeText(
       keyBlockInfoBytes.subarray(p, p + firstKeyByteLen),
-      keyEncoding
+      encoding
     );
     p += firstKeyByteLen;
 
@@ -575,7 +565,7 @@ async function parseMdictContainerFromBlob(
     const lastKeyByteLen = (lastKeyLen + textTerm) * charUnit;
     const lastKey = decodeText(
       keyBlockInfoBytes.subarray(p, p + lastKeyByteLen),
-      keyEncoding
+      encoding
     );
     p += lastKeyByteLen;
 
@@ -640,12 +630,9 @@ async function parseMdictContainerFromBlob(
   }
 
   return {
-    headerTag: isLibraryData ? 'Library_Data' : 'Dictionary',
-    fileExt,
     title,
     description,
     encoding,
-    keyEncoding,
     version,
     encrypt,
     isStripKey,
@@ -667,12 +654,9 @@ export async function parseMdictIndexFromBlob(
   return {
     id,
     fileName,
-    fileExt: parsed.fileExt,
-    headerTag: parsed.headerTag,
     title: parsed.title,
     description: parsed.description,
     encoding: parsed.encoding,
-    keyEncoding: parsed.keyEncoding,
     version: parsed.version,
     encrypt: parsed.encrypt,
     isStripKey: parsed.isStripKey,
@@ -865,12 +849,7 @@ function selectCandidateKeyBlockIndices(
 
 async function readKeyBlockEntries(
   blob: Blob,
-  meta: {
-    version: number;
-    encoding: MdictEncoding;
-    keyEncoding?: MdictEncoding;
-    keyBlocks: MdictKeyBlockMeta[];
-  },
+  meta: MdictDictionaryRecord,
   blockIdx: number
 ): Promise<Array<{ recordStartOffset: number; key: string }>> {
   const kb = meta.keyBlocks[blockIdx];
@@ -879,27 +858,25 @@ async function readKeyBlockEntries(
     await blob.slice(kb.compressedOffset, kb.compressedOffset + kb.compressedSize).arrayBuffer()
   );
   const decompressed = decompressBlock(raw, kb.decompressedSize);
-  return splitKeyBlockEntries(decompressed, numberWidth, meta.keyEncoding || meta.encoding);
+  return splitKeyBlockEntries(decompressed, numberWidth, meta.encoding);
 }
 
-async function readRecordRangeBytes(
+async function readRecordRangeText(
   blob: Blob,
-  recordBlocks: MdictRecordBlockMeta[],
+  meta: MdictDictionaryRecord,
   startOffset: number,
   endOffset: number
-): Promise<Uint8Array> {
-  if (endOffset <= startOffset || recordBlocks.length === 0) {
-    return new Uint8Array(0);
-  }
+): Promise<string> {
+  if (endOffset <= startOffset || meta.recordBlocks.length === 0) return '';
 
   // Binary search first record block with decompressedOffset + decompressedSize > startOffset
   let lo = 0;
-  let hi = recordBlocks.length - 1;
+  let hi = meta.recordBlocks.length - 1;
   let firstIdx = 0;
 
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const b = recordBlocks[mid];
+    const b = meta.recordBlocks[mid];
     const bEnd = b.decompressedOffset + b.decompressedSize;
     if (bEnd <= startOffset) {
       lo = mid + 1;
@@ -912,8 +889,8 @@ async function readRecordRangeBytes(
   const chunks: Uint8Array[] = [];
   let totalChunkBytes = 0;
 
-  for (let i = firstIdx; i < recordBlocks.length; i++) {
-    const rb = recordBlocks[i];
+  for (let i = firstIdx; i < meta.recordBlocks.length; i++) {
+    const rb = meta.recordBlocks[i];
     if (rb.decompressedOffset >= endOffset) break;
 
     const raw = new Uint8Array(
@@ -937,182 +914,7 @@ async function readRecordRangeBytes(
     pos += c.length;
   }
 
-  return combined;
-}
-
-export function uint8ToBase64(bytes: Uint8Array): string {
-  const chunkSize = 0x8000;
-  const parts: string[] = [];
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    parts.push(String.fromCharCode(...bytes.subarray(i, i + chunkSize)));
-  }
-  return btoa(parts.join(''));
-}
-
-function detectImageMime(bytes: Uint8Array): string | null {
-  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
-    return 'image/png';
-  }
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return 'image/jpeg';
-  }
-  if (bytes.length >= 4 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) {
-    return 'image/gif';
-  }
-  if (
-    bytes.length >= 12 &&
-    bytes[0] === 0x52 &&
-    bytes[1] === 0x49 &&
-    bytes[2] === 0x46 &&
-    bytes[3] === 0x46 &&
-    bytes[8] === 0x57 &&
-    bytes[9] === 0x45 &&
-    bytes[10] === 0x42 &&
-    bytes[11] === 0x50
-  ) {
-    return 'image/webp';
-  }
-  return null;
-}
-
-function decodeSmartRecordPayload(bytes: Uint8Array, fallbackEncoding: MdictEncoding): string {
-  const imageMime = detectImageMime(bytes);
-  if (imageMime) {
-    return `<img src="data:${imageMime};base64,${uint8ToBase64(bytes)}" />`;
-  }
-  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
-    return new TextDecoder('utf-16le').decode(bytes.subarray(2)).replace(/\0+$/, '').trim();
-  }
-  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-    return new TextDecoder('utf-16be').decode(bytes.subarray(2)).replace(/\0+$/, '').trim();
-  }
-  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    return new TextDecoder('utf-8').decode(bytes.subarray(3)).replace(/\0+$/, '').trim();
-  }
-
-  // Heuristic for BOM-less UTF-16LE HTML/ASCII records inside Library_Data .mdd
-  const samplePairs = Math.min(24, Math.floor(bytes.length / 2));
-  if (samplePairs >= 4) {
-    let oddZeros = 0;
-    let evenPrintable = 0;
-    for (let i = 0; i < samplePairs; i++) {
-      if (bytes[i * 2 + 1] === 0) oddZeros++;
-      const ev = bytes[i * 2];
-      if ((ev >= 0x20 && ev <= 0x7e) || ev === 0x0a || ev === 0x0d || ev === 0x09) {
-        evenPrintable++;
-      }
-    }
-    if (oddZeros >= Math.ceil(samplePairs * 0.7) && evenPrintable >= Math.ceil(samplePairs * 0.7)) {
-      return new TextDecoder('utf-16le').decode(bytes).replace(/\0+$/, '').trim();
-    }
-  }
-
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/\0+$/, '').trim();
-  } catch {
-    return decodeText(bytes, fallbackEncoding).trim();
-  }
-}
-
-async function readRecordRangeText(
-  blob: Blob,
-  meta: MdictDictionaryRecord,
-  startOffset: number,
-  endOffset: number
-): Promise<string> {
-  const combined = await readRecordRangeBytes(blob, meta.recordBlocks, startOffset, endOffset);
-  if (combined.length === 0) return '';
-  if (meta.headerTag === 'Library_Data' || meta.fileExt === 'mdd') {
-    return decodeSmartRecordPayload(combined, meta.encoding);
-  }
   return decodeText(combined, meta.encoding).trim();
-}
-
-export function normalizeMddKey(rawPath: string): string {
-  let cleaned = rawPath.trim();
-  cleaned = cleaned.replace(/^(?:file|entry|sound|bword):\/\//i, '');
-  cleaned = cleaned.split('#')[0].split('?')[0];
-  try {
-    cleaned = decodeURIComponent(cleaned);
-  } catch {
-    // Keep raw if malformed percent encoding
-  }
-  cleaned = cleaned.replace(/\//g, '\\').replace(/^\\+/, '');
-  return `\\${cleaned}`;
-}
-
-export function guessMimeFromPath(path: string): string {
-  const lower = path.split('?')[0].split('#')[0].toLowerCase();
-  if (lower.endsWith('.png')) return 'image/png';
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.webp')) return 'image/webp';
-  if (lower.endsWith('.svg')) return 'image/svg+xml';
-  if (lower.endsWith('.bmp')) return 'image/bmp';
-  if (lower.endsWith('.ico')) return 'image/x-icon';
-  if (lower.endsWith('.css')) return 'text/css';
-  return 'application/octet-stream';
-}
-
-export async function lookupResourceInMdictBlob(
-  blob: Blob,
-  meta: MdictDictionaryRecord,
-  rawPath: string
-): Promise<Uint8Array | null> {
-  const normalized = normalizeMddKey(rawPath);
-  const candidates = [normalized, normalized.slice(1)];
-  const lastSlash = normalized.lastIndexOf('\\');
-  if (lastSlash > 0) {
-    const baseName = normalized.slice(lastSlash + 1);
-    for (const k of [`\\${baseName}`, baseName]) {
-      if (!candidates.includes(k)) candidates.push(k);
-    }
-  }
-
-  for (const targetKey of candidates) {
-    const lowerTarget = targetKey.toLowerCase();
-    const candidateBlocks = selectCandidateKeyBlockIndices(
-      meta.keyBlocks,
-      targetKey,
-      meta.isStripKey,
-      false
-    );
-
-    for (const blockIdx of candidateBlocks) {
-      const entries = await readKeyBlockEntries(blob, meta, blockIdx);
-      let matchIdx = entries.findIndex((e) => e.key === targetKey);
-      if (matchIdx === -1) {
-        matchIdx = entries.findIndex((e) => e.key.toLowerCase() === lowerTarget);
-      }
-      if (matchIdx === -1) continue;
-
-      const start = entries[matchIdx].recordStartOffset;
-      let end: number;
-      if (matchIdx + 1 < entries.length) {
-        end = entries[matchIdx + 1].recordStartOffset;
-      } else if (blockIdx + 1 < meta.keyBlocks.length) {
-        const nextEntries = await readKeyBlockEntries(blob, meta, blockIdx + 1);
-        end =
-          nextEntries.length > 0
-            ? nextEntries[0].recordStartOffset
-            : meta.totalRecordDecompressedSize;
-      } else {
-        end = meta.totalRecordDecompressedSize;
-      }
-
-      const bytes = await readRecordRangeBytes(blob, meta.recordBlocks, start, end);
-      if (bytes.length > 0) {
-        return bytes;
-      }
-    }
-  }
-
-  return null;
-}
-
-function cleanMddHeadwordDisplay(rawKey: string, isMddStyle: boolean): string {
-  if (!isMddStyle) return rawKey;
-  return rawKey.replace(/^[\\/]+/, '').replace(/\.(?:html?|txt)$/i, '') || rawKey;
 }
 
 async function lookupExactWord(
@@ -1125,29 +927,12 @@ async function lookupExactWord(
   if (visited.has(visitKey) || visited.size >= 4) return null;
   visited.add(visitKey);
 
-  const isMddStyle = meta.headerTag === 'Library_Data' || meta.fileExt === 'mdd';
-  const blockSet = new Set<number>(
-    selectCandidateKeyBlockIndices(meta.keyBlocks, word, meta.isStripKey, meta.isCaseSensitive)
+  const candidateBlocks = selectCandidateKeyBlockIndices(
+    meta.keyBlocks,
+    word,
+    meta.isStripKey,
+    meta.isCaseSensitive
   );
-  if (isMddStyle && !word.startsWith('\\') && !word.startsWith('/')) {
-    for (const idx of selectCandidateKeyBlockIndices(
-      meta.keyBlocks,
-      `\\${word}`,
-      meta.isStripKey,
-      meta.isCaseSensitive
-    )) {
-      blockSet.add(idx);
-    }
-    for (const idx of selectCandidateKeyBlockIndices(
-      meta.keyBlocks,
-      `/${word}`,
-      meta.isStripKey,
-      meta.isCaseSensitive
-    )) {
-      blockSet.add(idx);
-    }
-  }
-  const candidateBlocks = Array.from(blockSet).sort((a, b) => a - b);
 
   const matchedRanges: Array<{ key: string; start: number; end: number }> = [];
   const lowerTarget = word.toLowerCase();
@@ -1165,19 +950,6 @@ async function lookupExactWord(
         exactIndices.push(i);
       } else if (k.toLowerCase() === lowerTarget) {
         ciIndices.push(i);
-      } else if (isMddStyle) {
-        const noSlash = k.replace(/^[\\/]+/, '');
-        const stem = noSlash.replace(/\.(?:html?|txt)$/i, '');
-        if (noSlash === word || stem === word) {
-          exactIndices.push(i);
-        } else if (
-          noSlash.toLowerCase() === lowerTarget ||
-          stem.toLowerCase() === lowerTarget
-        ) {
-          ciIndices.push(i);
-        } else if (meta.isStripKey && strippedTarget && stripKeyForSort(k) === strippedTarget) {
-          strippedIndices.push(i);
-        }
       } else if (meta.isStripKey && strippedTarget && stripKeyForSort(k) === strippedTarget) {
         strippedIndices.push(i);
       }
@@ -1219,7 +991,7 @@ async function lookupExactWord(
   if (matchedRanges.length === 0) return null;
 
   const htmlDefinitions: string[] = [];
-  let matchedHeadword = cleanMddHeadwordDisplay(matchedRanges[0].key, isMddStyle);
+  let matchedHeadword = matchedRanges[0].key;
 
   for (const r of matchedRanges) {
     const rawDef = await readRecordRangeText(blob, meta, r.start, r.end);

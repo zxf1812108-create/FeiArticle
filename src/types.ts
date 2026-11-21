@@ -136,6 +136,12 @@ export interface SyncLogEntry {
 export type ReaderFont = 'serif' | 'sans' | 'mono';
 export type ReaderPaper = 'white' | 'paper' | 'dark';
 export type ReaderWidth = 'narrow' | 'medium' | 'wide';
+export type DocFontId = 'system' | 'noto-sans-sc' | 'noto-serif-sc' | 'inter' | 'brela';
+
+export interface DocFontChoice {
+  zhFont: DocFontId;
+  enFont: DocFontId;
+}
 
 export interface ReaderSettings {
   fontFamily: ReaderFont;
@@ -144,6 +150,8 @@ export interface ReaderSettings {
   width: ReaderWidth;
   paper: ReaderPaper;
   indentFirstLine: boolean;
+  defaultZhFont?: DocFontId;
+  defaultEnFont?: DocFontId;
 }
 
 export type SmartView = 'all' | 'recent' | 'starred' | 'dirty' | 'highlights' | 'trash';
@@ -170,12 +178,9 @@ export type MdictEncoding = 'utf-8' | 'utf-16le' | 'gb18030' | 'big5';
 export interface MdictDictionaryRecord {
   id: string;
   fileName: string;
-  fileExt?: 'mdx' | 'mdd';
-  headerTag?: 'Dictionary' | 'Library_Data';
   title: string;
   description: string;
   encoding: MdictEncoding;
-  keyEncoding?: MdictEncoding;
   version: number;
   encrypt: number;
   isStripKey: boolean;
@@ -194,7 +199,6 @@ export interface MdictDictionaryRecord {
 export interface MdictDictionarySummary {
   id: string;
   fileName: string;
-  fileExt?: 'mdx' | 'mdd';
   title: string;
   description: string;
   numEntries: number;

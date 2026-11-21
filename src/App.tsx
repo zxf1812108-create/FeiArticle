@@ -38,6 +38,8 @@ import { SyncModal } from './components/SyncModal';
 import { TrashModal } from './components/TrashModal';
 import {
   ArticleDoc,
+  DocFontChoice,
+  DocFontId,
   FolderNode,
   MdictDictionarySummary,
   MdictLookupResult,
@@ -48,17 +50,23 @@ import {
   WebDavConfig,
 } from './types';
 import {
+  buildDocFontFamily,
+  DOC_FONT_OPTIONS,
+  resolveDefaultDocFonts,
+  resolveDocFontChoice,
+} from './utils/fonts';
+import {
   attachMdictCss,
   deleteMdictDictionary,
   importMdictFile,
   listMdictDictionaries,
-  lookupMdictWord,
-  removeMdictCss,
+  lookupMdictWordAcrossAll,
   stripDictExt,
 } from './utils/mdictStorage';
 import {
   DEFAULT_READER_SETTINGS,
   loadActiveMdictId,
+  loadDocFontsMap,
   loadDocs,
   loadFolders,
   loadFoldersDirty,
@@ -73,6 +81,7 @@ import {
   MAX_DOC_FONT_SIZE,
   MIN_DOC_FONT_SIZE,
   saveActiveMdictId,
+  saveDocFontsMap,
   saveDocs,
   saveFolders,
   saveFoldersDirty,
@@ -85,6 +94,7 @@ import {
   saveTreeViewState,
   saveWebDavConfig,
   StorageDirectoryConfig,
+  StoredDocFontEntry,
 } from './utils/storage';
 import {
   extractExcerpt,
@@ -202,13 +212,21 @@ export default function App() {
     if (!Number.isFinite(raw)) return DEFAULT_READER_SETTINGS.fontSize;
     return Math.min(MAX_DOC_FONT_SIZE, Math.max(MIN_DOC_FONT_SIZE, Math.round(raw)));
   });
+  const [defaultDocFonts, setDefaultDocFonts] = useState<DocFontChoice>(() => {
+    const settings = loadReaderSettings();
+    return resolveDefaultDocFonts(settings.defaultZhFont, settings.defaultEnFont);
+  });
+  const [docFontsMap, setDocFontsMap] = useState<Record<string, StoredDocFontEntry>>(() =>
+    loadDocFontsMap()
+  );
   const [mdictDicts, setMdictDicts] = useState<MdictDictionarySummary[]>([]);
   const [activeMdictId, setActiveMdictId] = useState<string | null>(() => loadActiveMdictId());
   const [mdictLookup, setMdictLookup] = useState<{
     queryWord: string;
     placement: 'top' | 'bottom';
     loading: boolean;
-    result: MdictLookupResult | null;
+    results: MdictLookupResult[];
+    currentIndex: number;
     error: string | null;
   } | null>(null);
   const [activeDragPayload, setActiveDragPayload] = useState<DragPayload | null>(null);
@@ -1185,35 +1203,83 @@ export default function App() {
     saveReaderSettings({ ...prev, fontSize: clamped });
   };
 
+  const currentDocFontChoice = useMemo<DocFontChoice>(() => {
+    if (!selectedDocId) return defaultDocFonts;
+    return resolveDocFontChoice(docFontsMap[selectedDocId], defaultDocFonts);
+  }, [selectedDocId, docFontsMap, defaultDocFonts]);
+
+  const currentDocFontFamily = useMemo(
+    () => buildDocFontFamily(currentDocFontChoice, defaultDocFonts),
+    [currentDocFontChoice, defaultDocFonts]
+  );
+
+  const handleChangeDocFont = (axis: 'zhFont' | 'enFont', nextFontId: DocFontId) => {
+    if (!selectedDocId) return;
+    const nextChoice: DocFontChoice = {
+      ...currentDocFontChoice,
+      [axis]: nextFontId,
+    };
+    setDocFontsMap((prev) => {
+      const nextMap = {
+        ...prev,
+        [selectedDocId]: nextChoice,
+      };
+      saveDocFontsMap(nextMap);
+      return nextMap;
+    });
+  };
+
+  const handleSetDefaultDocFonts = () => {
+    const nextDefaults: DocFontChoice = { ...currentDocFontChoice };
+    setDefaultDocFonts(nextDefaults);
+    const prev = loadReaderSettings();
+    saveReaderSettings({
+      ...prev,
+      defaultZhFont: nextDefaults.zhFont,
+      defaultEnFont: nextDefaults.enFont,
+    });
+    showToast('已设为默认字体');
+  };
+
   const runMdictLookup = async (
     word: string,
     placement: 'top' | 'bottom',
-    targetDictId?: string | null
+    preferredDictId?: string | null,
+    dictListOverride?: MdictDictionarySummary[]
   ) => {
-    const resolvedDictId =
-      targetDictId ||
-      (activeMdictId && mdictDicts.some((d) => d.id === activeMdictId)
-        ? activeMdictId
-        : mdictDicts[0]?.id || null);
-    if (!resolvedDictId) return;
+    const sourceDicts = dictListOverride || mdictDicts;
+    if (sourceDicts.length === 0) return;
+
+    const firstId =
+      preferredDictId && sourceDicts.some((d) => d.id === preferredDictId)
+        ? preferredDictId
+        : activeMdictId && sourceDicts.some((d) => d.id === activeMdictId)
+          ? activeMdictId
+          : sourceDicts[0].id;
+    const orderedIds = [
+      firstId,
+      ...sourceDicts.map((d) => d.id).filter((id) => id !== firstId),
+    ];
 
     const reqId = ++mdictLookupReqRef.current;
     setMdictLookup({
       queryWord: word,
       placement,
       loading: true,
-      result: null,
+      results: [],
+      currentIndex: 0,
       error: null,
     });
 
     try {
-      const res = await lookupMdictWord(resolvedDictId, word);
+      const results = await lookupMdictWordAcrossAll(orderedIds, word);
       if (mdictLookupReqRef.current !== reqId) return;
       setMdictLookup({
         queryWord: word,
         placement,
         loading: false,
-        result: res,
+        results,
+        currentIndex: 0,
         error: null,
       });
     } catch (err) {
@@ -1222,10 +1288,21 @@ export default function App() {
         queryWord: word,
         placement,
         loading: false,
-        result: null,
+        results: [],
+        currentIndex: 0,
         error: err instanceof Error ? err.message : '查词失败',
       });
     }
+  };
+
+  const handleCycleMdictResult = () => {
+    setMdictLookup((prev) => {
+      if (!prev || prev.results.length <= 1) return prev;
+      return {
+        ...prev,
+        currentIndex: (prev.currentIndex + 1) % prev.results.length,
+      };
+    });
   };
 
   const handleSelectActiveMdict = (dictId: string) => {
@@ -1240,12 +1317,12 @@ export default function App() {
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       const lower = f.name.toLowerCase();
-      if (lower.endsWith('.mdx') || lower.endsWith('.mdd')) {
+      if (lower.endsWith('.mdx')) {
         dictFiles.push(f);
       } else if (lower.endsWith('.css')) {
         cssFiles.push(f);
       } else {
-        throw new Error(`不支持的文件「${f.name}」，请选择 .mdx / .mdd 词典或 .css 样式文件`);
+        throw new Error(`不支持的文件「${f.name}」，请选择 .mdx 词典或 .css 样式文件`);
       }
     }
 
@@ -1263,7 +1340,7 @@ export default function App() {
       saveActiveMdictId(nextActiveId);
     }
 
-    // Match each selected .css file to its corresponding .mdx / .mdd dictionary
+    // Match each selected .css file to its corresponding .mdx dictionary
     for (const cssFile of cssFiles) {
       const cssBase = cssFile.name.replace(/\.css$/i, '').toLowerCase();
       const matched =
@@ -1285,28 +1362,22 @@ export default function App() {
 
     if (cssFiles.length > 0) {
       currentList = await listMdictDictionaries();
-      if (mdictLookup) {
-        void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, nextActiveId);
-      }
     }
     setMdictDicts(currentList);
+    if (mdictLookup && (cssFiles.length > 0 || imported.length > 0)) {
+      const currentDictId =
+        mdictLookup.results[mdictLookup.currentIndex]?.dictId || nextActiveId;
+      void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, currentDictId, currentList);
+    }
   };
 
   const handleAttachMdictCss = async (dictId: string, cssFile: File) => {
     await attachMdictCss(dictId, cssFile);
     const updatedList = await listMdictDictionaries();
     setMdictDicts(updatedList);
-    if (mdictLookup && (activeMdictId === dictId || mdictLookup.result?.dictId === dictId)) {
-      void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, dictId);
-    }
-  };
-
-  const handleRemoveMdictCss = async (dictId: string) => {
-    await removeMdictCss(dictId);
-    const updatedList = await listMdictDictionaries();
-    setMdictDicts(updatedList);
-    if (mdictLookup && (activeMdictId === dictId || mdictLookup.result?.dictId === dictId)) {
-      void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, dictId);
+    if (mdictLookup) {
+      const currentDictId = mdictLookup.results[mdictLookup.currentIndex]?.dictId || dictId;
+      void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, currentDictId, updatedList);
     }
   };
 
@@ -1314,10 +1385,18 @@ export default function App() {
     await deleteMdictDictionary(id);
     const updatedList = await listMdictDictionaries();
     setMdictDicts(updatedList);
+    let nextActive = activeMdictId;
     if (activeMdictId === id) {
-      const fallbackId = updatedList[0]?.id || null;
-      setActiveMdictId(fallbackId);
-      saveActiveMdictId(fallbackId);
+      nextActive = updatedList[0]?.id || null;
+      setActiveMdictId(nextActive);
+      saveActiveMdictId(nextActive);
+    }
+    if (updatedList.length === 0) {
+      setMdictLookup(null);
+    } else if (mdictLookup) {
+      const currentDictId = mdictLookup.results[mdictLookup.currentIndex]?.dictId;
+      const preferred = currentDictId && currentDictId !== id ? currentDictId : nextActive;
+      void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, preferred, updatedList);
     }
   };
 
@@ -1628,6 +1707,7 @@ export default function App() {
             doc={selectedDoc}
             isEditing={isEditing}
             fontSize={fontSize}
+            docFontFamily={currentDocFontFamily}
             hasActiveMdict={mdictDicts.length > 0}
             isMdictPopupOpen={mdictLookup !== null}
             onEnglishWordSelected={({ word, placement }) => {
@@ -1857,7 +1937,7 @@ export default function App() {
                       setShowMdictModal(true);
                     }}
                     aria-label="词典设置与切换"
-                    title="词典（导入与切换 .mdx / .mdd 词库）"
+                    title="词典（导入与切换 .mdx 词库）"
                     className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
                   >
                     <BookA className="w-[18px] h-[18px]" strokeWidth={1.75} />
@@ -1866,8 +1946,8 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setShowFontSizeBar((prev) => !prev)}
-                    aria-label="调节字体大小"
-                    title="调节字体大小"
+                    aria-label="调节字体与字号"
+                    title="调节字体与字号"
                     className={`w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-colors ${
                       showFontSizeBar
                         ? 'bg-[var(--fei-bg-selected)] text-[var(--fei-text-primary)]'
@@ -1974,7 +2054,6 @@ export default function App() {
           activeDictId={activeMdictId}
           onImportFiles={handleImportMdictFiles}
           onAttachCss={handleAttachMdictCss}
-          onRemoveCss={handleRemoveMdictCss}
           onSelectDict={(id) => {
             handleSelectActiveMdict(id);
             if (mdictLookup) {
@@ -1986,7 +2065,7 @@ export default function App() {
         />
       )}
 
-      {/* Font Size Adjuster Popover in Browse/Read Mode (Applies to Read & Edit) */}
+      {/* Font Size & Font Family Adjuster Popover in Browse/Read Mode (Applies to Read & Edit) */}
       {mainView === 'doc' && !isEditing && showFontSizeBar && (
         <>
           <div
@@ -1995,44 +2074,92 @@ export default function App() {
           />
           <div
             role="dialog"
-            aria-label="调节字体大小"
+            aria-label="调节字体与字号"
             onClick={(e) => e.stopPropagation()}
-            className="fixed bottom-[62px] left-1/2 -translate-x-1/2 z-40 w-[min(320px,calc(100vw-24px))] px-3.5 py-2 rounded-2xl bg-[var(--fei-bg-surface)] border border-[var(--fei-border-strong)] shadow-lg flex items-center gap-2.5"
+            className="fixed bottom-[62px] left-1/2 -translate-x-1/2 z-40 w-[min(368px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border border-[var(--fei-border-strong)] shadow-lg flex flex-col gap-2.5"
           >
-            <button
-              type="button"
-              onClick={() => handleChangeFontSize(fontSize - 1)}
-              disabled={fontSize <= MIN_DOC_FONT_SIZE}
-              aria-label="减小字号"
-              className="w-10 h-10 inline-flex items-center justify-center rounded-xl text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 transition-colors shrink-0"
-            >
-              <Minus className="w-4 h-4" strokeWidth={1.75} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleChangeFontSize(fontSize - 1)}
+                disabled={fontSize <= MIN_DOC_FONT_SIZE}
+                aria-label="减小字号"
+                className="w-10 h-10 inline-flex items-center justify-center rounded-xl text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 transition-colors shrink-0"
+              >
+                <Minus className="w-4 h-4" strokeWidth={1.75} />
+              </button>
 
-            <input
-              type="range"
-              min={MIN_DOC_FONT_SIZE}
-              max={MAX_DOC_FONT_SIZE}
-              step={1}
-              value={fontSize}
-              onChange={(e) => handleChangeFontSize(Number(e.target.value))}
-              aria-label="字号滑块"
-              className="flex-1 min-w-0 h-1.5 accent-[var(--fei-btn-primary-bg)] cursor-pointer"
-            />
+              <input
+                type="range"
+                min={MIN_DOC_FONT_SIZE}
+                max={MAX_DOC_FONT_SIZE}
+                step={1}
+                value={fontSize}
+                onChange={(e) => handleChangeFontSize(Number(e.target.value))}
+                aria-label="字号滑块"
+                className="flex-1 min-w-0 h-1.5 accent-[var(--fei-btn-primary-bg)] cursor-pointer"
+              />
 
-            <button
-              type="button"
-              onClick={() => handleChangeFontSize(fontSize + 1)}
-              disabled={fontSize >= MAX_DOC_FONT_SIZE}
-              aria-label="增大字号"
-              className="w-10 h-10 inline-flex items-center justify-center rounded-xl text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 transition-colors shrink-0"
-            >
-              <Plus className="w-4 h-4" strokeWidth={1.75} />
-            </button>
+              <button
+                type="button"
+                onClick={() => handleChangeFontSize(fontSize + 1)}
+                disabled={fontSize >= MAX_DOC_FONT_SIZE}
+                aria-label="增大字号"
+                className="w-10 h-10 inline-flex items-center justify-center rounded-xl text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 transition-colors shrink-0"
+              >
+                <Plus className="w-4 h-4" strokeWidth={1.75} />
+              </button>
 
-            <span className="text-[12px] font-code tabular-nums text-[var(--fei-text-muted)] w-8 text-right shrink-0">
-              {fontSize}
-            </span>
+              <span className="text-[12px] font-code tabular-nums text-[var(--fei-text-muted)] w-8 text-right shrink-0">
+                {fontSize}
+              </span>
+            </div>
+
+            <div className="pt-2 border-t border-[var(--fei-border)] grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
+              <label className="min-w-0 flex flex-col gap-1">
+                <span className="text-[11px] leading-none text-[var(--fei-text-muted)]">
+                  中文字体
+                </span>
+                <select
+                  value={currentDocFontChoice.zhFont}
+                  onChange={(e) => handleChangeDocFont('zhFont', e.target.value as DocFontId)}
+                  aria-label="中文字体"
+                  className="w-full h-9 px-2 rounded-lg bg-[var(--fei-bg)] border border-[var(--fei-border)] text-[12.5px] text-[var(--fei-text-primary)] outline-none focus:border-[var(--fei-border-strong)] cursor-pointer"
+                >
+                  {DOC_FONT_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="min-w-0 flex flex-col gap-1">
+                <span className="text-[11px] leading-none text-[var(--fei-text-muted)]">
+                  英文字体
+                </span>
+                <select
+                  value={currentDocFontChoice.enFont}
+                  onChange={(e) => handleChangeDocFont('enFont', e.target.value as DocFontId)}
+                  aria-label="英文字体"
+                  className="w-full h-9 px-2 rounded-lg bg-[var(--fei-bg)] border border-[var(--fei-border)] text-[12.5px] text-[var(--fei-text-primary)] outline-none focus:border-[var(--fei-border-strong)] cursor-pointer"
+                >
+                  {DOC_FONT_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                type="button"
+                onClick={handleSetDefaultDocFonts}
+                className="h-9 px-2 inline-flex items-center justify-center rounded-lg text-[12px] font-medium whitespace-nowrap shrink-0 text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] transition-colors cursor-pointer"
+              >
+                设为默认
+              </button>
+            </div>
           </div>
         </>
       )}
@@ -2043,16 +2170,16 @@ export default function App() {
           queryWord={mdictLookup.queryWord}
           placement={mdictLookup.placement}
           loading={mdictLookup.loading}
-          result={mdictLookup.result}
+          result={mdictLookup.results[mdictLookup.currentIndex] ?? null}
+          matchCount={mdictLookup.results.length}
           error={mdictLookup.error}
           dictionaries={mdictDicts}
           activeDictId={activeMdictId}
-          onSwitchDict={(dictId) => {
-            handleSelectActiveMdict(dictId);
-            void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, dictId);
-          }}
+          onCycleDict={handleCycleMdictResult}
           onLookupWord={(nextWord) => {
-            void runMdictLookup(nextWord, mdictLookup.placement);
+            const currentDictId =
+              mdictLookup.results[mdictLookup.currentIndex]?.dictId || activeMdictId;
+            void runMdictLookup(nextWord, mdictLookup.placement, currentDictId);
           }}
           onClose={() => setMdictLookup(null)}
         />

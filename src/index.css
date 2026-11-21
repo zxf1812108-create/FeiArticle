@@ -1,11 +1,35 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
 
+@font-face {
+  font-family: "FeiEnSystem";
+  src: local("-apple-system"), local("SF Pro Text"), local("Roboto"), local("Segoe UI"), local("Helvetica Neue"), local("Arial");
+  font-weight: 100 900;
+  font-style: normal;
+  unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF, U+2100-214F;
+}
+
+@font-face {
+  font-family: "FeiEnBrela";
+  src: local("Brela"), local("Brela Regular"), local("Brela-Regular");
+  font-weight: 400;
+  font-style: normal;
+  unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF, U+2100-214F;
+}
+
+@font-face {
+  font-family: "FeiEnBrela";
+  src: local("Brela Bold"), local("Brela-Bold"), local("Brela");
+  font-weight: 600 700;
+  font-style: normal;
+  unicode-range: U+0000-024F, U+1E00-1EFF, U+2000-206F, U+20A0-20CF, U+2100-214F;
+}
+
 @layer base {
   :root {
     --font-sans: "Plus Jakarta Sans", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
-    --font-serif: "PT Serif", "Georgia", "Charter", "Noto Serif SC", "Songti SC", "STSong", serif;
-    --font-doc-body: "PT Serif", "Georgia", "Charter", "Times New Roman", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+    --font-serif: "Noto Serif SC", "Songti SC", "STSong", Georgia, serif;
+    --font-doc-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
     /* FeiNote Eye-Comfort Soft Paper Monochrome Ink & Surface Tokens (Light) */
@@ -60,8 +84,6 @@
 
   .font-doc-body {
     font-family: var(--font-doc-body);
-    font-variant-ligatures: none;
-    font-feature-settings: "liga" 0, "clig" 0, "dlig" 0;
   }
 
   .font-code {
