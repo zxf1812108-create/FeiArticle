@@ -4,8 +4,8 @@
 @layer base {
   :root {
     --font-sans: "Plus Jakarta Sans", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
-    --font-serif: "Newsreader", "Georgia", "Charter", "Noto Serif SC", "Songti SC", "STSong", serif;
-    --font-doc-body: "Newsreader", "Georgia", "Charter", "Times New Roman", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+    --font-serif: "PT Serif", "Georgia", "Charter", "Noto Serif SC", "Songti SC", "STSong", serif;
+    --font-doc-body: "PT Serif", "Georgia", "Charter", "Times New Roman", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
     /* FeiNote Eye-Comfort Soft Paper Monochrome Ink & Surface Tokens (Light) */
@@ -60,7 +60,8 @@
 
   .font-doc-body {
     font-family: var(--font-doc-body);
-    font-optical-sizing: auto;
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "clig" 0, "dlig" 0;
   }
 
   .font-code {

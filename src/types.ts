@@ -170,9 +170,12 @@ export type MdictEncoding = 'utf-8' | 'utf-16le' | 'gb18030' | 'big5';
 export interface MdictDictionaryRecord {
   id: string;
   fileName: string;
+  fileExt?: 'mdx' | 'mdd';
+  headerTag?: 'Dictionary' | 'Library_Data';
   title: string;
   description: string;
   encoding: MdictEncoding;
+  keyEncoding?: MdictEncoding;
   version: number;
   encrypt: number;
   isStripKey: boolean;
@@ -188,10 +191,17 @@ export interface MdictDictionaryRecord {
   recordBlocks: MdictRecordBlockMeta[];
 }
 
-export type MdictDictionarySummary = Pick<
-  MdictDictionaryRecord,
-  'id' | 'fileName' | 'title' | 'description' | 'numEntries' | 'fileSize' | 'addedAt' | 'cssFileName'
->;
+export interface MdictDictionarySummary {
+  id: string;
+  fileName: string;
+  fileExt?: 'mdx' | 'mdd';
+  title: string;
+  description: string;
+  numEntries: number;
+  fileSize: number;
+  addedAt: number;
+  cssFileName?: string;
+}
 
 export interface MdictLookupResult {
   dictId: string;

@@ -24,6 +24,7 @@ export interface MinimalDocViewHandle {
 interface MinimalDocViewProps {
   doc: ArticleDoc;
   isEditing: boolean;
+  fontSize?: number;
   hasActiveMdict?: boolean;
   isMdictPopupOpen?: boolean;
   onEnglishWordSelected?: (payload: { word: string; placement: 'top' | 'bottom' }) => void;
@@ -239,6 +240,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     {
       doc,
       isEditing,
+      fontSize = 16,
       hasActiveMdict = false,
       isMdictPopupOpen = false,
       onEnglishWordSelected,
@@ -258,6 +260,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const [fetchError, setFetchError] = useState<string | null>(null);
     const [articleOverflow, setArticleOverflow] = useState(false);
     const [showOutline, setShowOutline] = useState(false);
+    const [bottomClipPx, setBottomClipPx] = useState(0);
+    const clipRafRef = useRef<number | null>(null);
 
     const titleRef = useRef(doc.title);
     const contentRef = useRef(content);
@@ -325,10 +329,62 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return false;
     };
 
+    const updateBottomClip = () => {
+      if (isEditingRef.current) {
+        setBottomClipPx((prev) => (prev === 0 ? prev : 0));
+        return;
+      }
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl) {
+        setBottomClipPx((prev) => (prev === 0 ? prev : 0));
+        return;
+      }
+      const viewTop = el.scrollTop;
+      const viewHeight = el.clientHeight;
+      const maxScroll = Math.max(0, el.scrollHeight - viewHeight);
+      if (viewHeight <= 0 || maxScroll <= 2 || viewTop >= maxScroll - 1.5) {
+        setBottomClipPx((prev) => (prev === 0 ? prev : 0));
+        return;
+      }
+      const rawViewBottom = viewTop + viewHeight;
+      const lines = collectVisualLines(el, articleEl);
+      const cutIdx = lines.findIndex(
+        (line) => line.top < rawViewBottom - 0.5 && line.bottom > rawViewBottom + 0.5
+      );
+      if (cutIdx === -1) {
+        setBottomClipPx((prev) => (prev === 0 ? prev : 0));
+        return;
+      }
+      const cutLine = lines[cutIdx];
+      if (cutLine.top <= viewTop + 4) {
+        setBottomClipPx((prev) => (prev === 0 ? prev : 0));
+        return;
+      }
+      const prevLineBottom = cutIdx > 0 ? lines[cutIdx - 1].bottom : viewTop;
+      const safeCutY = Math.max(prevLineBottom + 0.5, cutLine.top - 1);
+      const needed = Math.max(0, Math.min(56, Math.ceil(rawViewBottom - safeCutY)));
+      setBottomClipPx((prev) => (prev === needed ? prev : needed));
+    };
+
+    const scheduleBottomClipUpdate = () => {
+      if (clipRafRef.current !== null) {
+        window.cancelAnimationFrame(clipRafRef.current);
+      }
+      clipRafRef.current = window.requestAnimationFrame(() => {
+        clipRafRef.current = null;
+        updateBottomClip();
+      });
+    };
+
     useLayoutEffect(() => {
-      if (isEditing) return;
+      if (isEditing) {
+        setBottomClipPx(0);
+        return;
+      }
       measureReadOverflow();
-    }, [isEditing, content, doc.id]);
+      updateBottomClip();
+    }, [isEditing, content, doc.id, fontSize, articleOverflow]);
 
     useEffect(() => {
       if (isEditing) return;
@@ -338,11 +394,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const ro = new ResizeObserver(() => {
         const needed = articleEl.offsetHeight + 48 > el.clientHeight;
         setArticleOverflow((prev) => (prev === needed ? prev : needed));
+        scheduleBottomClipUpdate();
       });
       ro.observe(el);
       ro.observe(articleEl);
       return () => ro.disconnect();
-    }, [isEditing, doc.id]);
+    }, [isEditing, doc.id, fontSize]);
 
     // Restore saved scrollTop when opening a document
     useLayoutEffect(() => {
@@ -448,6 +505,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return () => {
         if (debounceSaveRef.current) window.clearTimeout(debounceSaveRef.current);
         if (debounceScrollRef.current) window.clearTimeout(debounceScrollRef.current);
+        if (clipRafRef.current !== null) window.cancelAnimationFrame(clipRafRef.current);
       };
     }, []);
 
@@ -607,6 +665,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const handleScroll = () => {
       const el = isEditing ? textareaRef.current : scrollRef.current;
       if (!el) return;
+      if (!isEditing) {
+        scheduleBottomClipUpdate();
+      }
       if (debounceScrollRef.current) window.clearTimeout(debounceScrollRef.current);
       debounceScrollRef.current = window.setTimeout(() => {
         onViewStateChange({
@@ -766,7 +827,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const currentTop = el.scrollTop;
       const currentBottom = currentTop + viewHeight;
       const lines = collectVisualLines(el, articleEl);
-      const EPS = 1.5;
+      const EPS = 0.5;
 
       if (ratio < 1 / 3) {
         if (currentTop <= 0) return;
@@ -784,7 +845,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           const minNeededBottom = Math.ceil(prevLine.bottom);
           const desiredBottom =
             minNeededBottom <= maxAllowedBottom
-              ? Math.min(maxAllowedBottom, minNeededBottom + 4)
+              ? Math.min(maxAllowedBottom, minNeededBottom + 2)
               : maxAllowedBottom;
           targetScrollTop = Math.max(0, desiredBottom - viewHeight);
         } else if (firstCompleteIdx === 0) {
@@ -796,6 +857,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
 
         el.scrollTop = targetScrollTop;
+        updateBottomClip();
         onViewStateChange({ mode: 'read', scrollTop: targetScrollTop });
       } else {
         if (currentTop >= maxScroll) return;
@@ -814,6 +876,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
 
         el.scrollTop = targetScrollTop;
+        updateBottomClip();
         onViewStateChange({ mode: 'read', scrollTop: targetScrollTop });
       }
     };
@@ -890,6 +953,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const rawTop = elRect.top - containerRect.top + scrollEl.scrollTop - 12;
       const targetScrollTop = Math.min(maxScroll, Math.max(0, Math.round(rawTop)));
       scrollEl.scrollTop = targetScrollTop;
+      updateBottomClip();
       onViewStateChange({ mode: 'read', scrollTop: targetScrollTop });
       setShowOutline(false);
     };
@@ -958,7 +1022,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                 key={idx}
                 data-toc-id={block.id}
                 data-block-idx={idx}
-                className="text-[22px] font-semibold leading-snug mt-6 mb-2.5 first:mt-0 text-[var(--fei-text-primary)] text-balance"
+                className="text-[1.375em] font-semibold leading-snug mt-6 mb-2.5 first:mt-0 text-[var(--fei-text-primary)] text-balance"
               >
                 {block.text}
               </h1>
@@ -970,7 +1034,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                 key={idx}
                 data-toc-id={block.id}
                 data-block-idx={idx}
-                className="text-[18.5px] font-semibold leading-snug mt-5 mb-2 text-[var(--fei-text-primary)] text-balance"
+                className="text-[1.15em] font-semibold leading-snug mt-5 mb-2 text-[var(--fei-text-primary)] text-balance"
               >
                 {block.text}
               </h2>
@@ -981,7 +1045,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               key={idx}
               data-toc-id={block.id}
               data-block-idx={idx}
-              className="text-[16.5px] font-semibold leading-snug mt-4 mb-1.5 text-[var(--fei-text-primary)]"
+              className="text-[1.03em] font-semibold leading-snug mt-4 mb-1.5 text-[var(--fei-text-primary)]"
             >
               {block.text}
             </h3>
@@ -998,7 +1062,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             <blockquote
               key={idx}
               data-block-idx={idx}
-              className="my-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)] text-[15px]"
+              className="my-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)] text-[0.94em]"
             >
               <span className="whitespace-pre-line">{renderInline(block.text)}</span>
             </blockquote>
@@ -1008,7 +1072,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             <pre
               key={idx}
               data-block-idx={idx}
-              className="my-4 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] overflow-x-auto text-[13px] leading-relaxed font-code text-[var(--fei-text-primary)]"
+              className="my-4 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] overflow-x-auto text-[0.8125em] leading-relaxed font-code text-[var(--fei-text-primary)]"
             >
               <code>{block.code}</code>
             </pre>
@@ -1045,7 +1109,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               data-block-idx={idx}
               className="my-4 max-w-full w-full overflow-x-auto rounded-lg border border-[var(--fei-border)]"
             >
-              <table className="w-full border-collapse text-[14.5px] leading-relaxed text-[var(--fei-text-primary)]">
+              <table className="w-full border-collapse text-[0.9em] leading-relaxed text-[var(--fei-text-primary)]">
                 <thead>
                   <tr className="bg-[var(--fei-bg-subtle)] border-b border-[var(--fei-border)]">
                     {block.headers.map((header, colIdx) => {
@@ -1133,68 +1197,81 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               scheduleSave(titleRef.current, nextVal);
             }}
             placeholder="开始输入正文…"
-            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none pt-1 pb-[40vh] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent font-doc-body text-[16px] leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none"
+            style={{ fontSize: `${fontSize}px` }}
+            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none pt-1 pb-[40vh] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent font-doc-body leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none"
           />
         ) : (
-          <div
-            ref={scrollRef}
-            onPointerDownCapture={handleReadPointerDownCapture}
-            onTouchStartCapture={handleReadTouchStartCapture}
-            onPointerUp={handleReadPointerEnd}
-            onTouchEnd={handleReadPointerEnd}
-            onPointerCancel={() => {
-              isPointerActiveRef.current = false;
-            }}
-            onTouchCancel={() => {
-              isPointerActiveRef.current = false;
-            }}
-            onClick={handleContainerClick}
-            onScroll={handleScroll}
-            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none"
-          >
+          <div className="relative flex-1 min-h-0 w-full flex flex-col">
             <div
-              className={`max-w-[720px] w-full min-w-0 mx-auto px-5 sm:px-8 min-h-full flex flex-col ${
-                articleOverflow ? 'pt-1 pb-[calc(100vh-110px)]' : 'py-6 justify-center'
-              }`}
+              ref={scrollRef}
+              onPointerDownCapture={handleReadPointerDownCapture}
+              onTouchStartCapture={handleReadTouchStartCapture}
+              onPointerUp={handleReadPointerEnd}
+              onTouchEnd={handleReadPointerEnd}
+              onPointerCancel={() => {
+                isPointerActiveRef.current = false;
+              }}
+              onTouchCancel={() => {
+                isPointerActiveRef.current = false;
+              }}
+              onClick={handleContainerClick}
+              onScroll={handleScroll}
+              className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none"
             >
-              <article ref={articleRef} className="w-full min-w-0 font-doc-body">
-                {doc.syncStatus === 'remote-only' && !content ? (
-                  <div className="py-12 text-center space-y-3">
-                    <p className="text-[14px] text-[var(--fei-text-muted)]">
-                      正文位于坚果云（约 {formatBytes(doc.byteSize)}），按需拉取后将缓存在本地。
-                    </p>
-                    {fetchError && (
-                      <p className="text-[13px] text-[var(--fei-text-muted)]">{fetchError}</p>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleFetch}
-                      disabled={fetching}
-                      className="h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium disabled:opacity-60"
-                    >
-                      <CloudDownload className="w-4 h-4" />
-                      <span>{fetching ? '拉取中…' : '拉取正文'}</span>
-                    </button>
-                  </div>
-                ) : (
-                  <div className="text-[16px] leading-[1.62] text-[var(--fei-text-primary)] break-words [overflow-wrap:anywhere]">
-                    {blocks.length === 0 ? (
-                      <p className="text-[var(--fei-text-muted)]">
-                        暂无内容，点击右下角编辑图标开始写作。
+              <div
+                className={`max-w-[720px] w-full min-w-0 mx-auto px-5 sm:px-8 min-h-full flex flex-col ${
+                  articleOverflow ? 'pt-1 pb-[calc(100vh-110px)]' : 'py-6 justify-center'
+                }`}
+              >
+                <article ref={articleRef} className="w-full min-w-0 font-doc-body">
+                  {doc.syncStatus === 'remote-only' && !content ? (
+                    <div className="py-12 text-center space-y-3">
+                      <p className="text-[14px] text-[var(--fei-text-muted)]">
+                        正文位于坚果云（约 {formatBytes(doc.byteSize)}），按需拉取后将缓存在本地。
                       </p>
-                    ) : (
-                      blocks.map((b, i) => renderBlock(b, i))
-                    )}
-                  </div>
-                )}
-              </article>
+                      {fetchError && (
+                        <p className="text-[13px] text-[var(--fei-text-muted)]">{fetchError}</p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleFetch}
+                        disabled={fetching}
+                        className="h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium disabled:opacity-60"
+                      >
+                        <CloudDownload className="w-4 h-4" />
+                        <span>{fetching ? '拉取中…' : '拉取正文'}</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      style={{ fontSize: `${fontSize}px` }}
+                      className="leading-[1.62] text-[var(--fei-text-primary)] break-words [overflow-wrap:anywhere]"
+                    >
+                      {blocks.length === 0 ? (
+                        <p className="text-[var(--fei-text-muted)]">
+                          暂无内容，点击右下角编辑图标开始写作。
+                        </p>
+                      ) : (
+                        blocks.map((b, i) => renderBlock(b, i))
+                      )}
+                    </div>
+                  )}
+                </article>
+              </div>
             </div>
+
+            {bottomClipPx > 0 && (
+              <div
+                aria-hidden="true"
+                style={{ height: `${bottomClipPx}px` }}
+                className="pointer-events-none absolute left-0 right-1.5 bottom-0 bg-[var(--fei-bg)] z-10"
+              />
+            )}
           </div>
         )}
 
         {!isEditing && showOutline && (
           <DocOutlineModal
-            docTitle={doc.title}
             toc={toc}
             fallbackAnchors={fallbackAnchors}
             activeTocId={getActiveTocId()}

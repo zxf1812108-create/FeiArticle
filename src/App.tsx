@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ALargeSmall,
   BookA,
   ChevronsUp,
   Download,
@@ -12,6 +13,7 @@ import {
   LockOpen,
   Minus,
   Pencil,
+  Plus,
   RefreshCw,
   Scissors,
   Trash2,
@@ -52,8 +54,10 @@ import {
   listMdictDictionaries,
   lookupMdictWord,
   removeMdictCss,
+  stripDictExt,
 } from './utils/mdictStorage';
 import {
+  DEFAULT_READER_SETTINGS,
   loadActiveMdictId,
   loadDocs,
   loadFolders,
@@ -61,10 +65,13 @@ import {
   loadLastOpenedDocId,
   loadPurgedSyncRecords,
   loadQuotaStats,
+  loadReaderSettings,
   loadStorageDirConfig,
   loadSyncLogs,
   loadTreeViewState,
   loadWebDavConfig,
+  MAX_DOC_FONT_SIZE,
+  MIN_DOC_FONT_SIZE,
   saveActiveMdictId,
   saveDocs,
   saveFolders,
@@ -72,6 +79,7 @@ import {
   saveLastOpenedDocId,
   savePurgedSyncRecords,
   saveQuotaStats,
+  saveReaderSettings,
   saveStorageDirConfig,
   saveSyncLogs,
   saveTreeViewState,
@@ -188,6 +196,12 @@ export default function App() {
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTrashModal, setShowTrashModal] = useState(false);
   const [showMdictModal, setShowMdictModal] = useState(false);
+  const [showFontSizeBar, setShowFontSizeBar] = useState(false);
+  const [fontSize, setFontSize] = useState<number>(() => {
+    const raw = loadReaderSettings().fontSize;
+    if (!Number.isFinite(raw)) return DEFAULT_READER_SETTINGS.fontSize;
+    return Math.min(MAX_DOC_FONT_SIZE, Math.max(MIN_DOC_FONT_SIZE, Math.round(raw)));
+  });
   const [mdictDicts, setMdictDicts] = useState<MdictDictionarySummary[]>([]);
   const [activeMdictId, setActiveMdictId] = useState<string | null>(() => loadActiveMdictId());
   const [mdictLookup, setMdictLookup] = useState<{
@@ -1125,6 +1139,7 @@ export default function App() {
       handleUpdateDocViewState(selectedDoc.id, captured);
     }
     setMdictLookup(null);
+    setShowFontSizeBar(false);
     setMainView('tree');
   };
 
@@ -1157,9 +1172,17 @@ export default function App() {
     const nextEditing = !isEditing;
     if (nextEditing) {
       setMdictLookup(null);
+      setShowFontSizeBar(false);
     }
     docViewRef.current?.prepareModeSwitch(nextEditing);
     setIsEditing(nextEditing);
+  };
+
+  const handleChangeFontSize = (nextSize: number) => {
+    const clamped = Math.min(MAX_DOC_FONT_SIZE, Math.max(MIN_DOC_FONT_SIZE, Math.round(nextSize)));
+    setFontSize(clamped);
+    const prev = loadReaderSettings();
+    saveReaderSettings({ ...prev, fontSize: clamped });
   };
 
   const runMdictLookup = async (
@@ -1211,23 +1234,23 @@ export default function App() {
   };
 
   const handleImportMdictFiles = async (files: FileList) => {
-    const mdxFiles: File[] = [];
+    const dictFiles: File[] = [];
     const cssFiles: File[] = [];
 
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       const lower = f.name.toLowerCase();
-      if (lower.endsWith('.mdx')) {
-        mdxFiles.push(f);
+      if (lower.endsWith('.mdx') || lower.endsWith('.mdd')) {
+        dictFiles.push(f);
       } else if (lower.endsWith('.css')) {
         cssFiles.push(f);
       } else {
-        throw new Error(`不支持的文件「${f.name}」，请选择 .mdx 词典或 .css 样式文件`);
+        throw new Error(`不支持的文件「${f.name}」，请选择 .mdx / .mdd 词典或 .css 样式文件`);
       }
     }
 
     const imported: MdictDictionarySummary[] = [];
-    for (const f of mdxFiles) {
+    for (const f of dictFiles) {
       const summary = await importMdictFile(f);
       imported.push(summary);
     }
@@ -1240,15 +1263,15 @@ export default function App() {
       saveActiveMdictId(nextActiveId);
     }
 
-    // Match each selected .css file to its corresponding .mdx dictionary
+    // Match each selected .css file to its corresponding .mdx / .mdd dictionary
     for (const cssFile of cssFiles) {
       const cssBase = cssFile.name.replace(/\.css$/i, '').toLowerCase();
       const matched =
-        imported.find((d) => d.fileName.replace(/\.mdx$/i, '').toLowerCase() === cssBase) ||
-        currentList.find((d) => d.fileName.replace(/\.mdx$/i, '').toLowerCase() === cssBase) ||
+        imported.find((d) => stripDictExt(d.fileName).toLowerCase() === cssBase) ||
+        currentList.find((d) => stripDictExt(d.fileName).toLowerCase() === cssBase) ||
         (imported.length === 1 ? imported[0] : null) ||
         (currentList.length === 1 ? currentList[0] : null) ||
-        (mdxFiles.length === 0 && nextActiveId
+        (dictFiles.length === 0 && nextActiveId
           ? currentList.find((d) => d.id === nextActiveId) || null
           : null);
 
@@ -1604,9 +1627,11 @@ export default function App() {
             ref={docViewRef}
             doc={selectedDoc}
             isEditing={isEditing}
+            fontSize={fontSize}
             hasActiveMdict={mdictDicts.length > 0}
             isMdictPopupOpen={mdictLookup !== null}
             onEnglishWordSelected={({ word, placement }) => {
+              setShowFontSizeBar(false);
               void runMdictLookup(word, placement);
             }}
             onClearMdictLookup={() => setMdictLookup(null)}
@@ -1822,17 +1847,36 @@ export default function App() {
                 )}
               </button>
 
-              {/* 浏览状态下，浏览图标后面放置词典图标（导入/切换 .mdx 词库） */}
+              {/* 浏览状态下，浏览图标后面放置词典图标和调节字体大小图标 */}
               {!isEditing && (
-                <button
-                  type="button"
-                  onClick={() => setShowMdictModal(true)}
-                  aria-label="词典设置与切换"
-                  title="词典（导入与切换 .mdx 词库）"
-                  className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
-                >
-                  <BookA className="w-[18px] h-[18px]" strokeWidth={1.75} />
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowFontSizeBar(false);
+                      setShowMdictModal(true);
+                    }}
+                    aria-label="词典设置与切换"
+                    title="词典（导入与切换 .mdx / .mdd 词库）"
+                    className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+                  >
+                    <BookA className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowFontSizeBar((prev) => !prev)}
+                    aria-label="调节字体大小"
+                    title="调节字体大小"
+                    className={`w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-colors ${
+                      showFontSizeBar
+                        ? 'bg-[var(--fei-bg-selected)] text-[var(--fei-text-primary)]'
+                        : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
+                    }`}
+                  >
+                    <ALargeSmall className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
+                  </button>
+                </>
               )}
 
               {/* 3–6. 编辑状态下，编辑图标后面依次放置：一级标题、二级标题、无序列表、分割线 */}
@@ -1940,6 +1984,57 @@ export default function App() {
           onDeleteDict={handleDeleteMdictDict}
           onClose={() => setShowMdictModal(false)}
         />
+      )}
+
+      {/* Font Size Adjuster Popover in Browse/Read Mode (Applies to Read & Edit) */}
+      {mainView === 'doc' && !isEditing && showFontSizeBar && (
+        <>
+          <div
+            className="fixed inset-0 z-30"
+            onClick={() => setShowFontSizeBar(false)}
+          />
+          <div
+            role="dialog"
+            aria-label="调节字体大小"
+            onClick={(e) => e.stopPropagation()}
+            className="fixed bottom-[62px] left-1/2 -translate-x-1/2 z-40 w-[min(320px,calc(100vw-24px))] px-3.5 py-2 rounded-2xl bg-[var(--fei-bg-surface)] border border-[var(--fei-border-strong)] shadow-lg flex items-center gap-2.5"
+          >
+            <button
+              type="button"
+              onClick={() => handleChangeFontSize(fontSize - 1)}
+              disabled={fontSize <= MIN_DOC_FONT_SIZE}
+              aria-label="减小字号"
+              className="w-10 h-10 inline-flex items-center justify-center rounded-xl text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 transition-colors shrink-0"
+            >
+              <Minus className="w-4 h-4" strokeWidth={1.75} />
+            </button>
+
+            <input
+              type="range"
+              min={MIN_DOC_FONT_SIZE}
+              max={MAX_DOC_FONT_SIZE}
+              step={1}
+              value={fontSize}
+              onChange={(e) => handleChangeFontSize(Number(e.target.value))}
+              aria-label="字号滑块"
+              className="flex-1 min-w-0 h-1.5 accent-[var(--fei-btn-primary-bg)] cursor-pointer"
+            />
+
+            <button
+              type="button"
+              onClick={() => handleChangeFontSize(fontSize + 1)}
+              disabled={fontSize >= MAX_DOC_FONT_SIZE}
+              aria-label="增大字号"
+              className="w-10 h-10 inline-flex items-center justify-center rounded-xl text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 transition-colors shrink-0"
+            >
+              <Plus className="w-4 h-4" strokeWidth={1.75} />
+            </button>
+
+            <span className="text-[12px] font-code tabular-nums text-[var(--fei-text-muted)] w-8 text-right shrink-0">
+              {fontSize}
+            </span>
+          </div>
+        </>
       )}
 
       {/* Adaptive MDict Lookup Popup in Read Mode */}

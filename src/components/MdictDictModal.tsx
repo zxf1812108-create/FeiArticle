@@ -81,7 +81,7 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
               词典
             </h2>
             <p className="text-[11.5px] text-[var(--fei-text-muted)] mt-0.5">
-              支持导入 .mdx 词库及配套 .css 样式文件
+              支持导入 .mdx / .mdd 词库及配套 .css 样式文件
             </p>
           </div>
 
@@ -138,13 +138,16 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
                 暂未导入词典
               </div>
               <p className="text-[12px] leading-relaxed text-[var(--fei-text-muted)] max-w-[270px]">
-                点击右上角「导入词库」选择 .mdx 文件（可同时选中同名 .css 样式文件一起导入）。
+                点击右上角「导入词库」选择 .mdx 或 .mdd 文件（可同时选中同名 .css 样式文件一起导入）。
               </p>
             </div>
           ) : (
             dictionaries.map((dict) => {
               const isActive = dict.id === activeDictId;
               const isBusy = busyDictId === dict.id;
+              const extLabel = (
+                dict.fileExt || (dict.fileName.toLowerCase().endsWith('.mdd') ? 'mdd' : 'mdx')
+              ).toUpperCase();
               return (
                 <div
                   key={dict.id}
@@ -167,12 +170,12 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
                     <div className="text-[14px] font-medium text-[var(--fei-text-primary)] truncate">
                       {dict.title}
                     </div>
-                    <div className="text-[11.5px] text-[var(--fei-text-muted)] flex items-center gap-1.5 mt-0.5 truncate">
+                    <div className="text-[11.5px] text-[var(--fei-text-muted)] flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-0.5">
                       <span className="shrink-0">
-                        {dict.numEntries.toLocaleString()} 词条 · {formatBytes(dict.fileSize)}
+                        {extLabel} · {dict.numEntries.toLocaleString()} 词条 · {formatBytes(dict.fileSize)}
                       </span>
                       {dict.cssFileName && (
-                        <>
+                        <span className="inline-flex items-center gap-1 min-w-0 max-w-full">
                           <span>·</span>
                           <span className="truncate">样式：{dict.cssFileName}</span>
                           <button
@@ -194,7 +197,7 @@ export const MdictDictModal: React.FC<MdictDictModalProps> = ({
                           >
                             清除
                           </button>
-                        </>
+                        </span>
                       )}
                     </div>
                   </div>

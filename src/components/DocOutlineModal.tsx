@@ -9,7 +9,6 @@ export interface FallbackJumpAnchor {
 }
 
 interface DocOutlineModalProps {
-  docTitle: string;
   toc: TocItem[];
   fallbackAnchors: FallbackJumpAnchor[];
   activeTocId: string | null;
@@ -19,7 +18,6 @@ interface DocOutlineModalProps {
 }
 
 export const DocOutlineModal: React.FC<DocOutlineModalProps> = ({
-  docTitle,
   toc,
   fallbackAnchors,
   activeTocId,
@@ -50,13 +48,8 @@ export const DocOutlineModal: React.FC<DocOutlineModalProps> = ({
       >
         {/* Header */}
         <div className="px-4 py-3 border-b border-[var(--fei-border)] flex items-center justify-between gap-3 shrink-0">
-          <div className="min-w-0">
-            <div className="text-[12px] text-[var(--fei-text-muted)] leading-tight">
-              文档结构{hasHeadings ? ` · ${toc.length}` : ''}
-            </div>
-            <div className="text-[14px] font-medium text-[var(--fei-text-primary)] truncate mt-0.5">
-              {docTitle || '无标题文档'}
-            </div>
+          <div className="text-[13px] font-medium text-[var(--fei-text-primary)] leading-tight">
+            文档结构
           </div>
 
           <button

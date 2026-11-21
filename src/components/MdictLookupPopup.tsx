@@ -142,7 +142,9 @@ const MdictShadowDefinition: React.FC<{
       :host {
         display: block;
         color: var(--fei-text-primary, #2E2D2A);
-        font-family: var(--font-doc-body, "Newsreader", Georgia, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif);
+        font-family: var(--font-doc-body, "PT Serif", Georgia, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif);
+        font-variant-ligatures: none;
+        font-feature-settings: "liga" 0, "clig" 0, "dlig" 0;
         font-size: 13.5px;
         line-height: 1.55;
         word-break: break-word;

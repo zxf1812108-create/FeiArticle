@@ -38,9 +38,12 @@ export interface PersistedTreeState {
   updatedAt: number;
 }
 
+export const MIN_DOC_FONT_SIZE = 13;
+export const MAX_DOC_FONT_SIZE = 24;
+
 export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   fontFamily: 'serif',
-  fontSize: 17,
+  fontSize: 16,
   lineHeight: 1.62,
   width: 'medium',
   paper: 'white',

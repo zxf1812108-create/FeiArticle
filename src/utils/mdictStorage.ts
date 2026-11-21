@@ -1,5 +1,16 @@
 import { MdictDictionaryRecord, MdictDictionarySummary, MdictLookupResult } from '../types';
-import { lookupInMdictBlob, parseMdictIndexFromBlob, sanitizeMdictCss } from './mdict';
+import {
+  guessMimeFromPath,
+  lookupInMdictBlob,
+  lookupResourceInMdictBlob,
+  parseMdictIndexFromBlob,
+  sanitizeMdictCss,
+  uint8ToBase64,
+} from './mdict';
+
+export function stripDictExt(fileName: string): string {
+  return fileName.replace(/\.(mdx|mdd)$/i, '');
+}
 
 const DB_NAME = 'feiartical_mdict_db';
 const DB_VERSION = 1;
@@ -30,9 +41,11 @@ function openMdictDb(): Promise<IDBDatabase> {
 }
 
 function toSummary(rec: MdictDictionaryRecord): MdictDictionarySummary {
+  const fileExt = rec.fileExt || (rec.fileName.toLowerCase().endsWith('.mdd') ? 'mdd' : 'mdx');
   return {
     id: rec.id,
     fileName: rec.fileName,
+    fileExt,
     title: rec.title,
     description: rec.description,
     numEntries: rec.numEntries,
@@ -61,9 +74,24 @@ export async function listMdictDictionaries(): Promise<MdictDictionarySummary[]>
   });
 }
 
+function decodeCssBytesText(bytes: Uint8Array): string {
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '');
+  } catch {
+    return new TextDecoder('gb18030').decode(bytes);
+  }
+}
+
 export async function importMdictFile(file: File): Promise<MdictDictionarySummary> {
-  if (!file.name.toLowerCase().endsWith('.mdx')) {
-    throw new Error(`文件「${file.name}」不是 .mdx 词典文件`);
+  const lower = file.name.toLowerCase();
+  if (!lower.endsWith('.mdx') && !lower.endsWith('.mdd')) {
+    throw new Error(`文件「${file.name}」不是受支持的 .mdx 或 .mdd 词典文件`);
   }
 
   const record = await parseMdictIndexFromBlob(file, file.name);
@@ -107,17 +135,7 @@ export async function deleteMdictDictionary(id: string): Promise<void> {
 
 async function decodeCssFileText(file: File): Promise<string> {
   const bytes = new Uint8Array(await file.arrayBuffer());
-  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
-    return new TextDecoder('utf-16le').decode(bytes.subarray(2));
-  }
-  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-    return new TextDecoder('utf-16be').decode(bytes.subarray(2));
-  }
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '');
-  } catch {
-    return new TextDecoder('gb18030').decode(bytes);
-  }
+  return decodeCssBytesText(bytes);
 }
 
 export async function attachMdictCss(
@@ -237,11 +255,83 @@ async function loadMdictRecordAndBlob(
   });
 }
 
+async function hydrateSelfContainedMddResources(
+  result: MdictLookupResult,
+  blob: Blob,
+  record: MdictDictionaryRecord
+): Promise<MdictLookupResult> {
+  const isMdd = record.headerTag === 'Library_Data' || record.fileExt === 'mdd';
+  if (!isMdd) return result;
+
+  let resolvedCssText = result.dictCssText;
+  if (!resolvedCssText) {
+    const cssCandidates: string[] = [];
+    for (const html of result.htmlDefinitions) {
+      const linkRegex = /<link\b[^>]*href=["']([^"']+\.css(?:[?#][^"']*)?)["'][^>]*>/gi;
+      let m: RegExpExecArray | null;
+      while ((m = linkRegex.exec(html)) !== null) {
+        if (m[1] && !cssCandidates.includes(m[1])) {
+          cssCandidates.push(m[1]);
+        }
+      }
+    }
+    const stemCss = `${stripDictExt(record.fileName)}.css`;
+    for (const fallback of [stemCss, 'style.css', 'default.css']) {
+      if (!cssCandidates.includes(fallback)) cssCandidates.push(fallback);
+    }
+    for (const cssPath of cssCandidates) {
+      const bytes = await lookupResourceInMdictBlob(blob, record, cssPath);
+      if (bytes && bytes.length > 0) {
+        resolvedCssText = sanitizeMdictCss(decodeCssBytesText(bytes));
+        break;
+      }
+    }
+  }
+
+  if (typeof DOMParser === 'undefined') {
+    return resolvedCssText !== result.dictCssText
+      ? { ...result, dictCssText: resolvedCssText }
+      : result;
+  }
+
+  const hydratedDefs: string[] = [];
+  const imgCache = new Map<string, string | null>();
+  for (const rawHtml of result.htmlDefinitions) {
+    const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+    const imgs = Array.from(doc.querySelectorAll('img'));
+    for (const img of imgs) {
+      const src = (img.getAttribute('src') || '').trim();
+      if (!src || /^(?:data:|https?:|blob:)/i.test(src)) continue;
+      let dataUrl = imgCache.get(src);
+      if (dataUrl === undefined) {
+        const bytes = await lookupResourceInMdictBlob(blob, record, src);
+        dataUrl =
+          bytes && bytes.length > 0
+            ? `data:${guessMimeFromPath(src)};base64,${uint8ToBase64(bytes)}`
+            : null;
+        imgCache.set(src, dataUrl);
+      }
+      if (dataUrl) {
+        img.setAttribute('src', dataUrl);
+      }
+    }
+    hydratedDefs.push(doc.body.innerHTML);
+  }
+
+  return {
+    ...result,
+    dictCssText: resolvedCssText,
+    htmlDefinitions: hydratedDefs,
+  };
+}
+
 export async function lookupMdictWord(
   dictId: string,
   rawWord: string
 ): Promise<MdictLookupResult | null> {
   const loaded = await loadMdictRecordAndBlob(dictId);
   if (!loaded) return null;
-  return lookupInMdictBlob(loaded.blob, loaded.record, rawWord);
+  const result = await lookupInMdictBlob(loaded.blob, loaded.record, rawWord);
+  if (!result) return null;
+  return hydrateSelfContainedMddResources(result, loaded.blob, loaded.record);
 }

@@ -9,6 +9,7 @@
         "@capacitor/cli": "^8.6.2",
         "@capacitor/core": "^8.6.2",
         "@fontsource/newsreader": "^5.3.0",
+        "@fontsource/pt-serif": "^5.3.0",
         "@google/genai": "^2.4.0",
         "@tailwindcss/vite": "^4.3.3",
         "@vitejs/plugin-react": "^6.1.1",
@@ -100,6 +101,8 @@
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.28.2", "", { "os": "win32", "cpu": "x64" }, "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g=="],
 
     "@fontsource/newsreader": ["@fontsource/newsreader@5.3.0", "", {}, "sha512-AFR6ZKY89GNL+9qBI2P2+66NhD5bhOj/v6fsLnFYLM4E0JnMB1yKb+Ro8cA64i1hwAWoBfTq5CHJGWH1toLDkw=="],
+
+    "@fontsource/pt-serif": ["@fontsource/pt-serif@5.3.0", "", {}, "sha512-ST+j/byBGZw6H+TQMX78o6Qlngfj2Va/Q9fAJxq54Is1ZQk1/FhBIuqyJcLmnpi0trG8V/hWO9Bx6ZY09A0DBQ=="],
 
     "@google/genai": ["@google/genai@2.32.0", "", { "dependencies": { "google-auth-library": "^10.3.0", "p-retry": "^4.6.2", "protobufjs": "^7.5.4", "ws": "^8.18.0" }, "peerDependencies": { "@modelcontextprotocol/sdk": "^1.25.2" }, "optionalPeers": ["@modelcontextprotocol/sdk"], "hasInstallScript": true }, "sha512-60c79uXpR0a47bmGqDxbXEBuQUalNmwo5mx5kqb91jIW4FoqpsLSt86DeVhRhtH5+s/16Wqxt3sXzFQn2U1OHQ=="],
 
