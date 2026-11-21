@@ -142,8 +142,88 @@ export function formatShortDate(timestamp: number): string {
   return `${d.getFullYear()}-${month}-${day}`;
 }
 
-// Detect Chinese chapter headings in plain .txt documents
-const CN_CHAPTER_RE = /^(第[零一二三四五六七八九十百千万0-9]+[章卷部节篇回][\s：:、]?.*|[一二三四五六七八九十]+、.{1,28})$/;
+// Detect Chinese & English structural headings in plain .txt documents
+const CN_CHAPTER_RE =
+  /^(第[零一二三四五六七八九十百千万0-9]+[章卷部节篇回][\s：:、]?.*|[一二三四五六七八九十]+、.{1,30}|[（(][一二三四五六七八九十0-9]+[)）]\s*\S.{0,30})$/;
+
+const EN_CHAPTER_RE =
+  /^(?:chapter|part|book|act)\s+(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten)\b(?:[:\s—–-].*)?$/i;
+
+const EN_SECTION_RE =
+  /^(?:section\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)\b(?:[:\s—–-].*)?|(?:prologue|epilogue|preface|foreword|introduction|conclusion|afterword|abstract|summary|appendix(?:\s+[a-z0-9]+)?)(?:[:\s—–-].*)?)$/i;
+
+const DECIMAL_SECTION_RE = /^\d+(?:\.\d+)+\.?\s+\S.{1,58}$/;
+const NUMBERED_SECTION_RE = /^\d+\.\s+\S.{1,58}$/;
+
+function isSentenceEnding(line: string): boolean {
+  return /[。？！；，,.;?!]$/.test(line);
+}
+
+function isStandaloneAllCapsHeading(
+  lines: string[],
+  index: number,
+  trimmed: string
+): boolean {
+  if (trimmed.length < 3 || trimmed.length > 56) return false;
+  if (isSentenceEnding(trimmed)) return false;
+  if (/[a-z\u4e00-\u9fff]/.test(trimmed)) return false;
+  const upperLetters = trimmed.match(/[A-Z]/g);
+  if (!upperLetters || upperLetters.length < 3) return false;
+  if (!/^[A-Z0-9\s,'’&:/\-—–()]+$/.test(trimmed)) return false;
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 8) return false;
+  const prevBlank = index === 0 || !lines[index - 1].trim();
+  const nextBlank = index + 1 >= lines.length || !lines[index + 1].trim();
+  return prevBlank || nextBlank;
+}
+
+function detectPlainTextHeadingLevel(
+  lines: string[],
+  index: number,
+  trimmed: string
+): 1 | 2 | 3 | null {
+  if (!trimmed || trimmed.length > 68) return null;
+
+  if (CN_CHAPTER_RE.test(trimmed) && trimmed.length <= 36) {
+    if (isSentenceEnding(trimmed) && !/^第/.test(trimmed)) return null;
+    if (trimmed.startsWith('第') && /[章卷部篇]/.test(trimmed)) return 1;
+    if (/^[（(]/.test(trimmed)) return 3;
+    return 2;
+  }
+
+  if (EN_CHAPTER_RE.test(trimmed)) {
+    return 1;
+  }
+
+  if (EN_SECTION_RE.test(trimmed) && trimmed.length <= 55 && !/[.,;]$/.test(trimmed)) {
+    return 2;
+  }
+
+  if (DECIMAL_SECTION_RE.test(trimmed) && !isSentenceEnding(trimmed)) {
+    const dotCount = (trimmed.match(/^\d+(?:\.\d+)+/)?.[0].match(/\./g) || []).length;
+    return dotCount >= 2 ? 3 : 2;
+  }
+
+  if (NUMBERED_SECTION_RE.test(trimmed) && !isSentenceEnding(trimmed)) {
+    // Only treat "1. Title" as a heading if it's NOT part of an immediate "1. ... \n 2. ..." ordered list
+    const nextTrimmed = index + 1 < lines.length ? lines[index + 1].trim() : '';
+    const prevTrimmed = index > 0 ? lines[index - 1].trim() : '';
+    if (/^\d+\.\s+/.test(nextTrimmed) || /^\d+\.\s+/.test(prevTrimmed)) {
+      return null;
+    }
+    const prevBlank = index === 0 || !prevTrimmed;
+    const nextBlank = index + 1 >= lines.length || !nextTrimmed;
+    if (prevBlank || nextBlank || nextTrimmed.length > 0) {
+      return 2;
+    }
+  }
+
+  if (isStandaloneAllCapsHeading(lines, index, trimmed)) {
+    return 2;
+  }
+
+  return null;
+}
 
 export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc: TocItem[] } {
   const lines = content.replace(/\r\n/g, '\n').split('\n');
@@ -173,6 +253,20 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
       i++; // skip closing fence
       blocks.push({ type: 'code', language, code: codeLines.join('\n') });
       continue;
+    }
+
+    // Setext underlined heading (Title \n ===== or Title \n -----)
+    if (i + 1 < lines.length && trimmed.length <= 68 && !trimmed.startsWith('#') && !trimmed.startsWith('>')) {
+      const underline = lines[i + 1].trim();
+      if (/^={3,}$/.test(underline) || /^-{3,}$/.test(underline)) {
+        headingCounter++;
+        const level: 1 | 2 = underline.startsWith('=') ? 1 : 2;
+        const id = `heading-${headingCounter}`;
+        blocks.push({ type: 'heading', level, id, text: trimmed });
+        toc.push({ id, text: trimmed, level });
+        i += 2;
+        continue;
+      }
     }
 
     // GFM Markdown table
@@ -211,11 +305,12 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
       continue;
     }
 
-    // Markdown heading
-    const mdHeading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    // Markdown heading (# to ######, clamped to levels 1..3)
+    const mdHeading = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (mdHeading) {
       headingCounter++;
-      const level = mdHeading[1].length as 1 | 2 | 3;
+      const rawLevel = mdHeading[1].length;
+      const level = (rawLevel <= 1 ? 1 : rawLevel === 2 ? 2 : 3) as 1 | 2 | 3;
       const text = mdHeading[2].trim();
       const id = `heading-${headingCounter}`;
       blocks.push({ type: 'heading', level, id, text });
@@ -224,13 +319,13 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
       continue;
     }
 
-    // Plain-text Chinese chapter title detection
-    if (CN_CHAPTER_RE.test(trimmed) && trimmed.length <= 36) {
+    // Plain-text (.txt) chapter / section heading detection
+    const txtHeadingLevel = detectPlainTextHeadingLevel(lines, i, trimmed);
+    if (txtHeadingLevel) {
       headingCounter++;
-      const level: 1 | 2 = trimmed.startsWith('第') && /[章卷部篇]/.test(trimmed) ? 1 : 2;
       const id = `heading-${headingCounter}`;
-      blocks.push({ type: 'heading', level, id, text: trimmed });
-      toc.push({ id, text: trimmed, level });
+      blocks.push({ type: 'heading', level: txtHeadingLevel, id, text: trimmed });
+      toc.push({ id, text: trimmed, level: txtHeadingLevel });
       i++;
       continue;
     }
@@ -282,7 +377,7 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
         /^\d+\.\s+/.test(next) ||
         /^(-{3,}|\*{3,}|_{3,})$/.test(next) ||
         isTableStart(lines, i) ||
-        (CN_CHAPTER_RE.test(next) && next.length <= 36)
+        detectPlainTextHeadingLevel(lines, i, next) !== null
       ) {
         break;
       }

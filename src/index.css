@@ -4,26 +4,29 @@
 @layer base {
   :root {
     --font-sans: "Plus Jakarta Sans", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
-    --font-serif: "Fraunces", "Noto Serif SC", "Songti SC", "STSong", Georgia, serif;
+    --font-serif: "Newsreader", "Georgia", "Charter", "Noto Serif SC", "Songti SC", "STSong", serif;
+    --font-doc-body: "Newsreader", "Georgia", "Charter", "Times New Roman", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-    /* FeiNote Unified Monochrome Ink & Surface Tokens (Light) */
-    --fei-text-primary: #333333;
-    --fei-text-muted: #8A8A8A;
-    --fei-bg: #FFFFFF;
-    --fei-bg-bar: #FAFAFA;
-    --fei-bg-surface: #FFFFFF;
-    --fei-bg-subtle: #F6F6F6;
-    --fei-bg-hover: #F5F5F5;
-    --fei-bg-selected: #EFEFEF;
-    --fei-border: #ECECEC;
-    --fei-border-strong: #DCDCDC;
-    --fei-btn-primary-bg: #333333;
-    --fei-btn-primary-text: #FFFFFF;
+    /* FeiNote Eye-Comfort Soft Paper Monochrome Ink & Surface Tokens (Light) */
+    color-scheme: light;
+    --fei-text-primary: #2E2D2A;
+    --fei-text-muted: #6E6B64;
+    --fei-bg: #F6F4EE;
+    --fei-bg-bar: #EFECE5;
+    --fei-bg-surface: #FAF8F4;
+    --fei-bg-subtle: #EDEAE1;
+    --fei-bg-hover: #EAE6DC;
+    --fei-bg-selected: #E3DFD4;
+    --fei-border: #E4E0D6;
+    --fei-border-strong: #D3CEC2;
+    --fei-btn-primary-bg: #2E2D2A;
+    --fei-btn-primary-text: #FAF8F4;
   }
 
   html.dark {
     /* FeiNote Unified Monochrome Ink & Surface Tokens (Dark) */
+    color-scheme: dark;
     --fei-text-primary: #C8C8C8;
     --fei-text-muted: #787878;
     --fei-bg: #1A1A1A;
@@ -42,6 +45,9 @@
   body,
   #root {
     height: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+    overscroll-behavior-x: none;
     font-family: var(--font-sans);
     background-color: var(--fei-bg);
     color: var(--fei-text-primary);
@@ -49,11 +55,47 @@
 
   .font-editorial {
     font-family: var(--font-serif);
+    font-optical-sizing: auto;
+  }
+
+  .font-doc-body {
+    font-family: var(--font-doc-body);
+    font-optical-sizing: auto;
   }
 
   .font-code {
     font-family: var(--font-mono);
   }
+}
+
+@keyframes mdict-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes mdict-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-mdict-up {
+  animation: mdict-slide-up 140ms ease-out both;
+}
+
+.animate-mdict-down {
+  animation: mdict-slide-down 140ms ease-out both;
 }
 
 ::-webkit-scrollbar {
@@ -66,7 +108,7 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(138, 138, 138, 0.25);
+  background: rgba(110, 107, 100, 0.24);
   border-radius: 3px;
 }
 

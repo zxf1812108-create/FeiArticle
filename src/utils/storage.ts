@@ -41,7 +41,7 @@ export interface PersistedTreeState {
 export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   fontFamily: 'serif',
   fontSize: 17,
-  lineHeight: 1.85,
+  lineHeight: 1.62,
   width: 'medium',
   paper: 'white',
   indentFirstLine: false,

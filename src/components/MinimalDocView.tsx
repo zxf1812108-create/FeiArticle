@@ -10,7 +10,8 @@ import React, {
 import { CloudDownload } from 'lucide-react';
 import { ArticleDoc } from '../types';
 import { extractEnglishLookupWord } from '../utils/mdict';
-import { BlockNode, formatBytes, parseDocumentBlocks } from '../utils/textParser';
+import { DocOutlineModal, FallbackJumpAnchor } from './DocOutlineModal';
+import { BlockNode, formatBytes, parseDocumentBlocks, TocItem } from '../utils/textParser';
 
 export type EditFormatKind = 'h1' | 'h2' | 'ul' | 'hr';
 
@@ -256,6 +257,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const [fetching, setFetching] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
     const [articleOverflow, setArticleOverflow] = useState(false);
+    const [showOutline, setShowOutline] = useState(false);
 
     const titleRef = useRef(doc.title);
     const contentRef = useRef(content);
@@ -293,7 +295,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       hadSelectionOnDownRef.current = false;
       setFetchError(null);
       setArticleOverflow(false);
+      setShowOutline(false);
     }, [doc.id]);
+
+    useEffect(() => {
+      if (isEditing) {
+        setShowOutline(false);
+      }
+    }, [isEditing]);
 
     // Sync content only when remote body arrives lazily in read mode
     useEffect(() => {
@@ -716,8 +725,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }
     };
 
-    // Exact visual-line-accurate tap pagination in Read mode:
-    // Left 1/3 => Page Up, Right 2/3 => Page Down (zero repeated complete lines)
+    // Exact visual-line-accurate 3-zone tap interaction in Read mode:
+    // Left 1/3 => Page Up, Middle 1/3 => Document Structure Outline, Right 1/3 => Page Down
     const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
       const hadSelectionOnDown = hadSelectionOnDownRef.current;
       hadSelectionOnDownRef.current = false;
@@ -725,9 +734,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (isEditing) return;
 
       const target = e.target as HTMLElement | null;
-      if (target?.closest('button, a, input, textarea, select')) return;
+      if (target?.closest('button, a, input, textarea, select, [data-outline-modal="true"]')) return;
 
-      // Do not turn page if text is currently selected OR this tap dismissed an active selection/popup
+      // Do not turn page or open outline if text is currently selected OR this tap dismissed an active selection/popup
       if (hadSelectionOnDown || hasActiveSelection() || isMdictPopupOpenRef.current) {
         if (isMdictPopupOpenRef.current) {
           onClearMdictLookupRef.current?.();
@@ -743,6 +752,15 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (rect.width <= 0) return;
 
       const ratio = (e.clientX - rect.left) / rect.width;
+
+      // Middle 1/3: Open Document Title Structure Outline
+      if (ratio >= 1 / 3 && ratio <= 2 / 3) {
+        if (blocks.length > 0) {
+          setShowOutline(true);
+        }
+        return;
+      }
+
       const viewHeight = el.clientHeight;
       const maxScroll = Math.max(0, el.scrollHeight - viewHeight);
       const currentTop = el.scrollTop;
@@ -800,10 +818,92 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }
     };
 
-    const { blocks } = useMemo(
-      () => (isEditing ? { blocks: [] } : parseDocumentBlocks(content)),
+    const { blocks, toc } = useMemo(
+      () =>
+        isEditing
+          ? { blocks: [] as BlockNode[], toc: [] as TocItem[] }
+          : parseDocumentBlocks(content),
       [content, isEditing]
     );
+
+    const fallbackAnchors = useMemo<FallbackJumpAnchor[]>(() => {
+      if (isEditing || toc.length > 0 || blocks.length === 0) return [];
+      const previews: Array<{ blockIndex: number; preview: string }> = [];
+      blocks.forEach((b, idx) => {
+        let raw = '';
+        if (b.type === 'paragraph' || b.type === 'blockquote' || b.type === 'heading') {
+          raw = b.text;
+        } else if (b.type === 'list') {
+          raw = b.items[0] || '';
+        } else if (b.type === 'code') {
+          raw = b.code.split('\n')[0] || '[代码块]';
+        } else if (b.type === 'table') {
+          raw = b.headers.join(' · ');
+        }
+        const cleaned = raw.replace(/\s+/g, ' ').trim();
+        if (cleaned) {
+          previews.push({
+            blockIndex: idx,
+            preview: cleaned.length > 36 ? `${cleaned.slice(0, 36)}…` : cleaned,
+          });
+        }
+      });
+      if (previews.length === 0) return [];
+      const ratios = [0, 0.25, 0.5, 0.75, 1];
+      const seen = new Set<number>();
+      const anchors: FallbackJumpAnchor[] = [];
+      for (const r of ratios) {
+        const pick = Math.round(r * (previews.length - 1));
+        const item = previews[pick];
+        if (!item || seen.has(item.blockIndex)) continue;
+        seen.add(item.blockIndex);
+        const label = r === 0 ? '开头' : r === 1 ? '末尾' : `${Math.round(r * 100)}%`;
+        anchors.push({ label, preview: item.preview, blockIndex: item.blockIndex });
+      }
+      return anchors;
+    }, [isEditing, toc.length, blocks]);
+
+    const getActiveTocId = (): string | null => {
+      if (toc.length === 0) return null;
+      const scrollEl = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!scrollEl || !articleEl) return toc[0]?.id ?? null;
+
+      const containerTop = scrollEl.getBoundingClientRect().top;
+      const headingEls = articleEl.querySelectorAll<HTMLElement>('[data-toc-id]');
+      let currentId: string | null = null;
+      headingEls.forEach((el) => {
+        const relTop = el.getBoundingClientRect().top - containerTop;
+        if (relTop <= 56) {
+          currentId = el.getAttribute('data-toc-id');
+        }
+      });
+      return currentId ?? toc[0]?.id ?? null;
+    };
+
+    const jumpToElement = (el: HTMLElement | null) => {
+      const scrollEl = scrollRef.current;
+      if (!scrollEl || !el) return;
+      const containerRect = scrollEl.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const maxScroll = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+      const rawTop = elRect.top - containerRect.top + scrollEl.scrollTop - 12;
+      const targetScrollTop = Math.min(maxScroll, Math.max(0, Math.round(rawTop)));
+      scrollEl.scrollTop = targetScrollTop;
+      onViewStateChange({ mode: 'read', scrollTop: targetScrollTop });
+      setShowOutline(false);
+    };
+
+    const handleJumpToHeading = (tocId: string) => {
+      const el = articleRef.current?.querySelector<HTMLElement>(`[data-toc-id="${tocId}"]`) ?? null;
+      jumpToElement(el);
+    };
+
+    const handleJumpToBlock = (blockIndex: number) => {
+      const el =
+        articleRef.current?.querySelector<HTMLElement>(`[data-block-idx="${blockIndex}"]`) ?? null;
+      jumpToElement(el);
+    };
 
     const renderInline = (raw: string) => {
       const tokens: Array<{ type: 'text' | 'code' | 'bold' | 'italic'; value: string }> = [];
@@ -856,7 +956,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             return (
               <h1
                 key={idx}
-                className="text-[22px] font-semibold leading-snug mt-7 mb-3.5 first:mt-0 text-[var(--fei-text-primary)] text-balance"
+                data-toc-id={block.id}
+                data-block-idx={idx}
+                className="text-[22px] font-semibold leading-snug mt-6 mb-2.5 first:mt-0 text-[var(--fei-text-primary)] text-balance"
               >
                 {block.text}
               </h1>
@@ -866,7 +968,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             return (
               <h2
                 key={idx}
-                className="text-[18.5px] font-semibold leading-snug mt-7 mb-3 text-[var(--fei-text-primary)] text-balance"
+                data-toc-id={block.id}
+                data-block-idx={idx}
+                className="text-[18.5px] font-semibold leading-snug mt-5 mb-2 text-[var(--fei-text-primary)] text-balance"
               >
                 {block.text}
               </h2>
@@ -875,7 +979,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <h3
               key={idx}
-              className="text-[16.5px] font-semibold leading-snug mt-5 mb-2 text-[var(--fei-text-primary)]"
+              data-toc-id={block.id}
+              data-block-idx={idx}
+              className="text-[16.5px] font-semibold leading-snug mt-4 mb-1.5 text-[var(--fei-text-primary)]"
             >
               {block.text}
             </h3>
@@ -883,7 +989,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
         case 'paragraph':
           return (
-            <p key={idx} className="my-4 whitespace-pre-line">
+            <p key={idx} data-block-idx={idx} className="my-3 whitespace-pre-line">
               {renderInline(block.text)}
             </p>
           );
@@ -891,7 +997,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <blockquote
               key={idx}
-              className="my-5 px-4 py-3.5 rounded-lg bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)] text-[15px]"
+              data-block-idx={idx}
+              className="my-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)] text-[15px]"
             >
               <span className="whitespace-pre-line">{renderInline(block.text)}</span>
             </blockquote>
@@ -900,7 +1007,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <pre
               key={idx}
-              className="my-5 p-4 rounded-lg bg-[var(--fei-bg-subtle)] overflow-x-auto text-[13px] leading-relaxed font-code text-[var(--fei-text-primary)]"
+              data-block-idx={idx}
+              className="my-4 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] overflow-x-auto text-[13px] leading-relaxed font-code text-[var(--fei-text-primary)]"
             >
               <code>{block.code}</code>
             </pre>
@@ -908,7 +1016,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         case 'list':
           if (block.ordered) {
             return (
-              <ol key={idx} className="my-4 pl-5 list-decimal space-y-2 marker:text-[var(--fei-text-muted)]">
+              <ol
+                key={idx}
+                data-block-idx={idx}
+                className="my-3 pl-5 list-decimal space-y-1.5 marker:text-[var(--fei-text-muted)]"
+              >
                 {block.items.map((item, i) => (
                   <li key={i}>{renderInline(item)}</li>
                 ))}
@@ -916,7 +1028,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             );
           }
           return (
-            <ul key={idx} className="my-4 pl-5 list-disc space-y-2 marker:text-[var(--fei-text-muted)]">
+            <ul
+              key={idx}
+              data-block-idx={idx}
+              className="my-3 pl-5 list-disc space-y-1.5 marker:text-[var(--fei-text-muted)]"
+            >
               {block.items.map((item, i) => (
                 <li key={i}>{renderInline(item)}</li>
               ))}
@@ -926,7 +1042,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <div
               key={idx}
-              className="my-5 w-full overflow-x-auto rounded-lg border border-[var(--fei-border)]"
+              data-block-idx={idx}
+              className="my-4 max-w-full w-full overflow-x-auto rounded-lg border border-[var(--fei-border)]"
             >
               <table className="w-full border-collapse text-[14.5px] leading-relaxed text-[var(--fei-text-primary)]">
                 <thead>
@@ -980,7 +1097,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             </div>
           );
         case 'hr':
-          return <hr key={idx} className="my-7 border-t border-[var(--fei-border)]" />;
+          return (
+            <hr
+              key={idx}
+              data-block-idx={idx}
+              className="my-6 border-t border-[var(--fei-border)]"
+            />
+          );
       }
     };
 
@@ -997,7 +1120,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     return (
-      <div className="w-full h-full flex flex-col bg-[var(--fei-bg)] pt-6">
+      <div className="relative w-full h-full flex flex-col bg-[var(--fei-bg)] pt-6 overflow-x-hidden">
         {isEditing ? (
           <textarea
             ref={textareaRef}
@@ -1010,7 +1133,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               scheduleSave(titleRef.current, nextVal);
             }}
             placeholder="开始输入正文…"
-            className="flex-1 min-h-0 w-full overflow-y-auto pt-1 pb-[40vh] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent text-[16px] leading-[1.85] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none resize-none"
+            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none pt-1 pb-[40vh] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent font-doc-body text-[16px] leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none"
           />
         ) : (
           <div
@@ -1027,14 +1150,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             }}
             onClick={handleContainerClick}
             onScroll={handleScroll}
-            className="flex-1 min-h-0 w-full overflow-y-auto"
+            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none"
           >
             <div
-              className={`max-w-[720px] w-full mx-auto px-5 sm:px-8 min-h-full flex flex-col ${
+              className={`max-w-[720px] w-full min-w-0 mx-auto px-5 sm:px-8 min-h-full flex flex-col ${
                 articleOverflow ? 'pt-1 pb-[calc(100vh-110px)]' : 'py-6 justify-center'
               }`}
             >
-              <article ref={articleRef}>
+              <article ref={articleRef} className="w-full min-w-0 font-doc-body">
                 {doc.syncStatus === 'remote-only' && !content ? (
                   <div className="py-12 text-center space-y-3">
                     <p className="text-[14px] text-[var(--fei-text-muted)]">
@@ -1054,7 +1177,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                     </button>
                   </div>
                 ) : (
-                  <div className="text-[16px] leading-[1.85] text-[var(--fei-text-primary)]">
+                  <div className="text-[16px] leading-[1.62] text-[var(--fei-text-primary)] break-words [overflow-wrap:anywhere]">
                     {blocks.length === 0 ? (
                       <p className="text-[var(--fei-text-muted)]">
                         暂无内容，点击右下角编辑图标开始写作。
@@ -1067,6 +1190,18 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               </article>
             </div>
           </div>
+        )}
+
+        {!isEditing && showOutline && (
+          <DocOutlineModal
+            docTitle={doc.title}
+            toc={toc}
+            fallbackAnchors={fallbackAnchors}
+            activeTocId={getActiveTocId()}
+            onJumpToHeading={handleJumpToHeading}
+            onJumpToBlock={handleJumpToBlock}
+            onClose={() => setShowOutline(false)}
+          />
         )}
       </div>
     );
