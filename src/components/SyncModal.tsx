@@ -68,13 +68,13 @@ export const SyncModal: React.FC<SyncModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[1px] p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent dark:bg-black/45 p-4"
       onClick={onClose}
     >
       <form
         onSubmit={handleSave}
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[360px] max-h-[88vh] overflow-y-auto bg-[var(--fei-bg-surface)] border border-[var(--fei-border)] rounded-2xl shadow-xl text-[var(--fei-text-primary)]"
+        className="w-full max-w-[360px] max-h-[88vh] overflow-y-auto bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-none dark:shadow-xl text-[var(--fei-text-primary)]"
       >
         <div className="p-4 sm:p-5 space-y-4">
           {/* 区域一：同步设置 */}

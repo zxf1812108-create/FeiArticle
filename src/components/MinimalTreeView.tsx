@@ -462,8 +462,8 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           isCut
             ? 'opacity-45 border border-dashed border-[var(--fei-text-muted)]'
             : isTarget
-              ? 'bg-[var(--fei-bg-selected)]'
-              : 'hover:bg-[var(--fei-bg-hover)]'
+              ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent'
+              : 'border border-transparent hover:bg-[var(--fei-bg-hover)]'
         }`}
       >
         {isDropBefore && (
@@ -514,7 +514,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
       <div className="max-w-[760px] mx-auto px-4 sm:px-8 pt-6 pb-10 space-y-1.5">
         {/* Status strip only when cutting or selecting item to cut */}
         {(pickCutMode || cutLabel) && (
-          <div className="mb-3 px-3.5 py-2.5 rounded-lg bg-[var(--fei-bg-subtle)] flex items-center justify-between gap-3 text-[13px]">
+          <div className="mb-3 px-3.5 py-2.5 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] flex items-center justify-between gap-3 text-[13px]">
             <span className="text-[var(--fei-text-muted)] truncate">
               {cutLabel
                 ? `已剪切 ${cutLabel} — 点选目标位置后，点击底部插入图标插入其下方`
@@ -539,7 +539,9 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
             <div className="relative space-y-0.5">
               <div
                 className={`flex items-center gap-1.5 px-2 min-h-[44px] rounded-lg transition-colors duration-150 ${
-                  isInboxTarget ? 'bg-[var(--fei-bg-selected)]' : 'hover:bg-[var(--fei-bg-hover)]'
+                  isInboxTarget
+                    ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent'
+                    : 'border border-transparent hover:bg-[var(--fei-bg-hover)]'
                 }`}
               >
                 <button
@@ -623,8 +625,8 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                   isCut
                     ? 'opacity-45 border border-dashed border-[var(--fei-text-muted)]'
                     : isDocDropIntoFolder || isTarget
-                      ? 'bg-[var(--fei-bg-selected)]'
-                      : 'hover:bg-[var(--fei-bg-hover)]'
+                      ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent'
+                      : 'border border-transparent hover:bg-[var(--fei-bg-hover)]'
                 }`}
               >
                 <button
@@ -743,8 +745,8 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
               onDrop={(e) => handleFolderDrop(e, null)}
               className={`flex items-center justify-between gap-1.5 px-2 min-h-[44px] rounded-lg transition-colors ${
                 docDrop?.folderId === null && docDrop.docId === null
-                  ? 'bg-[var(--fei-bg-selected)]'
-                  : 'hover:bg-[var(--fei-bg-hover)]'
+                  ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent'
+                  : 'border border-transparent hover:bg-[var(--fei-bg-hover)]'
               }`}
             >
               <button

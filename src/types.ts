@@ -34,6 +34,7 @@ export interface ArticleDoc {
   lastReadAt: number | null;
   lastMode?: 'read' | 'edit';
   lastScrollTop?: number;
+  lastCharOffset?: number;
   encrypted?: boolean;
   format?: 'txt' | 'md';
   createdAt: number;
@@ -59,6 +60,7 @@ export interface ManifestDocEntry {
   lastReadAt?: number | null;
   lastMode?: 'read' | 'edit';
   lastScrollTop?: number;
+  lastCharOffset?: number;
   encrypted?: boolean;
   format?: 'txt' | 'md';
   updatedAt: number;

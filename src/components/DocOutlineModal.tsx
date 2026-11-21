@@ -2,27 +2,17 @@ import React, { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { TocItem } from '../utils/textParser';
 
-export interface FallbackJumpAnchor {
-  label: string;
-  preview: string;
-  blockIndex: number;
-}
-
 interface DocOutlineModalProps {
   toc: TocItem[];
-  fallbackAnchors: FallbackJumpAnchor[];
   activeTocId: string | null;
   onJumpToHeading: (tocId: string) => void;
-  onJumpToBlock: (blockIndex: number) => void;
   onClose: () => void;
 }
 
 export const DocOutlineModal: React.FC<DocOutlineModalProps> = ({
   toc,
-  fallbackAnchors,
   activeTocId,
   onJumpToHeading,
-  onJumpToBlock,
   onClose,
 }) => {
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
@@ -36,7 +26,7 @@ export const DocOutlineModal: React.FC<DocOutlineModalProps> = ({
   return (
     <div
       data-outline-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-[1px] p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent dark:bg-black/45 p-4"
       onClick={(e) => {
         e.stopPropagation();
         onClose();
@@ -44,11 +34,11 @@ export const DocOutlineModal: React.FC<DocOutlineModalProps> = ({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[400px] max-h-[76vh] flex flex-col bg-[var(--fei-bg-surface)] border border-[var(--fei-border)] rounded-2xl shadow-xl overflow-hidden text-[var(--fei-text-primary)]"
+        className="w-full max-w-[400px] max-h-[76vh] flex flex-col bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-none dark:shadow-xl overflow-hidden text-[var(--fei-text-primary)]"
       >
         {/* Header */}
         <div className="px-4 py-3 border-b border-[var(--fei-border)] flex items-center justify-between gap-3 shrink-0">
-          <div className="text-[13px] font-medium text-[var(--fei-text-primary)] leading-tight">
+          <div className="text-[13.5px] font-medium text-[var(--fei-text-primary)] leading-tight">
             文档结构
           </div>
 
@@ -79,42 +69,21 @@ export const DocOutlineModal: React.FC<DocOutlineModalProps> = ({
                   ref={isActive ? activeItemRef : undefined}
                   type="button"
                   onClick={() => onJumpToHeading(item.id)}
-                  className={`w-full text-left py-2 pr-3 rounded-xl transition-colors flex items-center gap-2 ${indentCls} ${
+                  className={`w-full text-left py-2 pr-3 rounded-xl transition-colors flex items-center gap-2 border ${indentCls} ${
                     isActive
-                      ? 'bg-[var(--fei-bg-selected)] text-[var(--fei-text-primary)] font-medium'
+                      ? 'bg-[var(--fei-bg-selected)] border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)] font-semibold'
                       : item.level === 3
-                        ? 'text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)]'
-                        : 'text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)]'
+                        ? 'border-transparent text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)]'
+                        : 'border-transparent text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)]'
                   }`}
                 >
                   <span className="truncate leading-snug">{item.text}</span>
                 </button>
               );
             })
-          ) : fallbackAnchors.length > 0 ? (
-            <>
-              <div className="px-3 py-1.5 text-[11.5px] text-[var(--fei-text-muted)]">
-                未识别到明显章节标题，可按位置快速跳转
-              </div>
-              {fallbackAnchors.map((anchor) => (
-                <button
-                  key={`${anchor.blockIndex}-${anchor.label}`}
-                  type="button"
-                  onClick={() => onJumpToBlock(anchor.blockIndex)}
-                  className="w-full text-left px-3 py-2.5 rounded-xl hover:bg-[var(--fei-bg-hover)] transition-colors flex items-baseline gap-2.5"
-                >
-                  <span className="text-[11.5px] font-code text-[var(--fei-text-muted)] shrink-0 w-9">
-                    {anchor.label}
-                  </span>
-                  <span className="flex-1 min-w-0 text-[13.5px] text-[var(--fei-text-primary)] truncate">
-                    {anchor.preview}
-                  </span>
-                </button>
-              ))}
-            </>
           ) : (
             <div className="py-10 text-center text-[13px] text-[var(--fei-text-muted)]">
-              暂无可跳转的内容
+              当前文档无明显章节目录
             </div>
           )}
         </div>

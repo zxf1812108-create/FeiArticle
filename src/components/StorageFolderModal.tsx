@@ -75,10 +75,10 @@ export const StorageFolderModal: React.FC<StorageFolderModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[1px] p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-transparent dark:bg-black/45 p-4">
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-[360px] bg-[var(--fei-bg-surface)] border border-[var(--fei-border)] rounded-2xl shadow-xl overflow-hidden text-[var(--fei-text-primary)]"
+        className="w-full max-w-[360px] bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-none dark:shadow-xl overflow-hidden text-[var(--fei-text-primary)]"
       >
         <div className="p-5 space-y-4">
           {/* Header */}

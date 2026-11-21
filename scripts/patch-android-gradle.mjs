@@ -495,10 +495,70 @@ public class LanServerPlugin extends Plugin {
 }
 `;
 
+  const readerNativePluginJava = `package com.feiartical.app;
+
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+@CapacitorPlugin(name = "ReaderNative")
+public class ReaderNativePlugin extends Plugin {
+    private static volatile ReaderNativePlugin activeInstance;
+    public static volatile boolean volumeKeyInterceptEnabled = false;
+    public static volatile boolean suppressSelectionMenu = false;
+
+    @Override
+    public void load() {
+        super.load();
+        activeInstance = this;
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        if (activeInstance == this) {
+            activeInstance = null;
+        }
+        volumeKeyInterceptEnabled = false;
+        suppressSelectionMenu = false;
+        super.handleOnDestroy();
+    }
+
+    @PluginMethod
+    public void setVolumeKeyIntercept(PluginCall call) {
+        volumeKeyInterceptEnabled = Boolean.TRUE.equals(call.getBoolean("enabled", false));
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void setSuppressSelectionMenu(PluginCall call) {
+        boolean next = Boolean.TRUE.equals(call.getBoolean("suppress", false));
+        suppressSelectionMenu = next;
+        if (getActivity() instanceof MainActivity) {
+            MainActivity activity = (MainActivity) getActivity();
+            activity.runOnUiThread(() -> activity.applySelectionActionModeSuppression(next));
+        }
+        call.resolve();
+    }
+
+    public static void dispatchVolumeKey(String direction) {
+        ReaderNativePlugin instance = activeInstance;
+        if (instance == null) return;
+        JSObject payload = new JSObject();
+        payload.put("direction", direction);
+        instance.notifyListeners("volumeKey", payload);
+    }
+}
+`;
+
   const mainActivityJava = `package com.feiartical.app;
 
 import android.content.res.Configuration;
+import android.os.Build;
 import android.os.Bundle;
+import android.view.ActionMode;
+import android.view.KeyEvent;
 import android.view.View;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -507,12 +567,64 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
+    private ActionMode activeActionMode = null;
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(WebDavPlugin.class);
         registerPlugin(LanServerPlugin.class);
+        registerPlugin(ReaderNativePlugin.class);
         super.onCreate(savedInstanceState);
         applySystemBarAndCutoutInsets();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (ReaderNativePlugin.volumeKeyInterceptEnabled && event != null) {
+            int code = event.getKeyCode();
+            if (code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                    ReaderNativePlugin.dispatchVolumeKey(
+                        code == KeyEvent.KEYCODE_VOLUME_UP ? "up" : "down"
+                    );
+                }
+                return true;
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public void onActionModeStarted(ActionMode mode) {
+        super.onActionModeStarted(mode);
+        activeActionMode = mode;
+        if (ReaderNativePlugin.suppressSelectionMenu) {
+            applySelectionActionModeSuppression(true);
+        }
+    }
+
+    @Override
+    public void onActionModeFinished(ActionMode mode) {
+        if (activeActionMode == mode) {
+            activeActionMode = null;
+        }
+        super.onActionModeFinished(mode);
+    }
+
+    public void applySelectionActionModeSuppression(boolean suppress) {
+        ActionMode mode = activeActionMode;
+        if (mode == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                if (suppress) {
+                    mode.hide(3600000L);
+                } else {
+                    mode.hide(0L);
+                    mode.invalidateContentRect();
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     @Override
@@ -555,6 +667,7 @@ public class MainActivity extends BridgeActivity {
 
   fs.writeFileSync(path.join(javaPkgDir, 'WebDavPlugin.java'), webDavPluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'LanServerPlugin.java'), lanServerPluginJava, 'utf8');
+  fs.writeFileSync(path.join(javaPkgDir, 'ReaderNativePlugin.java'), readerNativePluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'MainActivity.java'), mainActivityJava, 'utf8');
-  console.log(`Installed native WebDavPlugin, LanServerPlugin & cutout-safe MainActivity into ${javaPkgDir}`);
+  console.log(`Installed native WebDavPlugin, LanServerPlugin, ReaderNativePlugin & MainActivity into ${javaPkgDir}`);
 }

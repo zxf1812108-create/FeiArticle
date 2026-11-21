@@ -6,15 +6,15 @@ export const PC_DIRECT_HTML = `<!doctype html>
 <title>FeiArtical · 电脑直连</title>
 <style>
   :root {
-    --text: #2E2D2A;
-    --muted: #6E6B64;
-    --bg: #F6F4EE;
-    --bar: #EFECE5;
-    --subtle: #EDEAE1;
-    --selected: #E3DFD4;
-    --border: #E4E0D6;
-    --btn-bg: #2E2D2A;
-    --btn-text: #FAF8F4;
+    --text: #000000;
+    --muted: #595959;
+    --bg: #FFFFFF;
+    --bar: #FFFFFF;
+    --subtle: #FFFFFF;
+    --selected: #FFFFFF;
+    --border: #C4C4C4;
+    --btn-bg: #000000;
+    --btn-text: #FFFFFF;
   }
   @media (prefers-color-scheme: dark) {
     :root {

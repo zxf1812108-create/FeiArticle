@@ -10,15 +10,35 @@ import React, {
 import { CloudDownload } from 'lucide-react';
 import { ArticleDoc } from '../types';
 import { extractEnglishLookupWord } from '../utils/mdict';
-import { DocOutlineModal, FallbackJumpAnchor } from './DocOutlineModal';
+import { DocOutlineModal } from './DocOutlineModal';
 import { BlockNode, formatBytes, parseDocumentBlocks, TocItem } from '../utils/textParser';
+import {
+  extractExactVisualLineText,
+  findScrollTopForCharOffset,
+  resolveReadViewportCharOffset,
+} from '../utils/docAnchor';
+import {
+  setNativeSuppressSelectionMenu,
+  setNativeVolumeKeyIntercept,
+  subscribeNativeVolumeKeys,
+} from '../utils/readerNative';
 
-export type EditFormatKind = 'h1' | 'h2' | 'ul' | 'hr';
+export type EditFormatKind = 'h1' | 'h2' | 'ul';
+
+export interface DocViewStateSnapshot {
+  mode: 'read' | 'edit';
+  scrollTop: number;
+  charOffset: number;
+  readProgress: number;
+}
 
 export interface MinimalDocViewHandle {
   prepareModeSwitch: (nextEditing: boolean) => void;
-  flushAndCaptureViewState: () => { mode: 'read' | 'edit'; scrollTop: number };
+  captureTypographyAnchor: () => void;
+  flushAndCaptureViewState: () => DocViewStateSnapshot;
   applyMarkdownFormat: (kind: EditFormatKind) => void;
+  undo: () => void;
+  redo: () => void;
 }
 
 interface MinimalDocViewProps {
@@ -31,7 +51,9 @@ interface MinimalDocViewProps {
   onEnglishWordSelected?: (payload: { word: string; placement: 'top' | 'bottom' }) => void;
   onClearMdictLookup?: () => void;
   onSaveDraft: (updates: { title: string; content: string }) => void;
-  onViewStateChange: (state: { mode: 'read' | 'edit'; scrollTop: number }) => void;
+  onViewStateChange: (state: DocViewStateSnapshot) => void;
+  onReadProgressChange?: (progress: number) => void;
+  onHistoryChange?: (state: { canUndo: boolean; canRedo: boolean }) => void;
   onFetchRemoteBody: () => Promise<void>;
 }
 
@@ -41,20 +63,9 @@ interface VisualLine {
   text: string;
 }
 
-function normalizeForMatch(s: string): string {
-  return s
-    .replace(/^#{1,6}\s+/, '')
-    .replace(/^>\s?/, '')
-    .replace(/^[-*+]\s+/, '')
-    .replace(/^\d+\.\s+/, '')
-    .replace(/[`*_~]/g, '')
-    .replace(/\s+/g, '')
-    .trim();
-}
-
 /**
  * Measure rendered visual lines in scroll-content coordinates, keeping text snippets
- * for both exact line-accurate pagination and Read <-> Edit content synchronization.
+ * for exact line-accurate pagination, edge clipping, and Read <-> Edit content synchronization.
  */
 function collectVisualLines(scrollEl: HTMLElement, articleEl: HTMLElement): VisualLine[] {
   const containerRect = scrollEl.getBoundingClientRect();
@@ -134,7 +145,9 @@ function createTextareaMirror(textarea: HTMLTextAreaElement): HTMLDivElement {
   mirror.style.pointerEvents = 'none';
   mirror.style.whiteSpace = 'pre-wrap';
   mirror.style.wordWrap = 'break-word';
-  mirror.style.overflowWrap = 'break-word';
+  mirror.style.overflowWrap = 'anywhere';
+  mirror.style.wordBreak = style.wordBreak;
+  mirror.style.tabSize = style.tabSize;
   mirror.style.boxSizing = 'border-box';
   mirror.style.width = `${textarea.clientWidth}px`;
   mirror.style.fontFamily = style.fontFamily;
@@ -150,16 +163,31 @@ function createTextareaMirror(textarea: HTMLTextAreaElement): HTMLDivElement {
   return mirror;
 }
 
+function measureCharTopInMirror(mirror: HTMLDivElement, text: string, idx: number): number {
+  mirror.textContent = '';
+  if (idx > 0) {
+    mirror.appendChild(document.createTextNode(text.slice(0, idx)));
+  }
+  const marker = document.createElement('span');
+  const ch = idx < text.length ? text[idx] : '';
+  marker.textContent = ch && ch !== '\n' && ch !== '\r' ? ch : '\u200b';
+  mirror.appendChild(marker);
+  if (idx + 1 < text.length) {
+    mirror.appendChild(
+      document.createTextNode(text.slice(idx + 1, Math.min(text.length, idx + 64)))
+    );
+  }
+  return marker.offsetTop;
+}
+
 function measureCharOffsetY(textarea: HTMLTextAreaElement, text: string, charIndex: number): number {
-  if (charIndex <= 0) return 0;
+  if (charIndex <= 0 || !text) {
+    return parseFloat(window.getComputedStyle(textarea).paddingTop) || 0;
+  }
   const mirror = createTextareaMirror(textarea);
   try {
-    const prefix = text.slice(0, charIndex);
-    mirror.textContent = prefix;
-    const marker = document.createElement('span');
-    marker.textContent = '\u200b';
-    mirror.appendChild(marker);
-    return marker.offsetTop;
+    const safeIdx = Math.min(text.length, Math.max(0, charIndex));
+    return measureCharTopInMirror(mirror, text, safeIdx);
   } finally {
     document.body.removeChild(mirror);
   }
@@ -167,74 +195,71 @@ function measureCharOffsetY(textarea: HTMLTextAreaElement, text: string, charInd
 
 function findCharOffsetAtY(textarea: HTMLTextAreaElement, text: string, targetY: number): number {
   if (targetY <= 0 || !text) return 0;
+  const style = window.getComputedStyle(textarea);
+  const parsedLh = parseFloat(style.lineHeight);
+  const lineHeight = Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : 24;
+  const padTop = parseFloat(style.paddingTop) || 0;
+  const minVisibleTop = Math.max(padTop, targetY + padTop - lineHeight * 0.35);
+
   const mirror = createTextareaMirror(textarea);
   try {
-    // Binary search over line boundaries first for speed & clean line alignment
     const lineStarts: number[] = [0];
     for (let i = 0; i < text.length; i++) {
       if (text[i] === '\n') lineStarts.push(i + 1);
     }
 
+    // Stage 1: locate the raw paragraph containing minVisibleTop
     let lo = 0;
     let hi = lineStarts.length - 1;
-    let best = 0;
+    let bestLineIdx = 0;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      const idx = lineStarts[mid];
-      mirror.textContent = text.slice(0, idx);
-      const marker = document.createElement('span');
-      marker.textContent = '\u200b';
-      mirror.appendChild(marker);
-      const y = marker.offsetTop;
-      if (y <= targetY + 4) {
-        best = mid;
+      const y = measureCharTopInMirror(mirror, text, lineStarts[mid]);
+      if (y < minVisibleTop) {
+        bestLineIdx = mid;
         lo = mid + 1;
       } else {
         hi = mid - 1;
       }
     }
-    return lineStarts[best];
+
+    const paraStart = lineStarts[bestLineIdx];
+    const paraEnd =
+      bestLineIdx + 1 < lineStarts.length ? lineStarts[bestLineIdx + 1] : text.length;
+
+    // Stage 2: binary search inside wrapped paragraph for exact first visible line character
+    let charLo = paraStart;
+    let charHi = paraEnd;
+    let result = paraEnd;
+    while (charLo <= charHi) {
+      const mid = (charLo + charHi) >> 1;
+      const y = measureCharTopInMirror(mirror, text, mid);
+      if (y >= minVisibleTop) {
+        result = mid;
+        charHi = mid - 1;
+      } else {
+        charLo = mid + 1;
+      }
+    }
+
+    while (result < text.length && (text[result] === '\n' || text[result] === '\r')) {
+      result++;
+    }
+    return Math.min(text.length, result);
   } finally {
     document.body.removeChild(mirror);
   }
 }
 
-function findCharIndexForSnippet(
-  rawContent: string,
-  snippet: string,
-  fallbackRatio: number
-): number {
-  if (!rawContent) return 0;
-  const targetNorm = normalizeForMatch(snippet).slice(0, 20);
-  if (!targetNorm) {
-    return Math.round(fallbackRatio * rawContent.length);
-  }
-
-  const lines = rawContent.split('\n');
-  let offset = 0;
-  const candidates: Array<{ offset: number; dist: number }> = [];
-
-  for (const line of lines) {
-    const normLine = normalizeForMatch(line);
-    if (normLine.length > 0 && (normLine.includes(targetNorm) || targetNorm.includes(normLine.slice(0, 14)))) {
-      const ratio = offset / Math.max(1, rawContent.length);
-      candidates.push({ offset, dist: Math.abs(ratio - fallbackRatio) });
-    }
-    offset += line.length + 1;
-  }
-
-  if (candidates.length > 0) {
-    candidates.sort((a, b) => a.dist - b.dist);
-    return candidates[0].offset;
-  }
-
-  return Math.round(fallbackRatio * rawContent.length);
-}
-
 type PendingAnchor =
   | { kind: 'top' }
-  | { kind: 'to-edit'; charIndex: number; fallbackRatio: number }
-  | { kind: 'to-read'; snippet: string; fallbackRatio: number };
+  | { kind: 'to-edit'; charOffset: number }
+  | { kind: 'to-read'; charOffset: number };
+
+type PendingTypographyAnchor =
+  | { kind: 'top' }
+  | { kind: 'edit'; charOffset: number }
+  | { kind: 'read'; charOffset: number };
 
 export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewProps>(
   function MinimalDocView(
@@ -249,6 +274,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       onClearMdictLookup,
       onSaveDraft,
       onViewStateChange,
+      onReadProgressChange,
+      onHistoryChange,
       onFetchRemoteBody,
     },
     ref
@@ -262,7 +289,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const [fetchError, setFetchError] = useState<string | null>(null);
     const [articleOverflow, setArticleOverflow] = useState(false);
     const [showOutline, setShowOutline] = useState(false);
+    const [topClipPx, setTopClipPx] = useState(0);
     const [bottomClipPx, setBottomClipPx] = useState(0);
+    const topClipPxRef = useRef(0);
+    const bottomClipPxRef = useRef(0);
     const clipRafRef = useRef<number | null>(null);
 
     const titleRef = useRef(doc.title);
@@ -274,12 +304,25 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const debounceScrollRef = useRef<number | null>(null);
     const hasUnsavedDraftRef = useRef(false);
     const pendingAnchorRef = useRef<PendingAnchor | null>(null);
+    const pendingTypographyAnchorRef = useRef<PendingTypographyAnchor | null>(null);
+    const typographyLockUntilRef = useRef(0);
+    const lastProgrammaticScrollAtRef = useRef(0);
     const restoredDocIdRef = useRef<string | null>(null);
     const hadSelectionOnDownRef = useRef(false);
     const lastPointerDownAtRef = useRef(0);
     const lastTouchStartAtRef = useRef(0);
     const isPointerActiveRef = useRef(false);
     const selectionCheckTimerRef = useRef<number | null>(null);
+    const lastReportedProgressRef = useRef<number>(-1);
+
+    // Keyboard visibility tracking for Edit mode cursor centering
+    const baselineViewportHeightRef = useRef<number>(
+      typeof window !== 'undefined'
+        ? (window.visualViewport?.height ?? window.innerHeight)
+        : 800
+    );
+    const wasKeyboardOpenRef = useRef(false);
+    const keyboardCenterTimerRef = useRef<number | null>(null);
 
     const hasActiveMdictRef = useRef(hasActiveMdict);
     hasActiveMdictRef.current = hasActiveMdict;
@@ -291,6 +334,210 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     onEnglishWordSelectedRef.current = onEnglishWordSelected;
     const onClearMdictLookupRef = useRef(onClearMdictLookup);
     onClearMdictLookupRef.current = onClearMdictLookup;
+    const onViewStateChangeRef = useRef(onViewStateChange);
+    onViewStateChangeRef.current = onViewStateChange;
+    const onReadProgressChangeRef = useRef(onReadProgressChange);
+    onReadProgressChangeRef.current = onReadProgressChange;
+    const onHistoryChangeRef = useRef(onHistoryChange);
+    onHistoryChangeRef.current = onHistoryChange;
+
+    // Per-document edit history stack for reliable Undo / Redo across typing & toolbar formatting
+    const historyRef = useRef<Array<{ content: string; selStart: number; selEnd: number }>>([
+      { content: doc.content, selStart: 0, selEnd: 0 },
+    ]);
+    const historyIndexRef = useRef<number>(0);
+    const lastEditAtRef = useRef<number>(0);
+    const lastEditKindRef = useRef<'typing' | 'delete' | 'other'>('other');
+
+    const notifyHistoryState = () => {
+      onHistoryChangeRef.current?.({
+        canUndo: historyIndexRef.current > 0,
+        canRedo: historyIndexRef.current < historyRef.current.length - 1,
+      });
+    };
+
+    const resetEditHistory = (initialContent: string) => {
+      historyRef.current = [{ content: initialContent, selStart: 0, selEnd: 0 }];
+      historyIndexRef.current = 0;
+      lastEditAtRef.current = 0;
+      lastEditKindRef.current = 'other';
+      notifyHistoryState();
+    };
+
+    const recordEditHistory = (
+      nextContent: string,
+      selStart: number,
+      selEnd: number,
+      coalesce: boolean,
+      editKind: 'typing' | 'delete' | 'other'
+    ) => {
+      const now = Date.now();
+      const curIdx = historyIndexRef.current;
+      const curEntry = historyRef.current[curIdx];
+      if (curEntry && curEntry.content === nextContent) {
+        curEntry.selStart = selStart;
+        curEntry.selEnd = selEnd;
+        return;
+      }
+
+      const canCoalesce =
+        coalesce &&
+        curIdx > 0 &&
+        curIdx === historyRef.current.length - 1 &&
+        lastEditKindRef.current === editKind &&
+        now - lastEditAtRef.current < 600;
+
+      if (canCoalesce) {
+        historyRef.current[curIdx] = { content: nextContent, selStart, selEnd };
+      } else {
+        const truncated = historyRef.current.slice(0, curIdx + 1);
+        truncated.push({ content: nextContent, selStart, selEnd });
+        const MAX_HISTORY = 100;
+        if (truncated.length > MAX_HISTORY) {
+          truncated.shift();
+        }
+        historyRef.current = truncated;
+        historyIndexRef.current = truncated.length - 1;
+      }
+
+      lastEditAtRef.current = now;
+      lastEditKindRef.current = editKind;
+      notifyHistoryState();
+    };
+
+    const applyHistorySnapshot = (targetIndex: number) => {
+      const entry = historyRef.current[targetIndex];
+      if (!entry) return;
+      const ta = textareaRef.current;
+      const prevScrollTop = ta?.scrollTop ?? 0;
+      const wasFocused = Boolean(ta && document.activeElement === ta);
+
+      historyIndexRef.current = targetIndex;
+      lastEditAtRef.current = 0;
+      lastEditKindRef.current = 'other';
+      clearTypographyLock();
+
+      contentRef.current = entry.content;
+      setContent(entry.content);
+      scheduleSave(titleRef.current, entry.content);
+      notifyHistoryState();
+
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        if (wasFocused) {
+          try {
+            el.setSelectionRange(entry.selStart, entry.selEnd);
+          } catch {
+            // ignore selection errors on mobile
+          }
+        }
+        el.scrollTop = prevScrollTop;
+      });
+    };
+
+    const performUndo = () => {
+      if (historyIndexRef.current <= 0) return;
+      applyHistorySnapshot(historyIndexRef.current - 1);
+    };
+
+    const performRedo = () => {
+      if (historyIndexRef.current >= historyRef.current.length - 1) return;
+      applyHistorySnapshot(historyIndexRef.current + 1);
+    };
+
+    const clearTypographyLock = () => {
+      pendingTypographyAnchorRef.current = null;
+      typographyLockUntilRef.current = 0;
+    };
+
+    const computeReadProgress = (): number => {
+      if (!contentRef.current.trim()) return 0;
+
+      if (isEditingRef.current) {
+        const ta = textareaRef.current;
+        if (!ta) return doc.readProgress ?? 0;
+        const maxScroll = Math.max(0, ta.scrollHeight - ta.clientHeight);
+        if (maxScroll <= 2) return 100;
+        if (ta.scrollTop <= 2) return 0;
+        const charOffset = findCharOffsetAtY(ta, contentRef.current, ta.scrollTop);
+        return Math.min(100, Math.max(0, Math.round((charOffset / Math.max(1, contentRef.current.length)) * 100)));
+      }
+
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl) return doc.readProgress ?? 0;
+
+      const viewHeight = el.clientHeight;
+      if (viewHeight <= 0) return doc.readProgress ?? 0;
+
+      const containerRect = el.getBoundingClientRect();
+      const articleRect = articleEl.getBoundingClientRect();
+      const baseOffset = el.scrollTop - containerRect.top;
+      const articleBottom = articleRect.bottom + baseOffset;
+      const effectiveMax = Math.max(0, articleBottom - viewHeight);
+
+      if (effectiveMax <= 2) return 100;
+      if (el.scrollTop <= 2) return 0;
+      return Math.min(100, Math.max(0, Math.round((el.scrollTop / effectiveMax) * 100)));
+    };
+
+    const reportReadProgress = (): number => {
+      const pct = computeReadProgress();
+      if (pct !== lastReportedProgressRef.current) {
+        lastReportedProgressRef.current = pct;
+        onReadProgressChangeRef.current?.(pct);
+      }
+      return pct;
+    };
+
+    const captureCurrentCharOffset = (): number => {
+      const raw = contentRef.current;
+      if (!raw) return 0;
+
+      if (isEditingRef.current) {
+        const ta = textareaRef.current;
+        if (!ta || ta.scrollTop <= 10) return 0;
+        return findCharOffsetAtY(ta, raw, ta.scrollTop);
+      }
+
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl || el.scrollTop <= 10 || !articleOverflow) return 0;
+
+      const lines = collectVisualLines(el, articleEl);
+      const effectiveViewTop = el.scrollTop + topClipPxRef.current;
+      const firstIdx = lines.findIndex((line) => {
+        if (!line.text.trim()) return false;
+        const lineHeight = Math.max(12, line.bottom - line.top);
+        const minKeep = Math.min(10, Math.max(4, lineHeight * 0.45));
+        return line.bottom > effectiveViewTop + minKeep;
+      });
+      if (firstIdx === -1) return 0;
+
+      const firstLine = lines[firstIdx];
+      const exactText =
+        extractExactVisualLineText(el, articleEl, firstLine.top, firstLine.bottom) ||
+        firstLine.text;
+
+      return resolveReadViewportCharOffset(
+        el,
+        articleEl,
+        raw,
+        firstLine.top,
+        firstLine.bottom,
+        exactText
+      );
+    };
+
+    const emitCurrentViewState = () => {
+      const mode: 'read' | 'edit' = isEditingRef.current ? 'edit' : 'read';
+      const el = mode === 'edit' ? textareaRef.current : scrollRef.current;
+      const scrollTop = el?.scrollTop ?? 0;
+      const charOffset = captureCurrentCharOffset();
+      const readProgress = reportReadProgress();
+      onViewStateChangeRef.current({ mode, scrollTop, charOffset, readProgress });
+    };
 
     // Sync local buffer only when switching documents
     useEffect(() => {
@@ -299,15 +546,34 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       contentRef.current = doc.content;
       hasUnsavedDraftRef.current = false;
       hadSelectionOnDownRef.current = false;
+      pendingAnchorRef.current = null;
+      lastReportedProgressRef.current = -1;
+      clearTypographyLock();
+      if (debounceScrollRef.current) {
+        window.clearTimeout(debounceScrollRef.current);
+        debounceScrollRef.current = null;
+      }
       setFetchError(null);
       setArticleOverflow(false);
       setShowOutline(false);
+      topClipPxRef.current = 0;
+      bottomClipPxRef.current = 0;
+      setTopClipPx(0);
+      setBottomClipPx(0);
+      resetEditHistory(doc.content);
     }, [doc.id]);
 
     useEffect(() => {
       if (isEditing) {
         setShowOutline(false);
+        notifyHistoryState();
       }
+      return () => {
+        if (debounceScrollRef.current) {
+          window.clearTimeout(debounceScrollRef.current);
+          debounceScrollRef.current = null;
+        }
+      };
     }, [isEditing]);
 
     // Sync content only when remote body arrives lazily in read mode
@@ -315,15 +581,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (!isEditing && !hasUnsavedDraftRef.current && doc.content !== contentRef.current) {
         setContent(doc.content);
         contentRef.current = doc.content;
+        resetEditHistory(doc.content);
       }
     }, [doc.content, isEditing]);
 
-    // Measure whether rendered Markdown overflows the reading viewport so short docs center vertically
+    // Measure whether rendered Markdown overflows the reading viewport
     const measureReadOverflow = () => {
       const el = scrollRef.current;
       const articleEl = articleRef.current;
       if (!el || !articleEl) return false;
-      const needed = articleEl.offsetHeight + 48 > el.clientHeight;
+      const needed = articleEl.offsetHeight + 24 > el.clientHeight;
       if (needed !== articleOverflow) {
         setArticleOverflow(needed);
         return true;
@@ -331,61 +598,179 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return false;
     };
 
-    const updateBottomClip = () => {
+    // Mask partially clipped lines at both top and bottom edges of Browse viewport
+    const updateEdgeClips = () => {
       if (isEditingRef.current) {
+        topClipPxRef.current = 0;
+        bottomClipPxRef.current = 0;
+        setTopClipPx((prev) => (prev === 0 ? prev : 0));
         setBottomClipPx((prev) => (prev === 0 ? prev : 0));
         return;
       }
       const el = scrollRef.current;
       const articleEl = articleRef.current;
       if (!el || !articleEl) {
+        topClipPxRef.current = 0;
+        bottomClipPxRef.current = 0;
+        setTopClipPx((prev) => (prev === 0 ? prev : 0));
         setBottomClipPx((prev) => (prev === 0 ? prev : 0));
         return;
       }
       const viewTop = el.scrollTop;
       const viewHeight = el.clientHeight;
       const maxScroll = Math.max(0, el.scrollHeight - viewHeight);
-      if (viewHeight <= 0 || maxScroll <= 2 || viewTop >= maxScroll - 1.5) {
+      if (viewHeight <= 0 || maxScroll <= 2) {
+        topClipPxRef.current = 0;
+        bottomClipPxRef.current = 0;
+        setTopClipPx((prev) => (prev === 0 ? prev : 0));
         setBottomClipPx((prev) => (prev === 0 ? prev : 0));
         return;
       }
+
       const rawViewBottom = viewTop + viewHeight;
       const lines = collectVisualLines(el, articleEl);
-      const cutIdx = lines.findIndex(
-        (line) => line.top < rawViewBottom - 0.5 && line.bottom > rawViewBottom + 0.5
-      );
-      if (cutIdx === -1) {
-        setBottomClipPx((prev) => (prev === 0 ? prev : 0));
-        return;
+
+      // Top edge clip: hide any partially clipped top line so Page Up shows it completely next time
+      let nextTop = 0;
+      if (viewTop > 1.5) {
+        const topCutIdx = lines.findIndex(
+          (line) => line.top < viewTop - 0.5 && line.bottom > viewTop + 0.5
+        );
+        if (topCutIdx !== -1) {
+          const topCutLine = lines[topCutIdx];
+          if (topCutLine.bottom < rawViewBottom - 4) {
+            const nextLineTop =
+              topCutIdx + 1 < lines.length ? lines[topCutIdx + 1].top : rawViewBottom;
+            const safeTopCutY = Math.min(nextLineTop - 0.5, topCutLine.bottom + 1);
+            nextTop = Math.max(0, Math.min(56, Math.ceil(safeTopCutY - viewTop)));
+          }
+        }
       }
-      const cutLine = lines[cutIdx];
-      if (cutLine.top <= viewTop + 4) {
-        setBottomClipPx((prev) => (prev === 0 ? prev : 0));
-        return;
+
+      // Bottom edge clip: hide any partially clipped bottom line so Page Down shows it completely
+      let nextBottom = 0;
+      if (viewTop < maxScroll - 1.5) {
+        const bottomCutIdx = lines.findIndex(
+          (line) => line.top < rawViewBottom - 0.5 && line.bottom > rawViewBottom + 0.5
+        );
+        if (bottomCutIdx !== -1) {
+          const bottomCutLine = lines[bottomCutIdx];
+          if (bottomCutLine.top > viewTop + nextTop + 4) {
+            const prevLineBottom = bottomCutIdx > 0 ? lines[bottomCutIdx - 1].bottom : viewTop;
+            const safeBottomCutY = Math.max(prevLineBottom + 0.5, bottomCutLine.top - 1);
+            nextBottom = Math.max(0, Math.min(56, Math.ceil(rawViewBottom - safeBottomCutY)));
+          }
+        }
       }
-      const prevLineBottom = cutIdx > 0 ? lines[cutIdx - 1].bottom : viewTop;
-      const safeCutY = Math.max(prevLineBottom + 0.5, cutLine.top - 1);
-      const needed = Math.max(0, Math.min(56, Math.ceil(rawViewBottom - safeCutY)));
-      setBottomClipPx((prev) => (prev === needed ? prev : needed));
+
+      topClipPxRef.current = nextTop;
+      bottomClipPxRef.current = nextBottom;
+      setTopClipPx((prev) => (prev === nextTop ? prev : nextTop));
+      setBottomClipPx((prev) => (prev === nextBottom ? prev : nextBottom));
     };
 
-    const scheduleBottomClipUpdate = () => {
+    const scheduleEdgeClipUpdate = () => {
       if (clipRafRef.current !== null) {
         window.cancelAnimationFrame(clipRafRef.current);
       }
       clipRafRef.current = window.requestAnimationFrame(() => {
         clipRafRef.current = null;
-        updateBottomClip();
+        updateEdgeClips();
+        reportReadProgress();
       });
+    };
+
+    const scrollReadToCharOffset = (charOffset: number): number => {
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl) return 0;
+
+      const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+      let targetTop = 0;
+      if (charOffset > 0) {
+        const matchedTop = findScrollTopForCharOffset(el, articleEl, contentRef.current, charOffset);
+        if (matchedTop !== null) {
+          targetTop = Math.min(maxScroll, Math.max(0, Math.floor(matchedTop) - 4));
+        } else {
+          const ratio = charOffset / Math.max(1, contentRef.current.length);
+          targetTop = Math.round(ratio * maxScroll);
+        }
+      }
+
+      lastProgrammaticScrollAtRef.current = performance.now();
+      el.scrollTop = targetTop;
+      updateEdgeClips();
+      return el.scrollTop;
+    };
+
+    const scrollEditToCharOffset = (charOffset: number): number => {
+      const ta = textareaRef.current;
+      if (!ta) return 0;
+      const maxScroll = Math.max(0, ta.scrollHeight - ta.clientHeight);
+      let targetTop = 0;
+      if (charOffset > 0) {
+        const measuredY = measureCharOffsetY(ta, contentRef.current, charOffset);
+        const padTop = parseFloat(window.getComputedStyle(ta).paddingTop) || 0;
+        targetTop = Math.min(maxScroll, Math.max(0, Math.floor(measuredY - padTop)));
+      }
+      lastProgrammaticScrollAtRef.current = performance.now();
+      ta.scrollTop = targetTop;
+      return ta.scrollTop;
+    };
+
+    const applyTypographyAnchorIfLocked = () => {
+      const anchor = pendingTypographyAnchorRef.current;
+      if (!anchor) return false;
+      if (Date.now() > typographyLockUntilRef.current) {
+        clearTypographyLock();
+        return false;
+      }
+
+      if (isEditingRef.current) {
+        const ta = textareaRef.current;
+        if (!ta) return false;
+        const targetOffset = anchor.kind === 'top' ? 0 : anchor.charOffset;
+        const nextTop = scrollEditToCharOffset(targetOffset);
+        const readProgress = reportReadProgress();
+        onViewStateChangeRef.current({
+          mode: 'edit',
+          scrollTop: nextTop,
+          charOffset: targetOffset,
+          readProgress,
+        });
+        return true;
+      }
+
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl) return false;
+      if (measureReadOverflow()) return true;
+
+      const targetOffset = anchor.kind === 'top' ? 0 : anchor.charOffset;
+      const nextTop = scrollReadToCharOffset(targetOffset);
+      const readProgress = reportReadProgress();
+      onViewStateChangeRef.current({
+        mode: 'read',
+        scrollTop: nextTop,
+        charOffset: targetOffset,
+        readProgress,
+      });
+      return true;
     };
 
     useLayoutEffect(() => {
       if (isEditing) {
+        topClipPxRef.current = 0;
+        bottomClipPxRef.current = 0;
+        setTopClipPx(0);
         setBottomClipPx(0);
-        return;
+      } else {
+        measureReadOverflow();
       }
-      measureReadOverflow();
-      updateBottomClip();
+      if (!applyTypographyAnchorIfLocked() && !isEditing) {
+        updateEdgeClips();
+        reportReadProgress();
+      }
     }, [isEditing, content, doc.id, fontSize, docFontFamily, articleOverflow]);
 
     useEffect(() => {
@@ -394,26 +779,85 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const articleEl = articleRef.current;
       if (!el || !articleEl || typeof ResizeObserver === 'undefined') return;
       const ro = new ResizeObserver(() => {
-        const needed = articleEl.offsetHeight + 48 > el.clientHeight;
+        const needed = articleEl.offsetHeight + 24 > el.clientHeight;
         setArticleOverflow((prev) => (prev === needed ? prev : needed));
-        scheduleBottomClipUpdate();
+        if (pendingTypographyAnchorRef.current && Date.now() <= typographyLockUntilRef.current) {
+          applyTypographyAnchorIfLocked();
+        } else {
+          scheduleEdgeClipUpdate();
+        }
       });
       ro.observe(el);
       ro.observe(articleEl);
       return () => ro.disconnect();
     }, [isEditing, doc.id, fontSize, docFontFamily]);
 
-    // Restore saved scrollTop when opening a document
+    // Re-anchor & refresh edge clips when bundled @fontsource woff2 unicode-range subsets finish swapping in
+    useEffect(() => {
+      if (typeof document === 'undefined' || !('fonts' in document)) return;
+      let cancelled = false;
+      let rafId: number | null = null;
+      const onFontSwap = () => {
+        if (cancelled) return;
+        if (rafId !== null) window.cancelAnimationFrame(rafId);
+        rafId = window.requestAnimationFrame(() => {
+          rafId = null;
+          if (cancelled) return;
+          if (pendingTypographyAnchorRef.current && Date.now() <= typographyLockUntilRef.current) {
+            applyTypographyAnchorIfLocked();
+          } else if (!isEditingRef.current) {
+            measureReadOverflow();
+            updateEdgeClips();
+            reportReadProgress();
+          }
+        });
+      };
+
+      const fontSet = document.fonts;
+      fontSet.addEventListener('loadingdone', onFontSwap);
+      fontSet.ready.then(onFontSwap).catch(() => {});
+      return () => {
+        cancelled = true;
+        fontSet.removeEventListener('loadingdone', onFontSwap);
+        if (rafId !== null) window.cancelAnimationFrame(rafId);
+      };
+    }, [docFontFamily, fontSize, isEditing, doc.id]);
+
+    // Restore saved reading progress (preferring canonical synced charOffset over raw scrollTop)
     useLayoutEffect(() => {
       if (restoredDocIdRef.current === doc.id) return;
       if (!isEditing && measureReadOverflow()) return;
       restoredDocIdRef.current = doc.id;
+
+      const savedCharOffset =
+        typeof doc.lastCharOffset === 'number' && Number.isFinite(doc.lastCharOffset)
+          ? Math.max(0, Math.min(contentRef.current.length, Math.round(doc.lastCharOffset)))
+          : null;
+
+      if (savedCharOffset !== null && savedCharOffset > 0) {
+        if (isEditing) {
+          scrollEditToCharOffset(savedCharOffset);
+          pendingTypographyAnchorRef.current = { kind: 'edit', charOffset: savedCharOffset };
+        } else {
+          scrollReadToCharOffset(savedCharOffset);
+          pendingTypographyAnchorRef.current = { kind: 'read', charOffset: savedCharOffset };
+        }
+        typographyLockUntilRef.current = Date.now() + 1800;
+        reportReadProgress();
+        return;
+      }
+
       const targetEl = isEditing ? textareaRef.current : scrollRef.current;
       if (!targetEl) return;
-      targetEl.scrollTop = doc.lastScrollTop ?? 0;
-    }, [doc.id, doc.lastScrollTop, isEditing, articleOverflow]);
+      lastProgrammaticScrollAtRef.current = performance.now();
+      targetEl.scrollTop = savedCharOffset === 0 ? 0 : (doc.lastScrollTop ?? 0);
+      if (!isEditing) {
+        updateEdgeClips();
+      }
+      reportReadProgress();
+    }, [doc.id, doc.lastCharOffset, doc.lastScrollTop, isEditing, articleOverflow]);
 
-    // Apply anchored scroll alignment right after Read <-> Edit mode toggle commits
+    // Apply deterministic charOffset scroll alignment right after Read <-> Edit mode toggle commits
     useLayoutEffect(() => {
       const anchor = pendingAnchorRef.current;
       if (!anchor) return;
@@ -424,70 +868,155 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         const ta = textareaRef.current;
         if (!ta) return;
 
-        if (anchor.kind === 'top') {
-          ta.scrollTop = 0;
-          onViewStateChange({ mode: 'edit', scrollTop: 0 });
-          return;
-        }
-
-        if (anchor.kind === 'to-edit') {
-          const measuredY = measureCharOffsetY(ta, contentRef.current, anchor.charIndex);
-          const targetTop = Math.max(0, Math.floor(measuredY) - 6);
-          ta.scrollTop = targetTop;
-          try {
-            ta.setSelectionRange(anchor.charIndex, anchor.charIndex);
-            ta.focus({ preventScroll: true });
-          } catch {
-            // ignore focus errors on mobile
+        // Never auto-focus textarea on Browse -> Edit: keyboard must wait until user taps to place cursor
+        const targetOffset = anchor.kind === 'top' ? 0 : anchor.charOffset;
+        const targetTop = scrollEditToCharOffset(targetOffset);
+        window.requestAnimationFrame(() => {
+          if (textareaRef.current && Math.abs(textareaRef.current.scrollTop - targetTop) > 2) {
+            lastProgrammaticScrollAtRef.current = performance.now();
+            textareaRef.current.scrollTop = targetTop;
           }
-          onViewStateChange({ mode: 'edit', scrollTop: ta.scrollTop });
-        }
+        });
+        const readProgress = reportReadProgress();
+        onViewStateChangeRef.current({
+          mode: 'edit',
+          scrollTop: targetTop,
+          charOffset: targetOffset,
+          readProgress,
+        });
         return;
       }
 
       const el = scrollRef.current;
-      if (!el) return;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl) return;
 
-      if (anchor.kind === 'top') {
-        el.scrollTop = 0;
-        onViewStateChange({ mode: 'read', scrollTop: 0 });
+      const targetOffset = anchor.kind === 'top' ? 0 : anchor.charOffset;
+      const targetTop = scrollReadToCharOffset(targetOffset);
+      const readProgress = reportReadProgress();
+      onViewStateChangeRef.current({
+        mode: 'read',
+        scrollTop: targetTop,
+        charOffset: targetOffset,
+        readProgress,
+      });
+    }, [isEditing, articleOverflow]);
+
+    // Center the active cursor line in the screen area above the soft keyboard when it opens
+    const centerCursorAboveKeyboard = (ta: HTMLTextAreaElement) => {
+      if (document.activeElement !== ta) return;
+      const vv = window.visualViewport;
+      const vvBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
+      const taRect = ta.getBoundingClientRect();
+      const visibleTop = Math.max(0, taRect.top);
+      const visibleBottom = Math.min(taRect.bottom, vvBottom);
+      const visibleHeight = Math.max(60, visibleBottom - visibleTop);
+
+      const style = window.getComputedStyle(ta);
+      const parsedLh = parseFloat(style.lineHeight);
+      const lineHeight = Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : fontSize * 1.62;
+      const cursorIdx = ta.selectionStart ?? 0;
+      const cursorY = measureCharOffsetY(ta, contentRef.current, cursorIdx);
+
+      const desiredTop = cursorY + lineHeight * 0.5 - visibleHeight * 0.5;
+      const maxScroll = Math.max(0, ta.scrollHeight - ta.clientHeight);
+      const nextTop = Math.min(maxScroll, Math.max(0, Math.round(desiredTop)));
+
+      lastProgrammaticScrollAtRef.current = performance.now();
+      ta.scrollTop = nextTop;
+      emitCurrentViewState();
+    };
+
+    const scheduleCenterCursorAboveKeyboard = (ta: HTMLTextAreaElement) => {
+      if (keyboardCenterTimerRef.current !== null) {
+        window.clearTimeout(keyboardCenterTimerRef.current);
+      }
+      window.requestAnimationFrame(() => {
+        if (textareaRef.current === ta && document.activeElement === ta) {
+          centerCursorAboveKeyboard(ta);
+        }
+      });
+      keyboardCenterTimerRef.current = window.setTimeout(() => {
+        keyboardCenterTimerRef.current = null;
+        if (textareaRef.current === ta && document.activeElement === ta) {
+          centerCursorAboveKeyboard(ta);
+        }
+      }, 150);
+    };
+
+    useEffect(() => {
+      if (!isEditing) {
+        wasKeyboardOpenRef.current = false;
+        if (typeof window !== 'undefined') {
+          baselineViewportHeightRef.current = Math.max(
+            baselineViewportHeightRef.current,
+            window.visualViewport?.height ?? window.innerHeight
+          );
+        }
         return;
       }
 
-      if (anchor.kind === 'to-read') {
-        const articleEl = articleRef.current;
-        if (!articleEl) return;
-        const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
-        const targetNorm = normalizeForMatch(anchor.snippet).slice(0, 18);
-        let matchedTop: number | null = null;
-
-        if (targetNorm) {
-          const lines = collectVisualLines(el, articleEl);
-          const candidates: Array<{ top: number; dist: number }> = [];
-          for (const line of lines) {
-            const lineNorm = normalizeForMatch(line.text);
-            if (
-              lineNorm &&
-              (lineNorm.includes(targetNorm) || targetNorm.includes(lineNorm.slice(0, 12)))
-            ) {
-              const ratio = line.top / Math.max(1, el.scrollHeight);
-              candidates.push({ top: line.top, dist: Math.abs(ratio - anchor.fallbackRatio) });
-            }
-          }
-          if (candidates.length > 0) {
-            candidates.sort((a, b) => a.dist - b.dist);
-            matchedTop = candidates[0].top;
-          }
-        }
-
-        const targetTop =
-          matchedTop !== null
-            ? Math.min(maxScroll, Math.max(0, Math.floor(matchedTop) - 4))
-            : Math.round(anchor.fallbackRatio * maxScroll);
-        el.scrollTop = targetTop;
-        onViewStateChange({ mode: 'read', scrollTop: el.scrollTop });
+      const initH = window.visualViewport?.height ?? window.innerHeight;
+      if (initH > baselineViewportHeightRef.current) {
+        baselineViewportHeightRef.current = initH;
       }
-    }, [isEditing, articleOverflow]);
+
+      const handleViewportResize = () => {
+        const currentH = window.visualViewport?.height ?? window.innerHeight;
+        if (currentH > baselineViewportHeightRef.current) {
+          baselineViewportHeightRef.current = currentH;
+        }
+        const kbOpen = baselineViewportHeightRef.current - currentH >= 100;
+        const ta = textareaRef.current;
+        if (kbOpen && !wasKeyboardOpenRef.current && ta && document.activeElement === ta) {
+          scheduleCenterCursorAboveKeyboard(ta);
+        }
+        wasKeyboardOpenRef.current = kbOpen;
+      };
+
+      const vv = window.visualViewport;
+      vv?.addEventListener('resize', handleViewportResize);
+      window.addEventListener('resize', handleViewportResize);
+      return () => {
+        vv?.removeEventListener('resize', handleViewportResize);
+        window.removeEventListener('resize', handleViewportResize);
+        if (keyboardCenterTimerRef.current !== null) {
+          window.clearTimeout(keyboardCenterTimerRef.current);
+          keyboardCenterTimerRef.current = null;
+        }
+      };
+    }, [isEditing, fontSize]);
+
+    // Persist reading progress immediately when app is backgrounded or closed
+    useEffect(() => {
+      const persistNow = () => {
+        if (debounceScrollRef.current) {
+          window.clearTimeout(debounceScrollRef.current);
+          debounceScrollRef.current = null;
+        }
+        emitCurrentViewState();
+      };
+      const onVisChange = () => {
+        if (document.visibilityState === 'hidden') {
+          persistNow();
+        }
+      };
+      document.addEventListener('visibilitychange', onVisChange);
+      window.addEventListener('pagehide', persistNow);
+      return () => {
+        document.removeEventListener('visibilitychange', onVisChange);
+        window.removeEventListener('pagehide', persistNow);
+      };
+    }, []);
+
+    // Sync Android native Copy/Paste ActionMode suppression with dictionary popup visibility
+    useEffect(() => {
+      const shouldSuppress = !isEditing && isMdictPopupOpen;
+      void setNativeSuppressSelectionMenu(shouldSuppress);
+      return () => {
+        void setNativeSuppressSelectionMenu(false);
+      };
+    }, [isEditing, isMdictPopupOpen]);
 
     const flushDraftNow = () => {
       if (debounceSaveRef.current) {
@@ -508,59 +1037,69 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         if (debounceSaveRef.current) window.clearTimeout(debounceSaveRef.current);
         if (debounceScrollRef.current) window.clearTimeout(debounceScrollRef.current);
         if (clipRafRef.current !== null) window.cancelAnimationFrame(clipRafRef.current);
+        if (keyboardCenterTimerRef.current !== null) {
+          window.clearTimeout(keyboardCenterTimerRef.current);
+        }
       };
     }, []);
 
     useImperativeHandle(ref, () => ({
+      captureTypographyAnchor() {
+        const now = Date.now();
+        if (pendingTypographyAnchorRef.current && now <= typographyLockUntilRef.current) {
+          typographyLockUntilRef.current = now + 2500;
+          return;
+        }
+        const activeEl = isEditingRef.current ? textareaRef.current : scrollRef.current;
+        if (!activeEl) return;
+
+        if (activeEl.scrollTop <= 10 || (!isEditingRef.current && !articleOverflow)) {
+          pendingTypographyAnchorRef.current = { kind: 'top' };
+          typographyLockUntilRef.current = now + 2500;
+          return;
+        }
+
+        const charOffset = captureCurrentCharOffset();
+        pendingTypographyAnchorRef.current = {
+          kind: isEditingRef.current ? 'edit' : 'read',
+          charOffset,
+        };
+        typographyLockUntilRef.current = now + 2500;
+      },
       prepareModeSwitch(nextEditing: boolean) {
-        const activeScrollEl = isEditing ? textareaRef.current : scrollRef.current;
+        if (debounceScrollRef.current) {
+          window.clearTimeout(debounceScrollRef.current);
+          debounceScrollRef.current = null;
+        }
+        clearTypographyLock();
+
+        const activeScrollEl = isEditingRef.current ? textareaRef.current : scrollRef.current;
         if (!activeScrollEl) return;
 
-        if (activeScrollEl.scrollTop <= 10) {
-          flushDraftNow();
+        if (activeScrollEl.scrollTop <= 10 || (!isEditingRef.current && !articleOverflow)) {
+          if (isEditingRef.current) flushDraftNow();
           pendingAnchorRef.current = { kind: 'top' };
           return;
         }
 
-        const maxScroll = Math.max(1, activeScrollEl.scrollHeight - activeScrollEl.clientHeight);
-        const fallbackRatio = Math.min(1, Math.max(0, activeScrollEl.scrollTop / maxScroll));
-
-        if (nextEditing) {
-          // Capturing from Read mode -> target Edit mode
-          const articleEl = articleRef.current;
-          let snippet = '';
-          if (articleEl) {
-            const lines = collectVisualLines(activeScrollEl, articleEl);
-            const firstVisible = lines.find((line) => line.bottom > activeScrollEl.scrollTop + 4);
-            if (firstVisible) {
-              snippet = firstVisible.text;
-            }
-          }
-          const charIndex = findCharIndexForSnippet(contentRef.current, snippet, fallbackRatio);
-          pendingAnchorRef.current = { kind: 'to-edit', charIndex, fallbackRatio };
-        } else {
-          // Capturing from Edit mode -> target Read mode
+        const charOffset = captureCurrentCharOffset();
+        if (isEditingRef.current) {
           flushDraftNow();
-          const ta = textareaRef.current;
-          let snippet = '';
-          let charRatio = fallbackRatio;
-          if (ta) {
-            const offsetInsideTa = Math.max(0, ta.scrollTop);
-            const charIdx = findCharOffsetAtY(ta, contentRef.current, offsetInsideTa);
-            charRatio = charIdx / Math.max(1, contentRef.current.length);
-            const rest = contentRef.current.slice(charIdx);
-            const firstLine = rest.split('\n').find((l) => l.trim().length > 0) || '';
-            snippet = firstLine.trim();
-          }
-          pendingAnchorRef.current = { kind: 'to-read', snippet, fallbackRatio: charRatio };
         }
+        pendingAnchorRef.current = {
+          kind: nextEditing ? 'to-edit' : 'to-read',
+          charOffset,
+        };
       },
       flushAndCaptureViewState() {
         flushDraftNow();
-        const activeEl = isEditing ? textareaRef.current : scrollRef.current;
+        const mode: 'read' | 'edit' = isEditingRef.current ? 'edit' : 'read';
+        const activeEl = mode === 'edit' ? textareaRef.current : scrollRef.current;
         return {
-          mode: isEditing ? 'edit' : 'read',
+          mode,
           scrollTop: activeEl?.scrollTop ?? 0,
+          charOffset: captureCurrentCharOffset(),
+          readProgress: computeReadProgress(),
         };
       },
       applyMarkdownFormat(kind: EditFormatKind) {
@@ -572,70 +1111,56 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         const selStart = ta.selectionStart ?? current.length;
         const selEnd = ta.selectionEnd ?? selStart;
 
-        let nextContent = current;
+        const blockStart = current.lastIndexOf('\n', Math.max(0, selStart - 1)) + 1;
+        const blockEndRaw = current.indexOf('\n', selEnd);
+        const blockEnd = blockEndRaw === -1 ? current.length : blockEndRaw;
+        const selectedBlock = current.slice(blockStart, blockEnd);
+        const lines = selectedBlock.split('\n');
+
+        const targetPrefix = kind === 'h1' ? '# ' : kind === 'h2' ? '## ' : '- ';
+
+        const transformed = lines.map((line) => {
+          const stripMatch = line.match(/^(\s*)(#{1,6}\s+|[-*+]\s+|\d+\.\s+)/);
+          const indent = stripMatch ? stripMatch[1] : '';
+          const existingPrefix = stripMatch ? stripMatch[2] : '';
+          const body = stripMatch ? line.slice(stripMatch[0].length) : line;
+
+          if (kind === 'h1' && existingPrefix === '# ') {
+            return indent + body;
+          }
+          if (kind === 'h2' && existingPrefix === '## ') {
+            return indent + body;
+          }
+          if (kind === 'ul' && /^[-*+]\s+$/.test(existingPrefix)) {
+            return indent + body;
+          }
+          return `${indent}${targetPrefix}${body}`;
+        });
+
+        const replacedBlock = transformed.join('\n');
+        const nextContent = current.slice(0, blockStart) + replacedBlock + current.slice(blockEnd);
+
         let nextSelStart = selStart;
         let nextSelEnd = selEnd;
-
-        if (kind === 'hr') {
-          const lineStart = current.lastIndexOf('\n', Math.max(0, selStart - 1)) + 1;
-          const lineEndRaw = current.indexOf('\n', selEnd);
-          const lineEnd = lineEndRaw === -1 ? current.length : lineEndRaw;
-          const currentLine = current.slice(lineStart, lineEnd);
-
-          if (currentLine.trim().length === 0) {
-            const insert = '---\n';
-            nextContent = current.slice(0, lineStart) + insert + current.slice(lineEnd);
-            nextSelStart = lineStart + insert.length;
-            nextSelEnd = nextSelStart;
-          } else {
-            const needsLeadingNewline = selStart > 0 && current[selStart - 1] !== '\n';
-            const insert = `${needsLeadingNewline ? '\n' : ''}---\n`;
-            nextContent = current.slice(0, selStart) + insert + current.slice(selEnd);
-            nextSelStart = selStart + insert.length;
-            nextSelEnd = nextSelStart;
-          }
+        if (selStart === selEnd) {
+          const delta = replacedBlock.length - selectedBlock.length;
+          nextSelStart = Math.max(blockStart, selStart + delta);
+          nextSelEnd = nextSelStart;
         } else {
-          const blockStart = current.lastIndexOf('\n', Math.max(0, selStart - 1)) + 1;
-          const blockEndRaw = current.indexOf('\n', selEnd);
-          const blockEnd = blockEndRaw === -1 ? current.length : blockEndRaw;
-          const selectedBlock = current.slice(blockStart, blockEnd);
-          const lines = selectedBlock.split('\n');
+          nextSelStart = blockStart;
+          nextSelEnd = blockStart + replacedBlock.length;
+        }
 
-          const targetPrefix = kind === 'h1' ? '# ' : kind === 'h2' ? '## ' : '- ';
-
-          const transformed = lines.map((line) => {
-            const stripMatch = line.match(/^(\s*)(#{1,6}\s+|[-*+]\s+|\d+\.\s+)/);
-            const indent = stripMatch ? stripMatch[1] : '';
-            const existingPrefix = stripMatch ? stripMatch[2] : '';
-            const body = stripMatch ? line.slice(stripMatch[0].length) : line;
-
-            if (kind === 'h1' && existingPrefix === '# ') {
-              return indent + body;
-            }
-            if (kind === 'h2' && existingPrefix === '## ') {
-              return indent + body;
-            }
-            if (kind === 'ul' && /^[-*+]\s+$/.test(existingPrefix)) {
-              return indent + body;
-            }
-            return `${indent}${targetPrefix}${body}`;
-          });
-
-          const replacedBlock = transformed.join('\n');
-          nextContent = current.slice(0, blockStart) + replacedBlock + current.slice(blockEnd);
-
-          if (selStart === selEnd) {
-            const delta = replacedBlock.length - selectedBlock.length;
-            nextSelStart = Math.max(blockStart, selStart + delta);
-            nextSelEnd = nextSelStart;
-          } else {
-            nextSelStart = blockStart;
-            nextSelEnd = blockStart + replacedBlock.length;
-          }
+        // Anchor pre-format selection on current history entry before recording the formatted step
+        const curEntry = historyRef.current[historyIndexRef.current];
+        if (curEntry && curEntry.content === current) {
+          curEntry.selStart = selStart;
+          curEntry.selEnd = selEnd;
         }
 
         contentRef.current = nextContent;
         setContent(nextContent);
+        recordEditHistory(nextContent, nextSelStart, nextSelEnd, false, 'other');
         scheduleSave(titleRef.current, nextContent);
 
         requestAnimationFrame(() => {
@@ -649,6 +1174,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           }
           el.scrollTop = prevScrollTop;
         });
+      },
+      undo() {
+        performUndo();
+      },
+      redo() {
+        performRedo();
       },
     }));
 
@@ -668,15 +1199,18 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const el = isEditing ? textareaRef.current : scrollRef.current;
       if (!el) return;
       if (!isEditing) {
-        scheduleBottomClipUpdate();
+        scheduleEdgeClipUpdate();
+      }
+      if (
+        performance.now() - lastProgrammaticScrollAtRef.current < 140 ||
+        (pendingTypographyAnchorRef.current && Date.now() <= typographyLockUntilRef.current)
+      ) {
+        return;
       }
       if (debounceScrollRef.current) window.clearTimeout(debounceScrollRef.current);
       debounceScrollRef.current = window.setTimeout(() => {
-        onViewStateChange({
-          mode: isEditing ? 'edit' : 'read',
-          scrollTop: el.scrollTop,
-        });
-      }, 220);
+        emitCurrentViewState();
+      }, 180);
     };
 
     const evaluateSelectionForMdict = () => {
@@ -684,6 +1218,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const articleEl = articleRef.current;
       const sel = window.getSelection();
       if (!articleEl || !sel || sel.isCollapsed || sel.rangeCount === 0) {
+        if (isMdictPopupOpenRef.current) {
+          onClearMdictLookupRef.current?.();
+        }
         return;
       }
 
@@ -735,9 +1272,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return;
         }
 
-        if (!isPointerActiveRef.current) {
-          scheduleMdictSelectionCheck(220);
-        }
+        // Evaluate promptly whether dragging native selection handles or releasing pointer
+        scheduleMdictSelectionCheck(isPointerActiveRef.current ? 140 : 90);
       };
 
       document.addEventListener('selectionchange', handleSelectionChange);
@@ -784,12 +1320,144 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const handleReadPointerEnd = () => {
       isPointerActiveRef.current = false;
       if (!isEditingRef.current && hasActiveMdictRef.current) {
-        scheduleMdictSelectionCheck(80);
+        scheduleMdictSelectionCheck(60);
       }
     };
 
-    // Exact visual-line-accurate 3-zone tap interaction in Read mode:
-    // Left 1/3 => Page Up, Middle 1/3 => Document Structure Outline, Right 1/3 => Page Down
+    const performPageUp = () => {
+      if (isEditingRef.current) return;
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl) return;
+
+      const viewHeight = el.clientHeight;
+      const currentTop = el.scrollTop;
+      if (currentTop <= 0 || viewHeight <= 0) return;
+
+      const currentBottom = currentTop + viewHeight;
+      const effectiveTop = currentTop + topClipPxRef.current;
+      const lines = collectVisualLines(el, articleEl);
+      const EPS = 0.5;
+
+      // Include any top-masked partial line on the next Page Up so no text is ever skipped
+      const firstCompleteIdx = lines.findIndex(
+        (line) => line.top >= effectiveTop - EPS && line.bottom <= currentBottom + EPS
+      );
+
+      let targetScrollTop = Math.max(0, currentTop - viewHeight);
+
+      if (firstCompleteIdx > 0) {
+        const firstComplete = lines[firstCompleteIdx];
+        const prevLine = lines[firstCompleteIdx - 1];
+        const maxAllowedBottom = Math.floor(firstComplete.top);
+        const minNeededBottom = Math.ceil(prevLine.bottom);
+        const desiredBottom =
+          minNeededBottom <= maxAllowedBottom
+            ? Math.min(maxAllowedBottom, minNeededBottom + 2)
+            : maxAllowedBottom;
+        targetScrollTop = Math.max(0, desiredBottom - viewHeight);
+      } else if (firstCompleteIdx === 0) {
+        targetScrollTop = 0;
+      }
+
+      if (targetScrollTop >= currentTop) {
+        targetScrollTop = Math.max(0, currentTop - viewHeight);
+      }
+
+      clearTypographyLock();
+      lastProgrammaticScrollAtRef.current = performance.now();
+      el.scrollTop = targetScrollTop;
+      updateEdgeClips();
+      emitCurrentViewState();
+    };
+
+    const performPageDown = () => {
+      if (isEditingRef.current) return;
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl) return;
+
+      const viewHeight = el.clientHeight;
+      const maxScroll = Math.max(0, el.scrollHeight - viewHeight);
+      const currentTop = el.scrollTop;
+      if (currentTop >= maxScroll || viewHeight <= 0) return;
+
+      const effectiveBottom = currentTop + viewHeight - bottomClipPxRef.current;
+      const lines = collectVisualLines(el, articleEl);
+      const EPS = 0.5;
+
+      const firstIncompleteIdx = lines.findIndex((line) => line.bottom > effectiveBottom + EPS);
+      if (firstIncompleteIdx === -1) return;
+
+      const firstIncomplete = lines[firstIncompleteIdx];
+      const prevComplete = firstIncompleteIdx > 0 ? lines[firstIncompleteIdx - 1] : null;
+      const minSafeTop = prevComplete ? Math.ceil(prevComplete.bottom) : 0;
+      const desiredTop = Math.floor(firstIncomplete.top) - 4;
+      let targetScrollTop = Math.min(maxScroll, Math.max(minSafeTop, desiredTop));
+
+      if (targetScrollTop <= currentTop) {
+        targetScrollTop = Math.min(maxScroll, currentTop + viewHeight);
+      }
+
+      clearTypographyLock();
+      lastProgrammaticScrollAtRef.current = performance.now();
+      el.scrollTop = targetScrollTop;
+      updateEdgeClips();
+      emitCurrentViewState();
+    };
+
+    const performPageUpRef = useRef(performPageUp);
+    performPageUpRef.current = performPageUp;
+    const performPageDownRef = useRef(performPageDown);
+    performPageDownRef.current = performPageDown;
+
+    // Hardware volume keys (Android native + Web/E-ink keydown) turn pages in Browse mode
+    useEffect(() => {
+      if (isEditing || showOutline) {
+        void setNativeVolumeKeyIntercept(false);
+        return;
+      }
+
+      void setNativeVolumeKeyIntercept(true);
+      const unsubscribeNative = subscribeNativeVolumeKeys((direction) => {
+        if (document.querySelector('[role="dialog"]')) return;
+        if (isMdictPopupOpenRef.current) {
+          onClearMdictLookupRef.current?.();
+        }
+        if (direction === 'up') {
+          performPageUpRef.current();
+        } else {
+          performPageDownRef.current();
+        }
+      });
+
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (document.querySelector('[role="dialog"]')) return;
+        const activeTag = (document.activeElement as HTMLElement | null)?.tagName;
+        if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
+
+        if (e.key === 'AudioVolumeUp' || e.key === 'VolumeUp' || e.key === 'PageUp') {
+          e.preventDefault();
+          if (isMdictPopupOpenRef.current) onClearMdictLookupRef.current?.();
+          performPageUpRef.current();
+        } else if (e.key === 'AudioVolumeDown' || e.key === 'VolumeDown' || e.key === 'PageDown') {
+          e.preventDefault();
+          if (isMdictPopupOpenRef.current) onClearMdictLookupRef.current?.();
+          performPageDownRef.current();
+        }
+      };
+
+      window.addEventListener('keydown', handleKeyDown);
+      return () => {
+        window.removeEventListener('keydown', handleKeyDown);
+        unsubscribeNative();
+        void setNativeVolumeKeyIntercept(false);
+      };
+    }, [isEditing, showOutline]);
+
+    // 5-zone tap interaction in Read mode:
+    // Top half: Left 1/3 => Page Up, Middle 1/3 => Outline TOC, Right 1/3 => Page Down
+    // Bottom half: Left 1/3 => Page Up, Right 2/3 => Page Down
     const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
       const hadSelectionOnDown = hadSelectionOnDownRef.current;
       hadSelectionOnDownRef.current = false;
@@ -812,74 +1480,28 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (!el || !articleEl) return;
 
       const rect = el.getBoundingClientRect();
-      if (rect.width <= 0) return;
+      if (rect.width <= 0 || rect.height <= 0) return;
 
-      const ratio = (e.clientX - rect.left) / rect.width;
+      const xRatio = (e.clientX - rect.left) / rect.width;
+      const yRatio = (e.clientY - rect.top) / rect.height;
 
-      // Middle 1/3: Open Document Title Structure Outline
-      if (ratio >= 1 / 3 && ratio <= 2 / 3) {
-        if (blocks.length > 0) {
-          setShowOutline(true);
+      if (yRatio < 0.5) {
+        if (xRatio < 1 / 3) {
+          performPageUp();
+        } else if (xRatio <= 2 / 3) {
+          if (blocks.length > 0) {
+            setShowOutline(true);
+          }
+        } else {
+          performPageDown();
         }
         return;
       }
 
-      const viewHeight = el.clientHeight;
-      const maxScroll = Math.max(0, el.scrollHeight - viewHeight);
-      const currentTop = el.scrollTop;
-      const currentBottom = currentTop + viewHeight;
-      const lines = collectVisualLines(el, articleEl);
-      const EPS = 0.5;
-
-      if (ratio < 1 / 3) {
-        if (currentTop <= 0) return;
-
-        const firstCompleteIdx = lines.findIndex(
-          (line) => line.top >= currentTop - EPS && line.bottom <= currentBottom + EPS
-        );
-
-        let targetScrollTop = Math.max(0, currentTop - viewHeight);
-
-        if (firstCompleteIdx > 0) {
-          const firstComplete = lines[firstCompleteIdx];
-          const prevLine = lines[firstCompleteIdx - 1];
-          const maxAllowedBottom = Math.floor(firstComplete.top);
-          const minNeededBottom = Math.ceil(prevLine.bottom);
-          const desiredBottom =
-            minNeededBottom <= maxAllowedBottom
-              ? Math.min(maxAllowedBottom, minNeededBottom + 2)
-              : maxAllowedBottom;
-          targetScrollTop = Math.max(0, desiredBottom - viewHeight);
-        } else if (firstCompleteIdx === 0) {
-          targetScrollTop = 0;
-        }
-
-        if (targetScrollTop >= currentTop) {
-          targetScrollTop = Math.max(0, currentTop - viewHeight);
-        }
-
-        el.scrollTop = targetScrollTop;
-        updateBottomClip();
-        onViewStateChange({ mode: 'read', scrollTop: targetScrollTop });
+      if (xRatio < 1 / 3) {
+        performPageUp();
       } else {
-        if (currentTop >= maxScroll) return;
-
-        const firstIncompleteIdx = lines.findIndex((line) => line.bottom > currentBottom + EPS);
-        if (firstIncompleteIdx === -1) return;
-
-        const firstIncomplete = lines[firstIncompleteIdx];
-        const prevComplete = firstIncompleteIdx > 0 ? lines[firstIncompleteIdx - 1] : null;
-        const minSafeTop = prevComplete ? Math.ceil(prevComplete.bottom) : 0;
-        const desiredTop = Math.floor(firstIncomplete.top) - 4;
-        let targetScrollTop = Math.min(maxScroll, Math.max(minSafeTop, desiredTop));
-
-        if (targetScrollTop <= currentTop) {
-          targetScrollTop = Math.min(maxScroll, currentTop + viewHeight);
-        }
-
-        el.scrollTop = targetScrollTop;
-        updateBottomClip();
-        onViewStateChange({ mode: 'read', scrollTop: targetScrollTop });
+        performPageDown();
       }
     };
 
@@ -890,43 +1512,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           : parseDocumentBlocks(content),
       [content, isEditing]
     );
-
-    const fallbackAnchors = useMemo<FallbackJumpAnchor[]>(() => {
-      if (isEditing || toc.length > 0 || blocks.length === 0) return [];
-      const previews: Array<{ blockIndex: number; preview: string }> = [];
-      blocks.forEach((b, idx) => {
-        let raw = '';
-        if (b.type === 'paragraph' || b.type === 'blockquote' || b.type === 'heading') {
-          raw = b.text;
-        } else if (b.type === 'list') {
-          raw = b.items[0] || '';
-        } else if (b.type === 'code') {
-          raw = b.code.split('\n')[0] || '[代码块]';
-        } else if (b.type === 'table') {
-          raw = b.headers.join(' · ');
-        }
-        const cleaned = raw.replace(/\s+/g, ' ').trim();
-        if (cleaned) {
-          previews.push({
-            blockIndex: idx,
-            preview: cleaned.length > 36 ? `${cleaned.slice(0, 36)}…` : cleaned,
-          });
-        }
-      });
-      if (previews.length === 0) return [];
-      const ratios = [0, 0.25, 0.5, 0.75, 1];
-      const seen = new Set<number>();
-      const anchors: FallbackJumpAnchor[] = [];
-      for (const r of ratios) {
-        const pick = Math.round(r * (previews.length - 1));
-        const item = previews[pick];
-        if (!item || seen.has(item.blockIndex)) continue;
-        seen.add(item.blockIndex);
-        const label = r === 0 ? '开头' : r === 1 ? '末尾' : `${Math.round(r * 100)}%`;
-        anchors.push({ label, preview: item.preview, blockIndex: item.blockIndex });
-      }
-      return anchors;
-    }, [isEditing, toc.length, blocks]);
 
     const getActiveTocId = (): string | null => {
       if (toc.length === 0) return null;
@@ -949,25 +1534,21 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const jumpToElement = (el: HTMLElement | null) => {
       const scrollEl = scrollRef.current;
       if (!scrollEl || !el) return;
+      clearTypographyLock();
       const containerRect = scrollEl.getBoundingClientRect();
       const elRect = el.getBoundingClientRect();
       const maxScroll = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
-      const rawTop = elRect.top - containerRect.top + scrollEl.scrollTop - 12;
+      const rawTop = elRect.top - containerRect.top + scrollEl.scrollTop - 4;
       const targetScrollTop = Math.min(maxScroll, Math.max(0, Math.round(rawTop)));
+      lastProgrammaticScrollAtRef.current = performance.now();
       scrollEl.scrollTop = targetScrollTop;
-      updateBottomClip();
-      onViewStateChange({ mode: 'read', scrollTop: targetScrollTop });
+      updateEdgeClips();
+      emitCurrentViewState();
       setShowOutline(false);
     };
 
     const handleJumpToHeading = (tocId: string) => {
       const el = articleRef.current?.querySelector<HTMLElement>(`[data-toc-id="${tocId}"]`) ?? null;
-      jumpToElement(el);
-    };
-
-    const handleJumpToBlock = (blockIndex: number) => {
-      const el =
-        articleRef.current?.querySelector<HTMLElement>(`[data-block-idx="${blockIndex}"]`) ?? null;
       jumpToElement(el);
     };
 
@@ -995,7 +1576,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <code
               key={idx}
-              className="font-code text-[0.88em] px-1.5 py-0.5 rounded bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)]"
+              className="font-code text-[0.88em] px-1.5 py-0.5 rounded bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent text-[var(--fei-text-primary)]"
             >
               {token.value}
             </code>
@@ -1016,6 +1597,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     const renderBlock = (block: BlockNode, idx: number) => {
+      const offsetAttrs = {
+        'data-block-idx': idx,
+        'data-start-offset': block.startOffset,
+        'data-end-offset': block.endOffset,
+      };
+
       switch (block.type) {
         case 'heading': {
           if (block.level === 1) {
@@ -1023,7 +1610,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               <h1
                 key={idx}
                 data-toc-id={block.id}
-                data-block-idx={idx}
+                {...offsetAttrs}
                 className="text-[1.15em] font-semibold leading-snug mt-5 mb-2 first:mt-0 text-[var(--fei-text-primary)] text-balance"
               >
                 {block.text}
@@ -1035,7 +1622,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               <h2
                 key={idx}
                 data-toc-id={block.id}
-                data-block-idx={idx}
+                {...offsetAttrs}
                 className="text-[1.03em] font-semibold leading-snug mt-4 mb-1.5 first:mt-0 text-[var(--fei-text-primary)]"
               >
                 {block.text}
@@ -1046,8 +1633,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             <h3
               key={idx}
               data-toc-id={block.id}
-              data-block-idx={idx}
-              className="text-[1.03em] font-semibold leading-snug mt-4 mb-1.5 text-[var(--fei-text-primary)]"
+              {...offsetAttrs}
+              className="text-[1.03em] font-semibold leading-snug mt-4 mb-1.5 first:mt-0 text-[var(--fei-text-primary)]"
             >
               {block.text}
             </h3>
@@ -1055,7 +1642,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
         case 'paragraph':
           return (
-            <p key={idx} data-block-idx={idx} className="my-3 whitespace-pre-line">
+            <p key={idx} {...offsetAttrs} className="my-3 first:mt-0 whitespace-pre-line">
               {renderInline(block.text)}
             </p>
           );
@@ -1063,8 +1650,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <blockquote
               key={idx}
-              data-block-idx={idx}
-              className="my-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)] text-[0.94em]"
+              {...offsetAttrs}
+              className="my-4 first:mt-0 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent text-[var(--fei-text-primary)] text-[0.94em]"
             >
               <span className="whitespace-pre-line">{renderInline(block.text)}</span>
             </blockquote>
@@ -1073,8 +1660,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <pre
               key={idx}
-              data-block-idx={idx}
-              className="my-4 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] overflow-x-auto text-[0.8125em] leading-relaxed font-code text-[var(--fei-text-primary)]"
+              {...offsetAttrs}
+              className="my-4 first:mt-0 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent overflow-x-auto text-[0.8125em] leading-relaxed font-code text-[var(--fei-text-primary)]"
             >
               <code>{block.code}</code>
             </pre>
@@ -1084,8 +1671,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             return (
               <ol
                 key={idx}
-                data-block-idx={idx}
-                className="my-3 pl-5 list-decimal space-y-1.5 marker:text-[var(--fei-text-muted)]"
+                {...offsetAttrs}
+                className="my-3 first:mt-0 pl-5 list-decimal space-y-1.5 marker:text-[var(--fei-text-muted)]"
               >
                 {block.items.map((item, i) => (
                   <li key={i}>{renderInline(item)}</li>
@@ -1096,8 +1683,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <ul
               key={idx}
-              data-block-idx={idx}
-              className="my-3 pl-5 list-disc space-y-1.5 marker:text-[var(--fei-text-muted)]"
+              {...offsetAttrs}
+              className="my-3 first:mt-0 pl-5 list-disc space-y-1.5 marker:text-[var(--fei-text-muted)]"
             >
               {block.items.map((item, i) => (
                 <li key={i}>{renderInline(item)}</li>
@@ -1108,8 +1695,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <div
               key={idx}
-              data-block-idx={idx}
-              className="my-4 max-w-full w-full overflow-x-auto rounded-lg border border-[var(--fei-border)]"
+              {...offsetAttrs}
+              className="my-4 first:mt-0 max-w-full w-full overflow-x-auto rounded-lg border border-[var(--fei-border)]"
             >
               <table className="w-full border-collapse text-[0.9em] leading-relaxed text-[var(--fei-text-primary)]">
                 <thead>
@@ -1166,8 +1753,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return (
             <hr
               key={idx}
-              data-block-idx={idx}
-              className="my-6 border-t border-[var(--fei-border)]"
+              {...offsetAttrs}
+              className="my-6 first:mt-0 border-t border-[var(--fei-border)]"
             />
           );
       }
@@ -1191,11 +1778,59 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           <textarea
             ref={textareaRef}
             value={content}
+            onFocus={(e) => {
+              const currentH = window.visualViewport?.height ?? window.innerHeight;
+              if (baselineViewportHeightRef.current - currentH >= 100) {
+                wasKeyboardOpenRef.current = true;
+                scheduleCenterCursorAboveKeyboard(e.currentTarget);
+              }
+            }}
             onScroll={handleScroll}
+            onWheel={clearTypographyLock}
+            onTouchMove={clearTypographyLock}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+                const key = e.key.toLowerCase();
+                if (key === 'z') {
+                  e.preventDefault();
+                  if (e.shiftKey) {
+                    performRedo();
+                  } else {
+                    performUndo();
+                  }
+                } else if (key === 'y' && !e.shiftKey) {
+                  e.preventDefault();
+                  performRedo();
+                }
+              }
+            }}
             onChange={(e) => {
+              clearTypographyLock();
+              const prevVal = contentRef.current;
               const nextVal = e.target.value;
+              const selStart = e.target.selectionStart ?? nextVal.length;
+              const selEnd = e.target.selectionEnd ?? selStart;
+              const delta = nextVal.length - prevVal.length;
+
+              let editKind: 'typing' | 'delete' | 'other' = 'other';
+              let coalesce = false;
+              if (delta === 1) {
+                const inserted = nextVal.slice(Math.max(0, selStart - 1), selStart);
+                if (inserted && inserted !== '\n' && inserted !== '\r') {
+                  editKind = 'typing';
+                  coalesce = true;
+                }
+              } else if (delta === -1) {
+                const removed = prevVal.slice(selStart, selStart + 1);
+                if (removed && removed !== '\n' && removed !== '\r') {
+                  editKind = 'delete';
+                  coalesce = true;
+                }
+              }
+
               contentRef.current = nextVal;
               setContent(nextVal);
+              recordEditHistory(nextVal, selStart, selEnd, coalesce, editKind);
               scheduleSave(titleRef.current, nextVal);
             }}
             placeholder="开始输入正文…"
@@ -1203,7 +1838,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               fontSize: `${fontSize}px`,
               fontFamily: docFontFamily || 'var(--font-doc-body)',
             }}
-            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none pt-1 pb-[40vh] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent font-doc-body leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none"
+            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none pt-1 pb-[calc(100vh-110px)] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent font-doc-body leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words [overflow-wrap:anywhere] outline-none resize-none"
           />
         ) : (
           <div className="relative flex-1 min-h-0 w-full flex flex-col">
@@ -1211,6 +1846,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               ref={scrollRef}
               onPointerDownCapture={handleReadPointerDownCapture}
               onTouchStartCapture={handleReadTouchStartCapture}
+              onTouchMove={clearTypographyLock}
+              onWheel={clearTypographyLock}
               onPointerUp={handleReadPointerEnd}
               onTouchEnd={handleReadPointerEnd}
               onPointerCancel={() => {
@@ -1219,13 +1856,20 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               onTouchCancel={() => {
                 isPointerActiveRef.current = false;
               }}
+              onContextMenu={(e) => {
+                if (isMdictPopupOpenRef.current) {
+                  e.preventDefault();
+                }
+              }}
               onClick={handleContainerClick}
               onScroll={handleScroll}
-              className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none"
+              className={`flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none ${
+                isMdictPopupOpen ? '[-webkit-touch-callout:none]' : ''
+              }`}
             >
               <div
-                className={`max-w-[720px] w-full min-w-0 mx-auto px-5 sm:px-8 min-h-full flex flex-col ${
-                  articleOverflow ? 'pt-1 pb-[calc(100vh-110px)]' : 'py-6 justify-center'
+                className={`max-w-[720px] w-full min-w-0 mx-auto px-5 sm:px-8 min-h-full flex flex-col pt-1 ${
+                  articleOverflow ? 'pb-[calc(100vh-110px)]' : 'pb-12'
                 }`}
               >
                 <article ref={articleRef} className="w-full min-w-0 font-doc-body">
@@ -1257,7 +1901,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                     >
                       {blocks.length === 0 ? (
                         <p className="text-[var(--fei-text-muted)]">
-                          暂无内容，点击右下角编辑图标开始写作。
+                          暂无内容，点击左下角浏览图标切换至编辑开始写作。
                         </p>
                       ) : (
                         blocks.map((b, i) => renderBlock(b, i))
@@ -1267,6 +1911,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                 </article>
               </div>
             </div>
+
+            {topClipPx > 0 && (
+              <div
+                aria-hidden="true"
+                style={{ height: `${topClipPx}px` }}
+                className="pointer-events-none absolute left-0 right-1.5 top-0 bg-[var(--fei-bg)] z-10"
+              />
+            )}
 
             {bottomClipPx > 0 && (
               <div
@@ -1281,10 +1933,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         {!isEditing && showOutline && (
           <DocOutlineModal
             toc={toc}
-            fallbackAnchors={fallbackAnchors}
             activeTocId={getActiveTocId()}
             onJumpToHeading={handleJumpToHeading}
-            onJumpToBlock={handleJumpToBlock}
             onClose={() => setShowOutline(false)}
           />
         )}

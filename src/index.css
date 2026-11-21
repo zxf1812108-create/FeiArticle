@@ -8,20 +8,21 @@
     --font-doc-body: system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Roboto", sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-    /* FeiNote Eye-Comfort Soft Paper Monochrome Ink & Surface Tokens (Light) */
+    /* E-Ink Pure White & Pure Black Light Palette (Zero Background Dithering) */
     color-scheme: light;
-    --fei-text-primary: #2E2D2A;
-    --fei-text-muted: #6E6B64;
-    --fei-bg: #F6F4EE;
-    --fei-bg-bar: #EFECE5;
-    --fei-bg-surface: #FAF8F4;
-    --fei-bg-subtle: #EDEAE1;
-    --fei-bg-hover: #EAE6DC;
-    --fei-bg-selected: #E3DFD4;
-    --fei-border: #E4E0D6;
-    --fei-border-strong: #D3CEC2;
-    --fei-btn-primary-bg: #2E2D2A;
-    --fei-btn-primary-text: #FAF8F4;
+    --fei-text-primary: #000000;
+    --fei-text-muted: #595959;
+    --fei-bg: #FFFFFF;
+    --fei-bg-bar: #FFFFFF;
+    --fei-bg-surface: #FFFFFF;
+    --fei-bg-subtle: #FFFFFF;
+    --fei-bg-hover: #FFFFFF;
+    --fei-bg-selected: #FFFFFF;
+    --fei-border: #C4C4C4;
+    --fei-border-strong: #4A4A4A;
+    --fei-modal-border: #262626;
+    --fei-btn-primary-bg: #000000;
+    --fei-btn-primary-text: #FFFFFF;
   }
 
   html.dark {
@@ -36,7 +37,8 @@
     --fei-bg-hover: #222222;
     --fei-bg-selected: #262626;
     --fei-border: #2A2A2A;
-    --fei-border-strong: #363636;
+    --fei-border-strong: #4A4A4A;
+    --fei-modal-border: #666666;
     --fei-btn-primary-bg: #C8C8C8;
     --fei-btn-primary-text: #1A1A1A;
   }

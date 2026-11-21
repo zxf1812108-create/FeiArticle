@@ -128,11 +128,11 @@ export const ImportModal: React.FC<ImportModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px] p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent dark:bg-black/45 p-4"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md max-h-[88vh] flex flex-col bg-[var(--fei-bg-surface)] border border-[var(--fei-border)] rounded-2xl shadow-2xl overflow-hidden text-[var(--fei-text-primary)]"
+        className="w-full max-w-md max-h-[88vh] flex flex-col bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-none dark:shadow-2xl overflow-hidden text-[var(--fei-text-primary)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-5 py-4 border-b border-[var(--fei-border)] flex items-center justify-between shrink-0">

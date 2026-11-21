@@ -7,6 +7,7 @@ import { stripDictExt } from '../utils/mdictStorage';
 interface MdictLookupPopupProps {
   queryWord: string;
   placement: 'top' | 'bottom';
+  fontSize?: number;
   loading: boolean;
   result: MdictLookupResult | null;
   matchCount: number;
@@ -40,12 +41,10 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
     doc.querySelectorAll(tag).forEach((el) => el.remove());
   }
 
-  // Strip external @import or unsafe expressions in inline <style> tags
   doc.querySelectorAll('style').forEach((styleEl) => {
     styleEl.textContent = sanitizeMdictCss(styleEl.textContent || '');
   });
 
-  // Remove unresolvable local/mdd images so broken image placeholders never appear
   doc.querySelectorAll('img').forEach((img) => {
     const src = (img.getAttribute('src') || '').trim();
     if (!src.startsWith('data:image/')) {
@@ -53,7 +52,6 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
     }
   });
 
-  // Remove inline event handlers and javascript: URLs
   doc.querySelectorAll('*').forEach((el) => {
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase();
@@ -87,8 +85,9 @@ function escapeHtmlText(text: string): string {
 const MdictShadowDefinition: React.FC<{
   htmlDefinitions: string[];
   dictCssText?: string;
+  fontSize: number;
   onLookupWord: (word: string) => void;
-}> = ({ htmlDefinitions, dictCssText, onLookupWord }) => {
+}> = ({ htmlDefinitions, dictCssText, fontSize, onLookupWord }) => {
   const hostRef = useRef<HTMLDivElement>(null);
   const shadowRef = useRef<ShadowRoot | null>(null);
   const onLookupWordRef = useRef(onLookupWord);
@@ -143,20 +142,23 @@ const MdictShadowDefinition: React.FC<{
     const baseStyle = `
       :host {
         display: block;
-        color: var(--fei-text-primary, #2E2D2A);
+        color: var(--fei-text-primary, #000000);
         font-family: var(--font-doc-body, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif);
-        font-size: 13.5px;
-        line-height: 1.55;
+        font-size: ${fontSize}px;
+        line-height: 1.58;
         word-break: break-word;
       }
       *, *::before, *::after {
         box-sizing: border-box;
         max-width: 100%;
       }
+      .mdx-surface, .mdx-entry {
+        font-size: ${fontSize}px;
+      }
       .mdx-entry + .mdx-entry {
         margin-top: 9px;
         padding-top: 9px;
-        border-top: 1px solid var(--fei-border-strong, #D3CEC2);
+        border-top: 1px solid var(--fei-border, #C4C4C4);
       }
       p { margin: 0.25em 0; }
       ul, ol { margin: 0.3em 0; padding-left: 1.3em; }
@@ -175,7 +177,13 @@ const MdictShadowDefinition: React.FC<{
       img { max-width: 100%; height: auto; }
     `;
 
-    // Dark-mode contrast inversion aligned to #262626; Light-mode multiply blends #fff CSS boxes onto #ECE9E0 paper
+    // Enforce consistent document font size over fixed-px dictionary stylesheets & adapt dark contrast
+    const fontScaleOverride = `
+      .mdx-surface {
+        font-size: ${fontSize}px !important;
+      }
+    `;
+
     const themeAdaptStyle = hasCustomCss
       ? isDark
         ? `
@@ -192,7 +200,8 @@ const MdictShadowDefinition: React.FC<{
         `
         : `
           .mdx-surface {
-            mix-blend-mode: multiply;
+            background-color: #ffffff;
+            color: #000000;
           }
         `
       : '';
@@ -203,8 +212,8 @@ const MdictShadowDefinition: React.FC<{
 
     shadow.innerHTML = `<style>${baseStyle}</style>${
       hasCustomCss ? `<style>${escapeHtmlText(safeDictCss)}</style>` : ''
-    }${themeAdaptStyle ? `<style>${themeAdaptStyle}</style>` : ''}<div class="mdx-surface">${entriesHtml}</div>`;
-  }, [sanitizedEntries, safeDictCss, isDark]);
+    }<style>${fontScaleOverride}${themeAdaptStyle}</style><div class="mdx-surface">${entriesHtml}</div>`;
+  }, [sanitizedEntries, safeDictCss, isDark, fontSize]);
 
   return <div ref={hostRef} />;
 };
@@ -212,6 +221,7 @@ const MdictShadowDefinition: React.FC<{
 export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
   queryWord,
   placement,
+  fontSize = 16,
   loading,
   result,
   matchCount,
@@ -244,22 +254,22 @@ export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
       className={`fixed left-3 right-3 z-40 flex justify-center pointer-events-none ${
         placement === 'top'
           ? 'top-[max(0.75rem,env(safe-area-inset-top))] animate-mdict-down'
-          : 'bottom-[62px] animate-mdict-up'
+          : 'bottom-[64px] animate-mdict-up'
       }`}
     >
-      <div className="pointer-events-auto w-full max-w-[720px] max-h-[min(38vh,320px)] flex flex-col bg-[#ECE9E0]/95 dark:bg-[#262626]/95 backdrop-blur-md border border-[#CFC9BA] dark:border-[#3D3D3D] rounded-2xl shadow-[0_10px_30px_-6px_rgba(46,45,42,0.12),0_2px_8px_-2px_rgba(46,45,42,0.06)] dark:shadow-[0_12px_32px_-4px_rgba(0,0,0,0.55),0_2px_8px_-2px_rgba(0,0,0,0.35)] overflow-hidden text-[var(--fei-text-primary)]">
-        {/* Subtle handle pill when docked at bottom (facing reading text) */}
+      <div className="pointer-events-auto w-full max-w-[720px] max-h-[min(40vh,340px)] flex flex-col bg-[#FFFFFF] dark:bg-[#242424] border-[1.5px] border-[#262626] dark:border-[#787878] rounded-2xl shadow-none dark:ring-1 dark:ring-white/10 dark:shadow-[0_14px_36px_-4px_rgba(0,0,0,0.75)] overflow-hidden text-[var(--fei-text-primary)]">
+        {/* Subtle handle bar when docked at bottom */}
         {placement === 'bottom' && (
-          <div className="flex justify-center pt-1.5 pb-0.5 bg-[#E4E0D5]/95 dark:bg-[#2D2D2D]/95 shrink-0">
-            <span className="w-7 h-[3px] rounded-full bg-[#C4BEB0] dark:bg-[#4A4A4A]" />
+          <div className="flex justify-center pt-1.5 pb-0.5 bg-[#FFFFFF] dark:bg-[#2A2A2A] shrink-0">
+            <span className="w-7 h-[3px] rounded-full bg-[#B0B0B0] dark:bg-[#5E5E5E]" />
           </div>
         )}
 
-        {/* Distinct Header Band */}
-        <div className="px-3.5 py-2 bg-[#E4E0D5]/95 dark:bg-[#2D2D2D]/95 border-b border-[#D7D2C5] dark:border-[#3A3A3A] flex items-center justify-between gap-2 shrink-0">
+        {/* Header Band */}
+        <div className="px-3.5 py-2 bg-[#FFFFFF] dark:bg-[#2A2A2A] border-b border-[#BDBDBD] dark:border-[#4A4A4A] flex items-center justify-between gap-2 shrink-0">
           <div className="flex items-baseline gap-1.5 min-w-0">
             <BookA
-              className="w-3.5 h-3.5 text-[var(--fei-text-muted)] shrink-0 self-center"
+              className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0 self-center"
               strokeWidth={1.75}
             />
             <span className="font-doc-body text-[15px] font-semibold text-[var(--fei-text-primary)] truncate">
@@ -281,12 +291,12 @@ export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
                   onClick={onCycleDict}
                   title="点击切换下一个包含该词的词典"
                   aria-label={`当前词典 ${displayedDictName}，点击切换词典`}
-                  className="text-[11.5px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate max-w-[160px] hover:opacity-75 transition-opacity cursor-pointer"
+                  className="text-[12px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate max-w-[160px] hover:opacity-75 transition-opacity cursor-pointer"
                 >
                   {displayedDictName}
                 </button>
               ) : (
-                <span className="text-[11.5px] text-[var(--fei-text-muted)] truncate max-w-[160px]">
+                <span className="text-[12px] text-[var(--fei-text-muted)] truncate max-w-[160px]">
                   {displayedDictName}
                 </span>
               )
@@ -297,7 +307,7 @@ export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
               onMouseDown={(e) => e.preventDefault()}
               onClick={onClose}
               aria-label="关闭释义"
-              className="w-7 h-7 -mr-1 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+              className="w-7 h-7 -mr-1 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
             >
               <X className="w-4 h-4" />
             </button>
@@ -305,28 +315,29 @@ export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
         </div>
 
         {/* Scrollable Definition Body */}
-        <div className="flex-1 overflow-y-auto px-3.5 py-2.5">
+        <div className="flex-1 overflow-y-auto px-3.5 py-2.5 bg-[#FFFFFF] dark:bg-[#242424]">
           {loading ? (
-            <div className="py-4 text-[12.5px] text-[var(--fei-text-muted)]">正在查词…</div>
+            <div style={{ fontSize: `${fontSize}px` }} className="py-3 text-[var(--fei-text-muted)]">
+              正在查词…
+            </div>
           ) : error ? (
-            <div className="py-3 text-[12.5px] text-[var(--fei-text-muted)]">{error}</div>
+            <div style={{ fontSize: `${fontSize}px` }} className="py-3 text-[var(--fei-text-muted)]">
+              {error}
+            </div>
           ) : result && result.htmlDefinitions.length > 0 ? (
             <MdictShadowDefinition
               htmlDefinitions={result.htmlDefinitions}
               dictCssText={result.dictCssText}
+              fontSize={fontSize}
               onLookupWord={onLookupWord}
             />
-          ) : (
-            <div className="py-3 text-[12.5px] text-[var(--fei-text-muted)]">
-              已导入的词典中未收录「{queryWord}」。
-            </div>
-          )}
+          ) : null}
         </div>
 
-        {/* Subtle handle pill when docked at top (bottom edge faces reading text) */}
+        {/* Subtle handle bar when docked at top */}
         {placement === 'top' && (
-          <div className="flex justify-center pt-0.5 pb-1.5 shrink-0">
-            <span className="w-7 h-[3px] rounded-full bg-[#C4BEB0] dark:bg-[#4A4A4A]" />
+          <div className="flex justify-center pt-0.5 pb-1.5 bg-[#FFFFFF] dark:bg-[#242424] shrink-0">
+            <span className="w-7 h-[3px] rounded-full bg-[#B0B0B0] dark:bg-[#5E5E5E]" />
           </div>
         )}
       </div>

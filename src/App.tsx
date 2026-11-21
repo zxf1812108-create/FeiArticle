@@ -14,14 +14,17 @@ import {
   Minus,
   Pencil,
   Plus,
+  Redo2,
   RefreshCw,
   Scissors,
   Trash2,
+  Undo2,
 } from 'lucide-react';
 import { ImportModal } from './components/ImportModal';
 import { MdictDictModal } from './components/MdictDictModal';
 import { MdictLookupPopup } from './components/MdictLookupPopup';
 import {
+  DocViewStateSnapshot,
   EditFormatKind,
   MinimalDocView,
   MinimalDocViewHandle,
@@ -122,8 +125,8 @@ type MainView = 'tree' | 'doc';
 
 // Document mode icon styled after FeiArtical's folded-page + tree-line emblem in toolbar monochrome stroke style
 const ArticleDocIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
-  className = 'w-[19px] h-[19px]',
-  strokeWidth = 1.75,
+  className = 'w-[22px] h-[22px]',
+  strokeWidth = 1.8,
 }) => (
   <svg
     viewBox="0 0 24 24"
@@ -147,8 +150,8 @@ const ArticleDocIcon: React.FC<{ className?: string; strokeWidth?: number }> = (
 
 // Insert-below icon depicting placing the cut folder/article beneath the currently selected row
 const InsertBelowIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
-  className = 'w-[19px] h-[19px]',
-  strokeWidth = 1.75,
+  className = 'w-[22px] h-[22px]',
+  strokeWidth = 1.8,
 }) => (
   <svg
     viewBox="0 0 24 24"
@@ -183,6 +186,11 @@ export default function App() {
   const [mainView, setMainView] = useState<MainView>('tree');
   const [selectedDocId, setSelectedDocId] = useState<string | null>(() => loadLastOpenedDocId());
   const [isEditing, setIsEditing] = useState(false);
+  const [liveReadProgress, setLiveReadProgress] = useState<number>(0);
+  const [editHistoryState, setEditHistoryState] = useState<{
+    canUndo: boolean;
+    canRedo: boolean;
+  }>({ canUndo: false, canRedo: false });
 
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<string[]>(
     () => initialTreeState.collapsedIds
@@ -402,6 +410,7 @@ export default function App() {
               lastReadAt: null,
               lastMode: 'read',
               lastScrollTop: 0,
+              lastCharOffset: 0,
               format: 'txt',
               createdAt: now,
               updatedAt: now,
@@ -480,6 +489,7 @@ export default function App() {
             lastReadAt: null,
             lastMode: 'read',
             lastScrollTop: 0,
+            lastCharOffset: 0,
             format: 'txt',
             createdAt: now + i,
             updatedAt: now + i,
@@ -1055,6 +1065,7 @@ export default function App() {
       lastReadAt: now,
       lastMode: 'edit',
       lastScrollTop: 0,
+      lastCharOffset: 0,
       format: 'txt',
       createdAt: now,
       updatedAt: now,
@@ -1107,16 +1118,22 @@ export default function App() {
     );
   };
 
-  const handleUpdateDocViewState = (
-    docId: string,
-    state: { mode: 'read' | 'edit'; scrollTop: number }
-  ) => {
-    const current = docs.find((d) => d.id === docId);
+  const handleUpdateDocViewState = (docId: string, state: DocViewStateSnapshot) => {
+    const current = docsRef.current.find((d) => d.id === docId);
     if (!current) return;
-    const nextScroll = Math.round(state.scrollTop);
+    const nextScroll = Math.max(0, Math.round(state.scrollTop));
+    const nextCharOffset = Math.max(0, Math.round(state.charOffset));
+    const nextProgress = Math.min(100, Math.max(0, Math.round(state.readProgress)));
     const prevScroll = Math.round(current.lastScrollTop ?? 0);
+    const prevCharOffset = Math.round(current.lastCharOffset ?? 0);
+    const prevProgress = Math.round(current.readProgress ?? 0);
     const prevMode = current.lastMode ?? 'read';
-    if (prevMode === state.mode && prevScroll === nextScroll) {
+    if (
+      prevMode === state.mode &&
+      prevScroll === nextScroll &&
+      prevCharOffset === nextCharOffset &&
+      prevProgress === nextProgress
+    ) {
       return;
     }
     const now = Date.now();
@@ -1127,6 +1144,8 @@ export default function App() {
               ...d,
               lastMode: state.mode,
               lastScrollTop: nextScroll,
+              lastCharOffset: nextCharOffset,
+              readProgress: nextProgress,
               updatedAt: now,
             }
           : d
@@ -1136,12 +1155,15 @@ export default function App() {
   };
 
   const handleOpenDoc = (docId: string) => {
-    const target = docs.find((d) => d.id === docId);
+    const target = docsRef.current.find((d) => d.id === docId);
     const nextTarget: TreeSelection = { kind: 'doc', id: docId };
     captureAndSaveTreeState(nextTarget);
     setActiveTarget(nextTarget);
     setSelectedDocId(docId);
-    setIsEditing(target?.lastMode === 'edit');
+    // Always open documents in Browse mode by default from the directory tree
+    setIsEditing(false);
+    setLiveReadProgress(target?.readProgress ?? 0);
+    setEditHistoryState({ canUndo: false, canRedo: false });
     setMainView('doc');
     setDocs((prev) =>
       prev.map((d) => (d.id === docId ? { ...d, lastReadAt: Date.now() } : d))
@@ -1194,6 +1216,7 @@ export default function App() {
   };
 
   const handleChangeFontSize = (nextSize: number) => {
+    docViewRef.current?.captureTypographyAnchor();
     const clamped = Math.min(MAX_DOC_FONT_SIZE, Math.max(MIN_DOC_FONT_SIZE, Math.round(nextSize)));
     setFontSize(clamped);
     const prev = loadReaderSettings();
@@ -1212,6 +1235,7 @@ export default function App() {
 
   const handleChangeDocFont = (nextFontId: DocFontId) => {
     if (!selectedDocId) return;
+    docViewRef.current?.captureTypographyAnchor();
     setDocFontsMap((prev) => {
       const nextMap = {
         ...prev,
@@ -1253,18 +1277,15 @@ export default function App() {
     ];
 
     const reqId = ++mdictLookupReqRef.current;
-    setMdictLookup({
-      queryWord: word,
-      placement,
-      loading: true,
-      results: [],
-      currentIndex: 0,
-      error: null,
-    });
 
     try {
       const results = await lookupMdictWordAcrossAll(orderedIds, word);
       if (mdictLookupReqRef.current !== reqId) return;
+      if (results.length === 0) {
+        // Close dictionary popup when selected text has no match so native Copy/Paste restores immediately
+        setMdictLookup(null);
+        return;
+      }
       setMdictLookup({
         queryWord: word,
         placement,
@@ -1273,16 +1294,9 @@ export default function App() {
         currentIndex: 0,
         error: null,
       });
-    } catch (err) {
+    } catch {
       if (mdictLookupReqRef.current !== reqId) return;
-      setMdictLookup({
-        queryWord: word,
-        placement,
-        loading: false,
-        results: [],
-        currentIndex: 0,
-        error: err instanceof Error ? err.message : '查词失败',
-      });
+      setMdictLookup(null);
     }
   };
 
@@ -1708,6 +1722,8 @@ export default function App() {
             onClearMdictLookup={() => setMdictLookup(null)}
             onSaveDraft={(updates) => handleSaveDraft(selectedDoc.id, updates)}
             onViewStateChange={(state) => handleUpdateDocViewState(selectedDoc.id, state)}
+            onReadProgressChange={setLiveReadProgress}
+            onHistoryChange={setEditHistoryState}
             onFetchRemoteBody={() => handleFetchRemoteBody(selectedDoc.id)}
           />
         ) : (
@@ -1747,19 +1763,19 @@ export default function App() {
         aria-label="底部工具栏"
         className="shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)]"
       >
-        <div className="h-[52px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-start gap-0.5 sm:gap-1">
+        <div className="h-[54px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-start gap-0.5 sm:gap-1">
           {/* 1. 最左侧：目录图标 <-> 文档图标 */}
           <button
             type="button"
             onClick={handleToggleTreeDocView}
             aria-label={mainView === 'tree' ? '切换到文档模式' : '切换到目录树'}
             title={mainView === 'tree' ? '切换到文档模式（打开上次文档）' : '返回目录树'}
-            className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0"
+            className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0"
           >
             {mainView === 'tree' ? (
-              <FolderTree className="w-[19px] h-[19px]" strokeWidth={1.75} />
+              <FolderTree className="w-[22px] h-[22px]" strokeWidth={1.8} />
             ) : (
-              <ArticleDocIcon className="w-[19px] h-[19px]" strokeWidth={1.75} />
+              <ArticleDocIcon className="w-[22px] h-[22px]" strokeWidth={1.8} />
             )}
           </button>
 
@@ -1771,9 +1787,9 @@ export default function App() {
                 onClick={() => setShowImportModal(true)}
                 aria-label="导入文本文档"
                 title="导入 .txt / .md 文档或粘贴文本"
-                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+                className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
               >
-                <Download className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                <Download className="w-[22px] h-[22px]" strokeWidth={1.8} />
               </button>
 
               {/* 3. 剪切 / 插入切换图标 */}
@@ -1788,16 +1804,16 @@ export default function App() {
                       ? '取消选择剪切项'
                       : '剪切选定的目录或文章'
                 }
-                className={`w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] transition-colors ${
+                className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] transition-colors ${
                   cutItem || pickCutMode
-                    ? 'bg-[var(--fei-bg-selected)]'
+                    ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)]'
                     : 'hover:bg-[var(--fei-bg-hover)]'
                 }`}
               >
                 {cutItem ? (
-                  <InsertBelowIcon className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                  <InsertBelowIcon className="w-[22px] h-[22px]" strokeWidth={1.8} />
                 ) : (
-                  <Scissors className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                  <Scissors className="w-[22px] h-[22px]" strokeWidth={1.8} />
                 )}
               </button>
 
@@ -1807,12 +1823,12 @@ export default function App() {
                 onClick={handleEncryptButtonClick}
                 aria-label={isSelectedEncrypted ? '解密选中的文档或目录' : '加密选中的文档或目录'}
                 title={isSelectedEncrypted ? '当前已加密，点击解密' : '当前未加密，点击加密'}
-                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+                className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
               >
                 {isSelectedEncrypted ? (
-                  <Lock className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
+                  <Lock className="w-[21px] h-[21px]" strokeWidth={1.8} />
                 ) : (
-                  <LockOpen className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
+                  <LockOpen className="w-[21px] h-[21px]" strokeWidth={1.8} />
                 )}
               </button>
 
@@ -1822,9 +1838,9 @@ export default function App() {
                 onClick={handleCollapseAllFolders}
                 aria-label="收起所有目录"
                 title="收起所有内容，只显示目录"
-                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+                className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
               >
-                <ChevronsUp className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                <ChevronsUp className="w-[22px] h-[22px]" strokeWidth={1.8} />
               </button>
 
               {/* 6. 同步图标（点击直接同步，长按打开同步设置；右上角淡化小圆点提示待同步） */}
@@ -1843,16 +1859,16 @@ export default function App() {
                     ? '有内容未同步至坚果云，点击直接同步，长按打开同步设置'
                     : '点击直接同步，长按打开同步设置'
                 }
-                className="relative w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors disabled:opacity-50 select-none"
+                className="relative w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors disabled:opacity-50 select-none"
               >
                 <RefreshCw
-                  className={`w-[19px] h-[19px] ${isSyncing ? 'animate-spin' : ''}`}
-                  strokeWidth={1.75}
+                  className={`w-[22px] h-[22px] ${isSyncing ? 'animate-spin' : ''}`}
+                  strokeWidth={1.8}
                 />
                 {hasPendingSync && (
                   <span
                     aria-hidden="true"
-                    className="absolute top-[10px] right-[10px] w-[5.5px] h-[5.5px] rounded-full bg-[var(--fei-text-muted)]"
+                    className="absolute top-[9px] right-[9px] w-[6px] h-[6px] rounded-full bg-[var(--fei-text-muted)]"
                   />
                 )}
               </button>
@@ -1891,17 +1907,17 @@ export default function App() {
                 }}
                 aria-label="回收站（拖入目录或文档可删除，点击查看回收站）"
                 title="回收站（拖入文档或目录可删除，内容保留 30 天）"
-                className={`ml-auto w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-all duration-150 shrink-0 ${
+                className={`ml-auto w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all duration-150 shrink-0 ${
                   trashDragOver
-                    ? 'bg-[var(--fei-bg-selected)] text-[var(--fei-text-primary)] scale-105'
+                    ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)] scale-105'
                     : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
                 }`}
               >
-                <Trash2 className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                <Trash2 className="w-[22px] h-[22px]" strokeWidth={1.8} />
               </button>
             </>
           ) : (
-            /* 文档模式：文档图标后面放置 浏览(Eye) <-> 编辑(Pencil) 图标；编辑状态下后面依次放置 一级标题、二级标题、无序列表、分割线 */
+            /* 文档模式：文档图标后面放置 浏览(Eye) <-> 编辑(Pencil) 图标；浏览态最右侧显示阅读进度百分比 */
             <>
               {/* 2. 文档图标后面：浏览态显示 Eye，点击进入编辑变为 Pencil；再点击回到 Eye 并切回浏览 */}
               <button
@@ -1909,16 +1925,16 @@ export default function App() {
                 onClick={handleToggleEditMode}
                 aria-label={isEditing ? '当前处于编辑状态，点击切回浏览' : '当前处于浏览状态，点击进入编辑'}
                 title={isEditing ? '编辑状态（点击切回浏览）' : '浏览状态（点击进入编辑）'}
-                className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+                className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
               >
                 {isEditing ? (
-                  <Pencil className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                  <Pencil className="w-[21px] h-[21px]" strokeWidth={1.8} />
                 ) : (
-                  <Eye className="w-[19px] h-[19px]" strokeWidth={1.75} />
+                  <Eye className="w-[22px] h-[22px]" strokeWidth={1.8} />
                 )}
               </button>
 
-              {/* 浏览状态下，浏览图标后面放置词典图标和调节字体大小图标 */}
+              {/* 浏览状态下，浏览图标后面放置词典图标和调节字体大小图标，最右侧显示数字百分比进度 */}
               {!isEditing && (
                 <>
                   <button
@@ -1929,9 +1945,9 @@ export default function App() {
                     }}
                     aria-label="词典设置与切换"
                     title="词典（导入与切换 .mdx 词库）"
-                    className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+                    className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
                   >
-                    <BookA className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                    <BookA className="w-[22px] h-[22px]" strokeWidth={1.8} />
                   </button>
 
                   <button
@@ -1939,18 +1955,25 @@ export default function App() {
                     onClick={() => setShowFontSizeBar((prev) => !prev)}
                     aria-label="调节字体与字号"
                     title="调节字体与字号"
-                    className={`w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg transition-colors ${
+                    className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-colors ${
                       showFontSizeBar
-                        ? 'bg-[var(--fei-bg-selected)] text-[var(--fei-text-primary)]'
+                        ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)]'
                         : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
                     }`}
                   >
-                    <ALargeSmall className="w-[18.5px] h-[18.5px]" strokeWidth={1.75} />
+                    <ALargeSmall className="w-[22px] h-[22px]" strokeWidth={1.8} />
                   </button>
+
+                  <span
+                    aria-label={`当前阅读进度 ${liveReadProgress}%`}
+                    className="ml-auto pr-1 text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] select-none whitespace-nowrap shrink-0"
+                  >
+                    {liveReadProgress}%
+                  </span>
                 </>
               )}
 
-              {/* 3–6. 编辑状态下，编辑图标后面依次放置：一级标题、二级标题、无序列表、分割线 */}
+              {/* 3–7. 编辑状态下，编辑图标后面依次放置：一级标题、二级标题、无序列表、撤销、恢复 */}
               {isEditing && (
                 <>
                   {(
@@ -1958,7 +1981,6 @@ export default function App() {
                       { kind: 'h1', label: '一级标题', Icon: Heading1 },
                       { kind: 'h2', label: '二级标题', Icon: Heading2 },
                       { kind: 'ul', label: '无序列表', Icon: List },
-                      { kind: 'hr', label: '分割线', Icon: Minus },
                     ] as Array<{
                       kind: EditFormatKind;
                       label: string;
@@ -1972,11 +1994,35 @@ export default function App() {
                       onClick={() => docViewRef.current?.applyMarkdownFormat(kind)}
                       aria-label={label}
                       title={label}
-                      className="w-[42px] sm:w-[44px] h-[44px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] transition-colors"
+                      className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] transition-colors"
                     >
-                      <Icon className="w-[18px] h-[18px]" strokeWidth={1.75} />
+                      <Icon className="w-[22px] h-[22px]" strokeWidth={1.8} />
                     </button>
                   ))}
+
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => docViewRef.current?.undo()}
+                    disabled={!editHistoryState.canUndo}
+                    aria-label="撤销上一步编辑"
+                    title="撤销"
+                    className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 disabled:pointer-events-none transition-colors"
+                  >
+                    <Undo2 className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                  </button>
+
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => docViewRef.current?.redo()}
+                    disabled={!editHistoryState.canRedo}
+                    aria-label="恢复上一步编辑"
+                    title="恢复"
+                    className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 disabled:pointer-events-none transition-colors"
+                  >
+                    <Redo2 className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                  </button>
                 </>
               )}
             </>
@@ -2067,7 +2113,7 @@ export default function App() {
             role="dialog"
             aria-label="调节字体与字号"
             onClick={(e) => e.stopPropagation()}
-            className="fixed bottom-[62px] left-1/2 -translate-x-1/2 z-40 w-[min(340px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border border-[var(--fei-border-strong)] shadow-lg flex flex-col gap-2.5"
+            className="fixed bottom-[64px] left-1/2 -translate-x-1/2 z-40 w-[min(340px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-none dark:shadow-lg flex flex-col gap-2.5"
           >
             <div className="flex items-center gap-2">
               <button
@@ -2139,6 +2185,7 @@ export default function App() {
         <MdictLookupPopup
           queryWord={mdictLookup.queryWord}
           placement={mdictLookup.placement}
+          fontSize={fontSize}
           loading={mdictLookup.loading}
           result={mdictLookup.results[mdictLookup.currentIndex] ?? null}
           matchCount={mdictLookup.results.length}
@@ -2157,8 +2204,8 @@ export default function App() {
 
       {/* Drag Overlay */}
       {windowDragging && (
-        <div className="fixed inset-0 z-50 bg-black/15 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
-          <div className="px-5 py-3 rounded-xl bg-[var(--fei-bg-surface)] border border-[var(--fei-border)] shadow-lg text-[14px] text-[var(--fei-text-primary)]">
+        <div className="fixed inset-0 z-50 bg-transparent dark:bg-black/25 flex items-center justify-center pointer-events-none">
+          <div className="px-5 py-3 rounded-xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-none dark:shadow-lg text-[14px] text-[var(--fei-text-primary)]">
             松开导入 .txt / .md 文档
           </div>
         </div>
