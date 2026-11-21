@@ -38,7 +38,6 @@ import { SyncModal } from './components/SyncModal';
 import { TrashModal } from './components/TrashModal';
 import {
   ArticleDoc,
-  DocFontChoice,
   DocFontId,
   FolderNode,
   MdictDictionarySummary,
@@ -52,8 +51,8 @@ import {
 import {
   buildDocFontFamily,
   DOC_FONT_OPTIONS,
-  resolveDefaultDocFonts,
-  resolveDocFontChoice,
+  resolveDefaultDocFont,
+  resolveDocFont,
 } from './utils/fonts';
 import {
   attachMdictCss,
@@ -94,7 +93,6 @@ import {
   saveTreeViewState,
   saveWebDavConfig,
   StorageDirectoryConfig,
-  StoredDocFontEntry,
 } from './utils/storage';
 import {
   extractExcerpt,
@@ -212,11 +210,10 @@ export default function App() {
     if (!Number.isFinite(raw)) return DEFAULT_READER_SETTINGS.fontSize;
     return Math.min(MAX_DOC_FONT_SIZE, Math.max(MIN_DOC_FONT_SIZE, Math.round(raw)));
   });
-  const [defaultDocFonts, setDefaultDocFonts] = useState<DocFontChoice>(() => {
-    const settings = loadReaderSettings();
-    return resolveDefaultDocFonts(settings.defaultZhFont, settings.defaultEnFont);
-  });
-  const [docFontsMap, setDocFontsMap] = useState<Record<string, StoredDocFontEntry>>(() =>
+  const [defaultDocFont, setDefaultDocFont] = useState<DocFontId>(() =>
+    resolveDefaultDocFont(loadReaderSettings().defaultDocFont)
+  );
+  const [docFontsMap, setDocFontsMap] = useState<Record<string, string>>(() =>
     loadDocFontsMap()
   );
   const [mdictDicts, setMdictDicts] = useState<MdictDictionarySummary[]>([]);
@@ -1203,40 +1200,34 @@ export default function App() {
     saveReaderSettings({ ...prev, fontSize: clamped });
   };
 
-  const currentDocFontChoice = useMemo<DocFontChoice>(() => {
-    if (!selectedDocId) return defaultDocFonts;
-    return resolveDocFontChoice(docFontsMap[selectedDocId], defaultDocFonts);
-  }, [selectedDocId, docFontsMap, defaultDocFonts]);
+  const currentDocFont = useMemo<DocFontId>(() => {
+    if (!selectedDocId) return defaultDocFont;
+    return resolveDocFont(docFontsMap[selectedDocId], defaultDocFont);
+  }, [selectedDocId, docFontsMap, defaultDocFont]);
 
   const currentDocFontFamily = useMemo(
-    () => buildDocFontFamily(currentDocFontChoice, defaultDocFonts),
-    [currentDocFontChoice, defaultDocFonts]
+    () => buildDocFontFamily(currentDocFont, defaultDocFont),
+    [currentDocFont, defaultDocFont]
   );
 
-  const handleChangeDocFont = (axis: 'zhFont' | 'enFont', nextFontId: DocFontId) => {
+  const handleChangeDocFont = (nextFontId: DocFontId) => {
     if (!selectedDocId) return;
-    const nextChoice: DocFontChoice = {
-      ...currentDocFontChoice,
-      [axis]: nextFontId,
-    };
     setDocFontsMap((prev) => {
       const nextMap = {
         ...prev,
-        [selectedDocId]: nextChoice,
+        [selectedDocId]: nextFontId,
       };
       saveDocFontsMap(nextMap);
       return nextMap;
     });
   };
 
-  const handleSetDefaultDocFonts = () => {
-    const nextDefaults: DocFontChoice = { ...currentDocFontChoice };
-    setDefaultDocFonts(nextDefaults);
+  const handleSetDefaultDocFont = () => {
+    setDefaultDocFont(currentDocFont);
     const prev = loadReaderSettings();
     saveReaderSettings({
       ...prev,
-      defaultZhFont: nextDefaults.zhFont,
-      defaultEnFont: nextDefaults.enFont,
+      defaultDocFont: currentDocFont,
     });
     showToast('已设为默认字体');
   };
@@ -2076,7 +2067,7 @@ export default function App() {
             role="dialog"
             aria-label="调节字体与字号"
             onClick={(e) => e.stopPropagation()}
-            className="fixed bottom-[62px] left-1/2 -translate-x-1/2 z-40 w-[min(368px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border border-[var(--fei-border-strong)] shadow-lg flex flex-col gap-2.5"
+            className="fixed bottom-[62px] left-1/2 -translate-x-1/2 z-40 w-[min(340px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border border-[var(--fei-border-strong)] shadow-lg flex flex-col gap-2.5"
           >
             <div className="flex items-center gap-2">
               <button
@@ -2115,46 +2106,25 @@ export default function App() {
               </span>
             </div>
 
-            <div className="pt-2 border-t border-[var(--fei-border)] grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
-              <label className="min-w-0 flex flex-col gap-1">
-                <span className="text-[11px] leading-none text-[var(--fei-text-muted)]">
-                  中文字体
-                </span>
-                <select
-                  value={currentDocFontChoice.zhFont}
-                  onChange={(e) => handleChangeDocFont('zhFont', e.target.value as DocFontId)}
-                  aria-label="中文字体"
-                  className="w-full h-9 px-2 rounded-lg bg-[var(--fei-bg)] border border-[var(--fei-border)] text-[12.5px] text-[var(--fei-text-primary)] outline-none focus:border-[var(--fei-border-strong)] cursor-pointer"
-                >
-                  {DOC_FONT_OPTIONS.map((opt) => (
-                    <option key={opt.id} value={opt.id}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="min-w-0 flex flex-col gap-1">
-                <span className="text-[11px] leading-none text-[var(--fei-text-muted)]">
-                  英文字体
-                </span>
-                <select
-                  value={currentDocFontChoice.enFont}
-                  onChange={(e) => handleChangeDocFont('enFont', e.target.value as DocFontId)}
-                  aria-label="英文字体"
-                  className="w-full h-9 px-2 rounded-lg bg-[var(--fei-bg)] border border-[var(--fei-border)] text-[12.5px] text-[var(--fei-text-primary)] outline-none focus:border-[var(--fei-border-strong)] cursor-pointer"
-                >
-                  {DOC_FONT_OPTIONS.map((opt) => (
-                    <option key={opt.id} value={opt.id}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
+            <div className="pt-2 border-t border-[var(--fei-border)] flex items-center gap-2.5">
+              <span className="text-[12px] text-[var(--fei-text-muted)] shrink-0">
+                字体
+              </span>
+              <select
+                value={currentDocFont}
+                onChange={(e) => handleChangeDocFont(e.target.value as DocFontId)}
+                aria-label="文档字体"
+                className="flex-1 min-w-0 h-9 px-2.5 rounded-lg bg-[var(--fei-bg)] border border-[var(--fei-border)] text-[12.5px] text-[var(--fei-text-primary)] outline-none focus:border-[var(--fei-border-strong)] cursor-pointer"
+              >
+                {DOC_FONT_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
               <button
                 type="button"
-                onClick={handleSetDefaultDocFonts}
+                onClick={handleSetDefaultDocFont}
                 className="h-9 px-2 inline-flex items-center justify-center rounded-lg text-[12px] font-medium whitespace-nowrap shrink-0 text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] transition-colors cursor-pointer"
               >
                 设为默认

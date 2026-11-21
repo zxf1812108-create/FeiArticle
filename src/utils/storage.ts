@@ -49,8 +49,7 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   width: 'medium',
   paper: 'white',
   indentFirstLine: false,
-  defaultZhFont: 'system',
-  defaultEnFont: 'system',
+  defaultDocFont: 'system',
 };
 
 export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {
@@ -242,23 +241,24 @@ export function saveActiveMdictId(dictId: string | null): void {
   }
 }
 
-export interface StoredDocFontEntry {
-  zhFont?: string;
-  enFont?: string;
-}
-
-export function loadDocFontsMap(): Record<string, StoredDocFontEntry> {
-  const parsed = safeParse<Record<string, StoredDocFontEntry>>(
+export function loadDocFontsMap(): Record<string, string> {
+  const parsed = safeParse<Record<string, unknown>>(
     localStorage.getItem(KEYS.DOC_FONTS),
     {}
   );
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return {};
   }
-  return parsed;
+  const result: Record<string, string> = {};
+  for (const [docId, val] of Object.entries(parsed)) {
+    if (typeof val === 'string' && val.trim()) {
+      result[docId] = val;
+    }
+  }
+  return result;
 }
 
-export function saveDocFontsMap(map: Record<string, StoredDocFontEntry>): void {
+export function saveDocFontsMap(map: Record<string, string>): void {
   localStorage.setItem(KEYS.DOC_FONTS, JSON.stringify(map));
 }
 

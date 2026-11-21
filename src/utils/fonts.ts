@@ -1,116 +1,71 @@
-import { DocFontChoice, DocFontId } from '../types';
+import { DocFontId } from '../types';
 
 export const DOC_FONT_OPTIONS: ReadonlyArray<{ id: DocFontId; label: string }> = [
   { id: 'system', label: '系统字体' },
   { id: 'noto-sans-sc', label: '思源黑体' },
   { id: 'noto-serif-sc', label: '思源宋体' },
   { id: 'inter', label: 'Inter' },
-  { id: 'brela', label: 'Brela' },
 ];
 
 const VALID_DOC_FONT_IDS = new Set<string>(DOC_FONT_OPTIONS.map((o) => o.id));
 
-export const DEFAULT_DOC_FONT_CHOICE: DocFontChoice = {
-  zhFont: 'system',
-  enFont: 'system',
-};
+export const DEFAULT_DOC_FONT: DocFontId = 'system';
 
 export function isValidDocFontId(id: unknown): id is DocFontId {
   return typeof id === 'string' && VALID_DOC_FONT_IDS.has(id);
 }
 
 /**
- * Resolve effective default fonts, falling back to 'system' if missing or nonexistent.
+ * Resolve effective default font, falling back to 'system' if missing or nonexistent.
  */
-export function resolveDefaultDocFonts(
-  defaultZhFont?: unknown,
-  defaultEnFont?: unknown
-): DocFontChoice {
-  return {
-    zhFont: isValidDocFontId(defaultZhFont) ? defaultZhFont : DEFAULT_DOC_FONT_CHOICE.zhFont,
-    enFont: isValidDocFontId(defaultEnFont) ? defaultEnFont : DEFAULT_DOC_FONT_CHOICE.enFont,
-  };
+export function resolveDefaultDocFont(defaultFont?: unknown): DocFontId {
+  return isValidDocFontId(defaultFont) ? defaultFont : DEFAULT_DOC_FONT;
 }
 
 /**
- * Resolve the effective font pair for a document:
- * - If the document has a stored selection and the font exists, keep it.
- * - If never chosen or the previously chosen font does not exist, fall back to the default font.
+ * Resolve the effective font for a document:
+ * - If the document has a stored selection and it exists in DOC_FONT_OPTIONS, keep it.
+ * - If never selected or the previously selected font no longer exists, fall back to defaultFont.
  */
-export function resolveDocFontChoice(
-  docChoice: Partial<{ zhFont: unknown; enFont: unknown }> | null | undefined,
-  defaultFonts: DocFontChoice
-): DocFontChoice {
-  const safeDefaults = resolveDefaultDocFonts(defaultFonts.zhFont, defaultFonts.enFont);
-  if (!docChoice) return safeDefaults;
-  return {
-    zhFont: isValidDocFontId(docChoice.zhFont) ? docChoice.zhFont : safeDefaults.zhFont,
-    enFont: isValidDocFontId(docChoice.enFont) ? docChoice.enFont : safeDefaults.enFont,
-  };
+export function resolveDocFont(storedFont: unknown, defaultFont: DocFontId): DocFontId {
+  const safeDefault = resolveDefaultDocFont(defaultFont);
+  return isValidDocFontId(storedFont) ? storedFont : safeDefault;
 }
 
-function getEnFontTokens(id: DocFontId): string[] {
-  switch (id) {
-    case 'inter':
-      return ['"Inter"'];
-    case 'noto-sans-sc':
-      return ['"Noto Sans"'];
-    case 'noto-serif-sc':
-      return ['"Noto Serif"'];
-    case 'brela':
-      return ['"FeiEnBrela"', '"Brela"', '"Brela Regular"'];
-    case 'system':
-    default:
-      return ['"FeiEnSystem"'];
-  }
-}
-
-function getZhFontTokens(id: DocFontId): string[] {
+function getFontTokens(id: DocFontId): string[] {
   switch (id) {
     case 'noto-sans-sc':
-      return [
-        '"Noto Sans SC"',
-        '"Source Han Sans SC"',
-        '"Source Han Sans CN"',
-        '"Noto Sans CJK SC"',
-      ];
+      return ['"Noto Sans SC"', '"Source Han Sans SC"', '"Source Han Sans CN"'];
     case 'noto-serif-sc':
-      return [
-        '"Noto Serif SC"',
-        '"Source Han Serif SC"',
-        '"Source Han Serif CN"',
-        '"Noto Serif CJK SC"',
-        '"Songti SC"',
-        '"STSong"',
-      ];
+      return ['"Noto Serif SC"', '"Source Han Serif SC"', '"Source Han Serif CN"', 'serif'];
     case 'inter':
       return ['"Inter"'];
-    case 'brela':
-      return ['"Brela"', '"Brela Regular"'];
     case 'system':
     default:
       return [
+        'system-ui',
         '-apple-system',
         'BlinkMacSystemFont',
         '"PingFang SC"',
         '"Hiragino Sans GB"',
         '"Microsoft YaHei"',
         '"Roboto"',
+        '"Segoe UI"',
         'sans-serif',
       ];
   }
 }
 
 /**
- * Build a CSS font-family stack combining independent English and Chinese font choices,
- * degrading gracefully to the user's configured default fonts and system fonts if unavailable.
+ * Build a CSS font-family stack for the selected document font applying across all text,
+ * falling back to the default font and device system font when needed.
  */
 export function buildDocFontFamily(
-  choice: DocFontChoice,
-  defaultFonts: DocFontChoice = DEFAULT_DOC_FONT_CHOICE
+  fontId: DocFontId,
+  defaultFont: DocFontId = DEFAULT_DOC_FONT
 ): string {
-  const safeDefaults = resolveDefaultDocFonts(defaultFonts.zhFont, defaultFonts.enFont);
-  const safeChoice = resolveDocFontChoice(choice, safeDefaults);
+  const safeDefault = resolveDefaultDocFont(defaultFont);
+  const safeFont = resolveDocFont(fontId, safeDefault);
 
   const tokens: string[] = [];
   const pushUnique = (list: string[]) => {
@@ -121,25 +76,11 @@ export function buildDocFontFamily(
     }
   };
 
-  pushUnique(getEnFontTokens(safeChoice.enFont));
-  if (safeChoice.enFont !== safeDefaults.enFont) {
-    pushUnique(getEnFontTokens(safeDefaults.enFont));
+  pushUnique(getFontTokens(safeFont));
+  if (safeFont !== safeDefault) {
+    pushUnique(getFontTokens(safeDefault));
   }
-
-  pushUnique(getZhFontTokens(safeChoice.zhFont));
-  if (safeChoice.zhFont !== safeDefaults.zhFont) {
-    pushUnique(getZhFontTokens(safeDefaults.zhFont));
-  }
-
-  pushUnique([
-    '-apple-system',
-    'BlinkMacSystemFont',
-    '"PingFang SC"',
-    '"Hiragino Sans GB"',
-    '"Microsoft YaHei"',
-    '"Noto Sans SC"',
-    'sans-serif',
-  ]);
+  pushUnique(getFontTokens('system'));
 
   return tokens.join(', ');
 }

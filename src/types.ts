@@ -136,12 +136,7 @@ export interface SyncLogEntry {
 export type ReaderFont = 'serif' | 'sans' | 'mono';
 export type ReaderPaper = 'white' | 'paper' | 'dark';
 export type ReaderWidth = 'narrow' | 'medium' | 'wide';
-export type DocFontId = 'system' | 'noto-sans-sc' | 'noto-serif-sc' | 'inter' | 'brela';
-
-export interface DocFontChoice {
-  zhFont: DocFontId;
-  enFont: DocFontId;
-}
+export type DocFontId = 'system' | 'noto-sans-sc' | 'noto-serif-sc' | 'inter';
 
 export interface ReaderSettings {
   fontFamily: ReaderFont;
@@ -150,8 +145,7 @@ export interface ReaderSettings {
   width: ReaderWidth;
   paper: ReaderPaper;
   indentFirstLine: boolean;
-  defaultZhFont?: DocFontId;
-  defaultEnFont?: DocFontId;
+  defaultDocFont?: DocFontId;
 }
 
 export type SmartView = 'all' | 'recent' | 'starred' | 'dirty' | 'highlights' | 'trash';
