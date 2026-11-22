@@ -153,14 +153,26 @@ export function saveSyncLogs(logs: SyncLogEntry[]): void {
   localStorage.setItem(KEYS.LOGS, JSON.stringify(logs.slice(0, 20)));
 }
 
-export function loadTheme(): 'light' | 'dark' {
+export type AppThemeMode = 'light' | 'dark' | 'eink';
+
+export function loadTheme(): AppThemeMode {
   const saved = localStorage.getItem(KEYS.THEME);
-  if (saved === 'dark' || saved === 'light') return saved;
+  if (saved === 'dark' || saved === 'light' || saved === 'eink') return saved;
+  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
+    return 'dark';
+  }
   return 'light';
 }
 
-export function saveTheme(theme: 'light' | 'dark'): void {
+export function saveTheme(theme: AppThemeMode): void {
   localStorage.setItem(KEYS.THEME, theme);
+}
+
+export function applyThemeMode(theme: AppThemeMode): void {
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  root.classList.toggle('dark', theme === 'dark');
+  root.classList.toggle('eink', theme === 'eink');
 }
 
 export function loadFoldersDirty(): boolean {
@@ -289,22 +301,21 @@ export function saveDocFontsMap(map: Record<string, string>): void {
   localStorage.setItem(KEYS.DOC_FONTS, JSON.stringify(map));
 }
 
-export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'collapse' | 'settings';
-export type DocToolbarIconId = 'back' | 'font' | 'sync';
+export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'sync' | 'settings';
+export type DocToolbarIconId = 'back' | 'font';
 
 export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
   'import',
   'edit',
   'cut',
   'encrypt',
-  'collapse',
+  'sync',
   'settings',
 ];
 
 export const DEFAULT_DOC_TOOLBAR_ORDER: DocToolbarIconId[] = [
   'back',
   'font',
-  'sync',
 ];
 
 function normalizeToolbarOrder<T extends string>(raw: unknown, defaults: readonly T[]): T[] {
@@ -327,23 +338,51 @@ function normalizeToolbarOrder<T extends string>(raw: unknown, defaults: readonl
   return result;
 }
 
+function migrateCollapseToSyncOrder(raw: unknown): { order: TreeToolbarIconId[]; migrated: boolean } {
+  const hadRawArray = Array.isArray(raw);
+  const hadCollapse = hadRawArray && raw.includes('collapse');
+  const hadSync = hadRawArray && raw.includes('sync');
+  const mapped = hadRawArray
+    ? raw.map((item) => (item === 'collapse' && !hadSync ? 'sync' : item))
+    : raw;
+  const normalized = normalizeToolbarOrder(mapped, DEFAULT_TREE_TOOLBAR_ORDER);
+
+  // If neither 'collapse' nor 'sync' existed in a persisted order, place 'sync' directly before 'settings'
+  if (hadRawArray && !hadCollapse && !hadSync) {
+    const syncIdx = normalized.indexOf('sync');
+    const settingsIdx = normalized.indexOf('settings');
+    if (syncIdx !== -1 && settingsIdx !== -1 && syncIdx !== settingsIdx - 1) {
+      normalized.splice(syncIdx, 1);
+      const nextSettingsIdx = normalized.indexOf('settings');
+      normalized.splice(nextSettingsIdx, 0, 'sync');
+    }
+  }
+
+  return { order: normalized, migrated: hadCollapse || (hadRawArray && !hadSync) };
+}
+
 export function loadTreeToolbarOrder(): TreeToolbarIconId[] {
   const rawV2 = localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER);
   if (rawV2) {
-    return normalizeToolbarOrder(safeParse<unknown>(rawV2, null), DEFAULT_TREE_TOOLBAR_ORDER);
+    const parsed = safeParse<unknown>(rawV2, null);
+    const { order, migrated } = migrateCollapseToSyncOrder(parsed);
+    if (migrated) {
+      saveTreeToolbarOrder(order);
+    }
+    return order;
   }
   const rawLegacy = localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER_LEGACY);
   if (rawLegacy) {
     const parsed = safeParse<unknown>(rawLegacy, null);
     const hadSettings = Array.isArray(parsed) && parsed.includes('settings');
-    const normalized = normalizeToolbarOrder(parsed, DEFAULT_TREE_TOOLBAR_ORDER);
+    const { order: normalized } = migrateCollapseToSyncOrder(parsed);
     if (!hadSettings) {
       const settingsIdx = normalized.indexOf('settings');
-      const collapseIdx = normalized.indexOf('collapse');
-      if (settingsIdx !== -1 && collapseIdx !== -1 && settingsIdx !== collapseIdx + 1) {
+      const syncIdx = normalized.indexOf('sync');
+      if (settingsIdx !== -1 && syncIdx !== -1 && settingsIdx !== syncIdx + 1) {
         normalized.splice(settingsIdx, 1);
-        const nextCollapseIdx = normalized.indexOf('collapse');
-        normalized.splice(nextCollapseIdx + 1, 0, 'settings');
+        const nextSyncIdx = normalized.indexOf('sync');
+        normalized.splice(nextSyncIdx + 1, 0, 'settings');
       }
     }
     const editIdx = normalized.indexOf('edit');

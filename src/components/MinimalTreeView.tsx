@@ -491,7 +491,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           isCut
             ? 'opacity-45 border border-dashed border-[var(--fei-text-muted)]'
             : isTarget
-              ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent'
+              ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)]'
               : 'border border-transparent hover:bg-[var(--fei-bg-hover)]'
         }`}
       >
@@ -586,7 +586,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
               <div
                 className={`flex items-center gap-1.5 px-2 min-h-[44px] rounded-lg transition-colors duration-150 ${
                   isInboxTarget
-                    ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent'
+                    ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)]'
                     : 'border border-transparent hover:bg-[var(--fei-bg-hover)]'
                 }`}
               >
@@ -674,7 +674,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                   isCut
                     ? 'opacity-45 border border-dashed border-[var(--fei-text-muted)]'
                     : isDocDropIntoFolder || isTarget
-                      ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent'
+                      ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)]'
                       : 'border border-transparent hover:bg-[var(--fei-bg-hover)]'
                 }`}
               >
@@ -791,7 +791,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
               onDrop={(e) => handleFolderDrop(e, null)}
               className={`flex items-center justify-between gap-1.5 px-2 min-h-[44px] rounded-lg transition-colors ${
                 docDrop?.folderId === null && docDrop.docId === null
-                  ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent'
+                  ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)]'
                   : 'border border-transparent hover:bg-[var(--fei-bg-hover)]'
               }`}
             >

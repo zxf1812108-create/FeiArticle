@@ -2,20 +2,26 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   BookA,
   Check,
+  Contrast,
   Copy,
   Eye,
   EyeOff,
   FileCode2,
   Folder,
+  Moon,
+  Sun,
   Trash2,
   Upload,
   X,
 } from 'lucide-react';
 import { MdictDictionarySummary, WebDavConfig } from '../types';
 import { stripDictExt } from '../utils/mdictStorage';
+import { AppThemeMode } from '../utils/storage';
 import { DEFAULT_JIANGUOYUN_URL, normalizeWebDavBaseUrl } from '../utils/webdavSync';
 
 interface SyncModalProps {
+  themeMode: AppThemeMode;
+  onChangeThemeMode: (mode: AppThemeMode) => void;
   config: WebDavConfig;
   storageFolderPath: string;
   onChangeStorageFolder: () => void;
@@ -35,6 +41,8 @@ interface SyncModalProps {
 }
 
 export const SyncModal: React.FC<SyncModalProps> = ({
+  themeMode,
+  onChangeThemeMode,
   config,
   storageFolderPath,
   onChangeStorageFolder,
@@ -158,23 +166,29 @@ export const SyncModal: React.FC<SyncModalProps> = ({
     onClose();
   };
 
+  const themeOptions: Array<{ id: AppThemeMode; label: string; Icon: React.FC<{ className?: string; strokeWidth?: number }> }> = [
+    { id: 'light', label: '浅色', Icon: Sun },
+    { id: 'dark', label: '深色', Icon: Moon },
+    { id: 'eink', label: '墨水屏', Icon: Contrast },
+  ];
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent dark:bg-black/45 p-4 select-none"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 dark:bg-black/45 eink:bg-transparent p-4 select-none"
       onClick={onClose}
       onContextMenu={(e) => e.preventDefault()}
     >
       <form
         onSubmit={handleSave}
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[360px] max-h-[88vh] overflow-y-auto bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-none dark:shadow-xl text-[var(--fei-text-primary)] select-none"
+        className="w-full max-w-[360px] max-h-[88vh] overflow-y-auto bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-xl eink:shadow-none text-[var(--fei-text-primary)] select-none"
       >
         <div className="p-4 sm:p-5 space-y-4">
-          {/* 区域一：同步设置 */}
+          {/* 区域零：颜色模式 */}
           <section className="space-y-2">
             <div className="flex items-center justify-between px-0.5">
               <h3 className="text-[13.5px] font-medium text-[var(--fei-text-primary)]">
-                同步设置
+                颜色模式
               </h3>
               <button
                 type="button"
@@ -185,6 +199,40 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            <div
+              role="radiogroup"
+              aria-label="颜色模式"
+              className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] p-1 grid grid-cols-3 gap-1"
+            >
+              {themeOptions.map(({ id, label, Icon }) => {
+                const isSelected = themeMode === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    role="radio"
+                    aria-checked={isSelected}
+                    onClick={() => onChangeThemeMode(id)}
+                    className={`h-8 rounded-lg inline-flex items-center justify-center gap-1.5 text-[12.5px] border transition-colors cursor-pointer select-none ${
+                      isSelected
+                        ? 'bg-[var(--fei-bg-surface)] dark:bg-[var(--fei-bg-selected)] eink:bg-[var(--fei-bg-selected)] border-[var(--fei-border)] dark:border-[var(--fei-border-strong)] eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)] font-medium shadow-[0_1px_2px_rgba(0,0,0,0.06)] dark:shadow-none eink:shadow-none'
+                        : 'border-transparent text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)]'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5 shrink-0" strokeWidth={1.8} />
+                    <span>{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          {/* 区域一：同步设置 */}
+          <section className="space-y-2">
+            <h3 className="px-0.5 text-[13.5px] font-medium text-[var(--fei-text-primary)]">
+              同步设置
+            </h3>
 
             <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] divide-y divide-[var(--fei-border)] overflow-hidden">
               <label className="flex items-center gap-2.5 px-3.5 h-10">

@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ALargeSmall,
   ArrowLeft,
-  ChevronsUp,
   Download,
   Lock,
   LockOpen,
@@ -71,6 +70,8 @@ import {
   stripDictExt,
 } from './utils/mdictStorage';
 import {
+  applyThemeMode,
+  AppThemeMode,
   DEFAULT_READER_SETTINGS,
   DocToolbarIconId,
   loadActiveMdictId,
@@ -85,6 +86,7 @@ import {
   loadReaderSettings,
   loadStorageDirConfig,
   loadSyncLogs,
+  loadTheme,
   loadTreeToolbarOrder,
   loadTreeViewState,
   loadWebDavConfig,
@@ -102,6 +104,7 @@ import {
   saveReaderSettings,
   saveStorageDirConfig,
   saveSyncLogs,
+  saveTheme,
   saveTreeToolbarOrder,
   saveTreeViewState,
   saveWebDavConfig,
@@ -302,17 +305,13 @@ export default function App() {
   const activeFolders = useMemo(() => folders.filter((f) => !f.deleted), [folders]);
   const collapsedFolderSet = useMemo(() => new Set(collapsedFolderIds), [collapsedFolderIds]);
 
-  // Automatically follow OS light/dark system theme
+  const [themeMode, setThemeMode] = useState<AppThemeMode>(() => loadTheme());
+
+  // Apply and persist user-selected color mode (light / dark / eink)
   useEffect(() => {
-    const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const applySystemTheme = (dark: boolean) => {
-      document.documentElement.classList.toggle('dark', dark);
-    };
-    applySystemTheme(media.matches);
-    const handler = (e: MediaQueryListEvent) => applySystemTheme(e.matches);
-    media.addEventListener('change', handler);
-    return () => media.removeEventListener('change', handler);
-  }, []);
+    applyThemeMode(themeMode);
+    saveTheme(themeMode);
+  }, [themeMode]);
 
   // Suppress all browser / WebView context menus triggered by text selection or long-press
   useEffect(() => {
@@ -966,16 +965,6 @@ export default function App() {
   const handleExpandFolder = (id: string) => {
     if (!collapsedFolderIds.includes(id)) return;
     setCollapsedFolderIds((prev) => prev.filter((item) => item !== id));
-    setTreeStateUpdatedAt(Date.now());
-    setFoldersDirty(true);
-  };
-
-  const handleCollapseAllFolders = () => {
-    setCollapsedFolderIds([
-      ...activeFolders.map((f) => f.id),
-      INBOX_FOLDER_ID,
-      '__uncategorized__',
-    ]);
     setTreeStateUpdatedAt(Date.now());
     setFoldersDirty(true);
   };
@@ -1790,7 +1779,7 @@ export default function App() {
         showToast(err instanceof Error ? err.message : '同步失败');
       }
     } else {
-      showToast('请先在目录模式点击设置图标配置坚果云同步参数');
+      showToast('请先点击设置图标配置坚果云同步参数');
     }
   };
 
@@ -2096,7 +2085,7 @@ export default function App() {
                 const key = `tree:${iconId}`;
                 const isDraggingThis = draggingToolbarIconId === key;
                 const dragCls = isDraggingThis
-                  ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)] scale-105 opacity-90'
+                  ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)] scale-105 opacity-90'
                   : '';
                 const bindRef = (el: HTMLButtonElement | null) => {
                   toolbarBtnRefs.current.set(key, el);
@@ -2165,7 +2154,7 @@ export default function App() {
                         isDraggingThis
                           ? dragCls
                           : cutItem || pickCutMode
-                            ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)]'
+                            ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)]'
                             : 'hover:bg-[var(--fei-bg-hover)]'
                       }`}
                     >
@@ -2208,22 +2197,38 @@ export default function App() {
                   );
                 }
 
-                if (iconId === 'collapse') {
+                if (iconId === 'sync') {
                   return (
                     <button
                       key={iconId}
                       ref={bindRef}
                       type="button"
-                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'collapse', 'tree')}
-                      onClick={() => {
-                        if (suppressToolbarClickRef.current) return;
-                        handleCollapseAllFolders();
-                      }}
-                      aria-label="收起所有目录"
-                      title="收起所有内容，只显示目录（可拖动调整图标位置）"
-                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'sync', 'tree')}
+                      onClick={handleDirectSyncClick}
+                      onContextMenu={(e) => e.preventDefault()}
+                      disabled={isSyncing}
+                      aria-label={
+                        hasPendingSync
+                          ? '点击同步（有未同步变更）'
+                          : '点击同步'
+                      }
+                      title={
+                        hasPendingSync
+                          ? '有内容未同步至坚果云，点击直接同步（可拖动调整图标位置）'
+                          : '点击直接同步（可拖动调整图标位置）'
+                      }
+                      className={`relative w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all disabled:opacity-50 shrink-0 touch-none select-none ${dragCls}`}
                     >
-                      <ChevronsUp className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                      <RefreshCw
+                        className={`w-[21px] h-[21px] ${isSyncing ? 'animate-spin' : ''}`}
+                        strokeWidth={1.8}
+                      />
+                      {hasPendingSync && (
+                        <span
+                          aria-hidden="true"
+                          className="absolute top-[9px] right-[9px] w-[6px] h-[6px] rounded-full bg-[var(--fei-text-muted)]"
+                        />
+                      )}
                     </button>
                   );
                 }
@@ -2283,7 +2288,7 @@ export default function App() {
                 title="回收站（拖入文档或目录可删除，内容保留 30 天）"
                 className={`ml-auto w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all duration-150 shrink-0 ${
                   trashDragOver
-                    ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)] scale-105'
+                    ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)] scale-105'
                     : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
                 }`}
               >
@@ -2291,13 +2296,13 @@ export default function App() {
               </button>
             </>
           ) : (
-            /* 文档浏览模式：默认依次为 返回、字体设置、同步（均可拖动排序），最右侧固定显示阅读进度 */
+            /* 文档浏览模式：默认依次为 返回、字体设置（均可拖动排序），最右侧固定显示阅读进度 */
             <>
               {docToolbarOrder.map((iconId) => {
                 const key = `doc:${iconId}`;
                 const isDraggingThis = draggingToolbarIconId === key;
                 const dragCls = isDraggingThis
-                  ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)] scale-105 opacity-90'
+                  ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)] scale-105 opacity-90'
                   : '';
                 const bindRef = (el: HTMLButtonElement | null) => {
                   toolbarBtnRefs.current.set(key, el);
@@ -2323,63 +2328,27 @@ export default function App() {
                   );
                 }
 
-                if (iconId === 'font') {
-                  return (
-                    <button
-                      key={iconId}
-                      ref={bindRef}
-                      type="button"
-                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'font', 'doc')}
-                      onClick={() => {
-                        if (suppressToolbarClickRef.current) return;
-                        setShowFontSizeBar((prev) => !prev);
-                      }}
-                      aria-label="调节字体与字号"
-                      title="调节字体与字号（可拖动调整图标位置）"
-                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
-                        isDraggingThis
-                          ? dragCls
-                          : showFontSizeBar
-                            ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)]'
-                            : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
-                      }`}
-                    >
-                      <ALargeSmall className="w-[22px] h-[22px]" strokeWidth={1.8} />
-                    </button>
-                  );
-                }
-
                 return (
                   <button
                     key={iconId}
                     ref={bindRef}
                     type="button"
-                    onPointerDown={(e) => handleToolbarIconPointerDown(e, 'sync', 'doc')}
-                    onClick={handleDirectSyncClick}
-                    onContextMenu={(e) => e.preventDefault()}
-                    disabled={isSyncing}
-                    aria-label={
-                      hasPendingSync
-                        ? '点击同步（有未同步变更）'
-                        : '点击同步'
-                    }
-                    title={
-                      hasPendingSync
-                        ? '有内容未同步至坚果云，点击直接同步（可拖动调整图标位置）'
-                        : '点击直接同步（可拖动调整图标位置）'
-                    }
-                    className={`relative w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all disabled:opacity-50 shrink-0 touch-none select-none ${dragCls}`}
+                    onPointerDown={(e) => handleToolbarIconPointerDown(e, 'font', 'doc')}
+                    onClick={() => {
+                      if (suppressToolbarClickRef.current) return;
+                      setShowFontSizeBar((prev) => !prev);
+                    }}
+                    aria-label="调节字体与字号"
+                    title="调节字体与字号（可拖动调整图标位置）"
+                    className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
+                      isDraggingThis
+                        ? dragCls
+                        : showFontSizeBar
+                          ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)]'
+                          : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
+                    }`}
                   >
-                    <RefreshCw
-                      className={`w-[22px] h-[22px] ${isSyncing ? 'animate-spin' : ''}`}
-                      strokeWidth={1.8}
-                    />
-                    {hasPendingSync && (
-                      <span
-                        aria-hidden="true"
-                        className="absolute top-[9px] right-[9px] w-[6px] h-[6px] rounded-full bg-[var(--fei-text-muted)]"
-                      />
-                    )}
+                    <ALargeSmall className="w-[22px] h-[22px]" strokeWidth={1.8} />
                   </button>
                 );
               })}
@@ -2470,6 +2439,8 @@ export default function App() {
       {/* Settings Modal: Sync, Encryption, PC Direct Connect, Local Folder & Dictionary */}
       {showSyncModal && (
         <SyncModal
+          themeMode={themeMode}
+          onChangeThemeMode={setThemeMode}
           config={webDavConfig}
           storageFolderPath={storageDir.folderPath}
           onChangeStorageFolder={() => {
@@ -2532,7 +2503,7 @@ export default function App() {
             role="dialog"
             aria-label="调节字体与字号"
             onClick={(e) => e.stopPropagation()}
-            className="fixed bottom-[64px] left-1/2 -translate-x-1/2 z-40 w-[min(340px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-none dark:shadow-lg flex flex-col gap-2.5 select-none"
+            className="fixed bottom-[64px] left-1/2 -translate-x-1/2 z-40 w-[min(340px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-lg eink:shadow-none flex flex-col gap-2.5 select-none"
           >
             <div className="flex items-center gap-2">
               <button
@@ -2654,8 +2625,8 @@ export default function App() {
 
       {/* Drag Overlay */}
       {windowDragging && (
-        <div className="fixed inset-0 z-50 bg-transparent dark:bg-black/25 flex items-center justify-center pointer-events-none">
-          <div className="px-5 py-3 rounded-xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-none dark:shadow-lg text-[14px] text-[var(--fei-text-primary)]">
+        <div className="fixed inset-0 z-50 bg-black/10 dark:bg-black/25 eink:bg-transparent flex items-center justify-center pointer-events-none">
+          <div className="px-5 py-3 rounded-xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-lg eink:shadow-none text-[14px] text-[var(--fei-text-primary)]">
             松开导入 .txt / .md / .epub 文档
           </div>
         </div>
@@ -2666,7 +2637,7 @@ export default function App() {
 
       {/* Toast */}
       {toast && (
-        <div className="fixed bottom-16 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-32px)] px-4 py-2 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[12.5px] leading-snug text-center shadow-md">
+        <div className="fixed bottom-16 left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-32px)] px-4 py-2 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[12.5px] leading-snug text-center shadow-md eink:shadow-none">
           <span>{toast.msg}</span>
         </div>
       )}

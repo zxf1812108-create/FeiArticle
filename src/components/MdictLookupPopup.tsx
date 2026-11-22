@@ -331,8 +331,8 @@ const MdictShadowDefinition: React.FC<{
         `
         : `
           .mdx-surface {
-            background-color: #ffffff;
-            color: #000000;
+            background-color: var(--fei-popup-bg, #ffffff);
+            color: var(--fei-text-primary, #000000);
           }
         `
       : '';
@@ -801,21 +801,21 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         }`}
       >
         <div
-          className={`pointer-events-auto w-full max-w-[720px] flex flex-col bg-[#FFFFFF] dark:bg-[#242424] border-[1.5px] border-[#262626] dark:border-[#787878] rounded-2xl shadow-none dark:ring-1 dark:ring-white/10 dark:shadow-[0_14px_36px_-4px_rgba(0,0,0,0.75)] overflow-hidden text-[var(--fei-text-primary)] ${
+          className={`pointer-events-auto w-full max-w-[720px] flex flex-col bg-[var(--fei-popup-bg)] border-[1.5px] border-[var(--fei-popup-border)] rounded-2xl shadow-[0_12px_32px_-6px_rgba(0,0,0,0.14)] dark:ring-1 dark:ring-white/10 dark:shadow-[0_14px_36px_-4px_rgba(0,0,0,0.75)] eink:shadow-none overflow-hidden text-[var(--fei-text-primary)] ${
             isExpanded ? 'h-full' : 'max-h-[min(40vh,340px)]'
           }`}
         >
           {/* Subtle handle bar when docked at bottom */}
           {placement === 'bottom' && !isExpanded && (
-            <div className="flex justify-center pt-1.5 pb-0.5 bg-[#FFFFFF] dark:bg-[#2A2A2A] shrink-0">
-              <span className="w-7 h-[3px] rounded-full bg-[#B0B0B0] dark:bg-[#5E5E5E]" />
+            <div className="flex justify-center pt-1.5 pb-0.5 bg-[var(--fei-popup-header-bg)] shrink-0">
+              <span className="w-7 h-[3px] rounded-full bg-[var(--fei-popup-handle)]" />
             </div>
           )}
 
           {/* Header Band */}
           <div
             ref={headerRef}
-            className="relative px-3.5 py-2 bg-[#FFFFFF] dark:bg-[#2A2A2A] border-b border-[#BDBDBD] dark:border-[#4A4A4A] flex items-center justify-between gap-2 shrink-0 select-none"
+            className="relative px-3.5 py-2 bg-[var(--fei-popup-header-bg)] border-b border-[var(--fei-popup-divider)] flex items-center justify-between gap-2 shrink-0 select-none"
           >
             <div
               style={!shiftExpandLeft ? { maxWidth: 'calc(50% - 22px)' } : undefined}
@@ -889,7 +889,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
               onPointerDown={handleBodyPointerDown}
               onClick={handleBodyClick}
               onScroll={scheduleEdgeClipUpdate}
-              className="flex-1 min-h-0 overflow-y-auto px-3.5 py-2.5 bg-[#FFFFFF] dark:bg-[#242424] cursor-pointer"
+              className="flex-1 min-h-0 overflow-y-auto px-3.5 py-2.5 bg-[var(--fei-popup-bg)] cursor-pointer"
             >
               <div ref={bodyContentRef}>
                 {loading ? (
@@ -929,7 +929,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
               <div
                 aria-hidden="true"
                 style={{ height: `${topClipPx}px` }}
-                className="pointer-events-none absolute left-0 right-1.5 top-0 bg-[#FFFFFF] dark:bg-[#242424] z-10"
+                className="pointer-events-none absolute left-0 right-1.5 top-0 bg-[var(--fei-popup-bg)] z-10"
               />
             )}
 
@@ -937,15 +937,15 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
               <div
                 aria-hidden="true"
                 style={{ height: `${bottomClipPx}px` }}
-                className="pointer-events-none absolute left-0 right-1.5 bottom-0 bg-[#FFFFFF] dark:bg-[#242424] z-10"
+                className="pointer-events-none absolute left-0 right-1.5 bottom-0 bg-[var(--fei-popup-bg)] z-10"
               />
             )}
           </div>
 
           {/* Subtle handle bar when docked at top */}
           {placement === 'top' && !isExpanded && (
-            <div className="flex justify-center pt-0.5 pb-1.5 bg-[#FFFFFF] dark:bg-[#242424] shrink-0">
-              <span className="w-7 h-[3px] rounded-full bg-[#B0B0B0] dark:bg-[#5E5E5E]" />
+            <div className="flex justify-center pt-0.5 pb-1.5 bg-[var(--fei-popup-bg)] shrink-0">
+              <span className="w-7 h-[3px] rounded-full bg-[var(--fei-popup-handle)]" />
             </div>
           )}
         </div>

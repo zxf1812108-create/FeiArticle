@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
+@custom-variant eink (&:where(.eink, .eink *));
 
 @layer base {
   :root {
@@ -8,21 +9,26 @@
     --font-doc-body: system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Roboto", sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-    /* E-Ink Pure White & Pure Black Light Palette (Zero Background Dithering) */
+    /* FeiNote LCD Eye-Comfort Minimalist Light Palette (Matte Paper & Soft Charcoal, ~11:1 contrast mirroring Dark Mode) */
     color-scheme: light;
-    --fei-text-primary: #000000;
-    --fei-text-muted: #595959;
-    --fei-bg: #FFFFFF;
-    --fei-bg-bar: #FFFFFF;
-    --fei-bg-surface: #FFFFFF;
-    --fei-bg-subtle: #FFFFFF;
-    --fei-bg-hover: #FFFFFF;
-    --fei-bg-selected: #FFFFFF;
-    --fei-border: #C4C4C4;
-    --fei-border-strong: #4A4A4A;
-    --fei-modal-border: #262626;
-    --fei-btn-primary-bg: #000000;
-    --fei-btn-primary-text: #FFFFFF;
+    --fei-text-primary: #333330;
+    --fei-text-muted: #767570;
+    --fei-bg: #F3F2EE;
+    --fei-bg-bar: #ECEBE6;
+    --fei-bg-surface: #F7F6F2;
+    --fei-bg-subtle: #EAE9E3;
+    --fei-bg-hover: #E6E5DF;
+    --fei-bg-selected: #E2E0D9;
+    --fei-border: #DDDCD5;
+    --fei-border-strong: #B5B3AA;
+    --fei-modal-border: #CCCAC2;
+    --fei-btn-primary-bg: #333330;
+    --fei-btn-primary-text: #F7F6F2;
+    --fei-popup-bg: #F7F6F2;
+    --fei-popup-header-bg: #EFEEE9;
+    --fei-popup-border: #C8C6BE;
+    --fei-popup-divider: #DDDCD5;
+    --fei-popup-handle: #C2C0B8;
   }
 
   html.dark {
@@ -41,6 +47,34 @@
     --fei-modal-border: #666666;
     --fei-btn-primary-bg: #C8C8C8;
     --fei-btn-primary-text: #1A1A1A;
+    --fei-popup-bg: #242424;
+    --fei-popup-header-bg: #2A2A2A;
+    --fei-popup-border: #787878;
+    --fei-popup-divider: #4A4A4A;
+    --fei-popup-handle: #5E5E5E;
+  }
+
+  html.eink {
+    /* E-Ink Pure White & Pure Black Palette (Zero Background Dithering, identical to legacy light mode) */
+    color-scheme: light;
+    --fei-text-primary: #000000;
+    --fei-text-muted: #595959;
+    --fei-bg: #FFFFFF;
+    --fei-bg-bar: #FFFFFF;
+    --fei-bg-surface: #FFFFFF;
+    --fei-bg-subtle: #FFFFFF;
+    --fei-bg-hover: #FFFFFF;
+    --fei-bg-selected: #FFFFFF;
+    --fei-border: #C4C4C4;
+    --fei-border-strong: #4A4A4A;
+    --fei-modal-border: #262626;
+    --fei-btn-primary-bg: #000000;
+    --fei-btn-primary-text: #FFFFFF;
+    --fei-popup-bg: #FFFFFF;
+    --fei-popup-header-bg: #FFFFFF;
+    --fei-popup-border: #262626;
+    --fei-popup-divider: #BDBDBD;
+    --fei-popup-handle: #B0B0B0;
   }
 
   *,

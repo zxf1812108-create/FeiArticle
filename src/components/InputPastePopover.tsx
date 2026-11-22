@@ -739,7 +739,7 @@ export const InputPastePopover: React.FC<InputPastePopoverProps> = ({ onFeedback
           void handlePasteAction();
         }}
         aria-label="粘贴系统剪贴板内容"
-        className="h-9 px-3.5 rounded-xl inline-flex items-center gap-1.5 bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] text-[13px] font-medium text-[var(--fei-text-primary)] shadow-md dark:shadow-xl hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] transition-colors whitespace-nowrap select-none cursor-pointer"
+        className="h-9 px-3.5 rounded-xl inline-flex items-center gap-1.5 bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] text-[13px] font-medium text-[var(--fei-text-primary)] shadow-md dark:shadow-xl eink:shadow-none hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] transition-colors whitespace-nowrap select-none cursor-pointer"
       >
         <ClipboardPaste className="w-3.5 h-3.5 text-[var(--fei-text-muted)]" strokeWidth={1.9} />
         <span>粘贴</span>

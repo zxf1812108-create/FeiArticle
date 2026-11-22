@@ -77,12 +77,12 @@ export const TrashModal: React.FC<TrashModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent dark:bg-black/45 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 dark:bg-black/45 eink:bg-transparent p-4"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[440px] max-h-[84vh] flex flex-col bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-none dark:shadow-xl overflow-hidden text-[var(--fei-text-primary)]"
+        className="w-full max-w-[440px] max-h-[84vh] flex flex-col bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-xl eink:shadow-none overflow-hidden text-[var(--fei-text-primary)]"
       >
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-[var(--fei-border)] flex items-center justify-between gap-3 shrink-0">

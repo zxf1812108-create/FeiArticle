@@ -26,7 +26,7 @@ export const DocOutlineModal: React.FC<DocOutlineModalProps> = ({
   return (
     <div
       data-outline-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent dark:bg-black/45 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 dark:bg-black/45 eink:bg-transparent p-4"
       onClick={(e) => {
         e.stopPropagation();
         onClose();
@@ -34,7 +34,7 @@ export const DocOutlineModal: React.FC<DocOutlineModalProps> = ({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[400px] max-h-[76vh] flex flex-col bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-none dark:shadow-xl overflow-hidden text-[var(--fei-text-primary)]"
+        className="w-full max-w-[400px] max-h-[76vh] flex flex-col bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-xl eink:shadow-none overflow-hidden text-[var(--fei-text-primary)]"
       >
         {/* Header */}
         <div className="px-4 py-3 border-b border-[var(--fei-border)] flex items-center justify-between gap-3 shrink-0">
@@ -71,7 +71,7 @@ export const DocOutlineModal: React.FC<DocOutlineModalProps> = ({
                   onClick={() => onJumpToHeading(item.id)}
                   className={`w-full text-left py-2 pr-3 rounded-xl transition-colors flex items-center gap-2 border ${indentCls} ${
                     isActive
-                      ? 'bg-[var(--fei-bg-selected)] border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)] font-semibold'
+                      ? 'bg-[var(--fei-bg-selected)] border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)] font-semibold'
                       : item.level === 3
                         ? 'border-transparent text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)]'
                         : 'border-transparent text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)]'

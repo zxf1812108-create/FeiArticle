@@ -294,7 +294,7 @@ function renderInline(raw: string, autoHyphenate = false) {
       return (
         <code
           key={idx}
-          className="font-code text-[0.88em] px-1.5 py-0.5 rounded bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent text-[var(--fei-text-primary)] hyphens-none"
+          className="font-code text-[0.88em] px-1.5 py-0.5 rounded bg-[var(--fei-bg-subtle)] border border-transparent eink:border-[var(--fei-border)] text-[var(--fei-text-primary)] hyphens-none"
         >
           {token.value}
         </code>
@@ -376,7 +376,7 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean, aut
         <blockquote
           key={idx}
           {...offsetAttrs}
-          className={`${topZero || 'mt-4'} mb-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent text-[var(--fei-text-primary)] text-[0.94em] ${justifyCls}`}
+          className={`${topZero || 'mt-4'} mb-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-transparent eink:border-[var(--fei-border)] text-[var(--fei-text-primary)] text-[0.94em] ${justifyCls}`}
         >
           <span className="whitespace-pre-line">{renderInline(block.text, autoHyphenate)}</span>
         </blockquote>
@@ -386,7 +386,7 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean, aut
         <pre
           key={idx}
           {...offsetAttrs}
-          className={`${topZero || 'mt-4'} mb-4 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent overflow-x-auto text-[0.8125em] leading-relaxed font-code text-[var(--fei-text-primary)] hyphens-none text-left`}
+          className={`${topZero || 'mt-4'} mb-4 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] border border-transparent eink:border-[var(--fei-border)] overflow-x-auto text-[0.8125em] leading-relaxed font-code text-[var(--fei-text-primary)] hyphens-none text-left`}
         >
           <code>{block.code}</code>
         </pre>
@@ -2265,7 +2265,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               }}
               onClick={handleCopyPopoverClick}
               aria-label="复制选中内容"
-              className="h-9 px-3.5 rounded-xl inline-flex items-center gap-1.5 bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] text-[13px] font-medium text-[var(--fei-text-primary)] shadow-md dark:shadow-xl hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] transition-colors whitespace-nowrap select-none cursor-pointer"
+              className="h-9 px-3.5 rounded-xl inline-flex items-center gap-1.5 bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] text-[13px] font-medium text-[var(--fei-text-primary)] shadow-md dark:shadow-xl eink:shadow-none hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] transition-colors whitespace-nowrap select-none cursor-pointer"
             >
               <Copy className="w-3.5 h-3.5 text-[var(--fei-text-muted)]" strokeWidth={1.9} />
               <span>复制</span>
