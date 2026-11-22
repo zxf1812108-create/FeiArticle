@@ -257,6 +257,7 @@ export default function App() {
   const [lanUrl, setLanUrl] = useState('');
   const [lanLoading, setLanLoading] = useState(false);
   const [toast, setToast] = useState<{ msg: string } | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
   const [windowDragging, setWindowDragging] = useState(false);
 
   const docViewRef = useRef<MinimalDocViewHandle>(null);
@@ -722,11 +723,16 @@ export default function App() {
     });
   }, [lanRunning, selectedDocId]);
 
-  const showToast = (msg: string) => {
+  const showToast = (msg: string, durationMs = 3800) => {
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
     setToast({ msg });
-    window.setTimeout(() => {
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
       setToast((prev) => (prev?.msg === msg ? null : prev));
-    }, 3800);
+    }, durationMs);
   };
 
   const dirtyCount = useMemo(
@@ -1445,7 +1451,7 @@ export default function App() {
     if (whistleEnabled) {
       stopWhistleDetector();
       setWhistleEnabled(false);
-      showToast('声控翻页已关闭');
+      showToast('吹口哨翻页已关闭', 1200);
       return;
     }
 
@@ -1464,7 +1470,7 @@ export default function App() {
       if (whistleDetectorRef.current === detector) {
         setWhistleEnabled(true);
         resetWhistleIdleTimer();
-        showToast('声控翻页已开启，吹口哨翻下一页');
+        showToast('吹口哨翻下一页', 1200);
       } else {
         detector.stop();
       }
