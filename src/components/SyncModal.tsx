@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
-import { Copy, Eye, EyeOff, X } from 'lucide-react';
+import { Copy, Eye, EyeOff, Folder, X } from 'lucide-react';
 import { WebDavConfig } from '../types';
 import { DEFAULT_JIANGUOYUN_URL, normalizeWebDavBaseUrl } from '../utils/webdavSync';
 
 interface SyncModalProps {
   config: WebDavConfig;
+  storageFolderPath: string;
+  onChangeStorageFolder: () => void;
   lanRunning: boolean;
   lanUrl: string;
   lanLoading: boolean;
@@ -16,6 +18,8 @@ interface SyncModalProps {
 
 export const SyncModal: React.FC<SyncModalProps> = ({
   config,
+  storageFolderPath,
+  onChangeStorageFolder,
   lanRunning,
   lanUrl,
   lanLoading,
@@ -272,6 +276,28 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                   </p>
                 </div>
               )}
+            </div>
+          </section>
+
+          {/* 区域四：本地存储目录 */}
+          <section className="space-y-2">
+            <h3 className="text-[13.5px] font-medium text-[var(--fei-text-primary)] px-0.5">
+              本地文档目录
+            </h3>
+            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] px-3.5 py-2.5 flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2 min-w-0">
+                <Folder className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0" strokeWidth={1.75} />
+                <span className="text-[12.5px] font-code text-[var(--fei-text-primary)] truncate">
+                  {storageFolderPath || '/Documents/FeiArtical'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={onChangeStorageFolder}
+                className="px-2.5 py-1 rounded-lg border border-[var(--fei-border)] text-[12px] text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors"
+              >
+                更改
+              </button>
             </div>
           </section>
 

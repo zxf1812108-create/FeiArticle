@@ -35,6 +35,7 @@ export interface MinimalDocViewHandle {
   prepareModeSwitch: (nextEditing: boolean) => void;
   captureTypographyAnchor: () => void;
   flushAndCaptureViewState: () => DocViewStateSnapshot;
+  hasUnsavedDraft: () => boolean;
   applyMarkdownFormat: (kind: EditFormatKind) => void;
   undo: () => void;
   redo: () => void;
@@ -1033,9 +1034,15 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       };
     }, [isEditing]);
 
-    // Sync content only when remote body arrives lazily in read mode
+    // Sync content when remote body arrives lazily or an external app edits the local file
     useEffect(() => {
-      if (!isEditing && !hasUnsavedDraftRef.current && doc.content !== contentRef.current) {
+      const isActivelyFocusedEditing =
+        isEditing && Boolean(textareaRef.current && document.activeElement === textareaRef.current);
+      if (
+        !hasUnsavedDraftRef.current &&
+        !isActivelyFocusedEditing &&
+        doc.content !== contentRef.current
+      ) {
         setContent(doc.content);
         contentRef.current = doc.content;
         resetEditHistory(doc.content);
@@ -1659,6 +1666,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           charOffset: captureCurrentCharOffset(),
           readProgress: computeReadProgress(),
         };
+      },
+      hasUnsavedDraft() {
+        return (
+          hasUnsavedDraftRef.current ||
+          Boolean(
+            isEditingRef.current &&
+              textareaRef.current &&
+              document.activeElement === textareaRef.current
+          )
+        );
       },
       applyMarkdownFormat(kind: EditFormatKind) {
         const ta = textareaRef.current;

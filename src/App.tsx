@@ -36,9 +36,20 @@ import {
   MinimalTreeViewHandle,
   TreeSelection,
 } from './components/MinimalTreeView';
-import { StorageFolderModal } from './components/StorageFolderModal';
+import {
+  StorageFolderConfirmResult,
+  StorageFolderModal,
+} from './components/StorageFolderModal';
 import { SyncModal } from './components/SyncModal';
 import { TrashModal } from './components/TrashModal';
+import {
+  checkAndPullExternalLocalFsChanges,
+  resetLocalFsSyncManifest,
+  scanAndMergeFromLocalFs,
+  subscribeLocalStorageResume,
+  syncWorkspaceToLocalFs,
+  verifyLocalStorageReady,
+} from './utils/localFs';
 import {
   ArticleDoc,
   DocFontId,
@@ -208,6 +219,9 @@ export default function App() {
   const [storageDir, setStorageDir] = useState<StorageDirectoryConfig>(() =>
     loadStorageDirConfig()
   );
+  const [showStorageFolderModal, setShowStorageFolderModal] = useState(false);
+  const [storageModalSubtitle, setStorageModalSubtitle] = useState<string | undefined>(undefined);
+  const [localFsReady, setLocalFsReady] = useState(false);
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTrashModal, setShowTrashModal] = useState(false);
@@ -252,6 +266,14 @@ export default function App() {
   docsRef.current = docs;
   const foldersRef = useRef<FolderNode[]>(folders);
   foldersRef.current = folders;
+  const storageDirRef = useRef<StorageDirectoryConfig>(storageDir);
+  storageDirRef.current = storageDir;
+  const mainViewRef = useRef<MainView>(mainView);
+  mainViewRef.current = mainView;
+  const selectedDocIdRef = useRef<string | null>(selectedDocId);
+  selectedDocIdRef.current = selectedDocId;
+  const localFsTimerRef = useRef<number | null>(null);
+  const isPullingLocalFsRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -319,6 +341,163 @@ export default function App() {
       }),
     [collapsedFolderIds, activeTarget, treeScrollTop, treeStateUpdatedAt]
   );
+
+  // Pull external edits / new files / renames / deletions from the bound phone/local folder
+  const pullExternalLocalChanges = async (options?: { forceScan?: boolean; silent?: boolean }) => {
+    if (isPullingLocalFsRef.current) return;
+    if (!storageDirRef.current.initialized) return;
+    // Wait until any debounced in-app write has flushed first so we never race our own edits
+    if (localFsTimerRef.current !== null && !options?.forceScan) return;
+
+    isPullingLocalFsRef.current = true;
+    try {
+      const protectedDocId =
+        mainViewRef.current === 'doc' &&
+        selectedDocIdRef.current &&
+        docViewRef.current?.hasUnsavedDraft()
+          ? selectedDocIdRef.current
+          : null;
+
+      const res = await checkAndPullExternalLocalFsChanges(
+        foldersRef.current,
+        docsRef.current,
+        storageDirRef.current,
+        {
+          protectedDocId,
+          forceScan: options?.forceScan,
+        }
+      );
+
+      if (res.changed) {
+        setFolders(res.folders);
+        setDocs(res.docs);
+        setFoldersDirty(true);
+
+        if (!options?.silent) {
+          const parts: string[] = [];
+          if (res.updatedCount > 0) parts.push(`更新 ${res.updatedCount} 篇`);
+          if (res.addedCount > 0) parts.push(`新增 ${res.addedCount} 篇`);
+          if (res.renamedCount > 0) parts.push(`重命名 ${res.renamedCount} 篇`);
+          if (res.removedCount > 0) parts.push(`移入回收站 ${res.removedCount} 篇`);
+          if (parts.length > 0) {
+            showToast(`已同步本地变更（${parts.join('，')}）`);
+          }
+        }
+      }
+    } catch {
+      // Ignore transient disk polling errors
+    } finally {
+      isPullingLocalFsRef.current = false;
+    }
+  };
+
+  // Verify real local folder binding on startup, pull external edits, and prompt migration if upgrading
+  useEffect(() => {
+    if (!storageDir.initialized) return;
+    let cancelled = false;
+    verifyLocalStorageReady(storageDir)
+      .then(async (status) => {
+        if (cancelled) return;
+        if (status.needsRebind) {
+          setLocalFsReady(false);
+          setStorageModalSubtitle(
+            '请授权并创建手机本地目录，原有文档将自动保存为该目录中的 .md / .txt 文件'
+          );
+          setShowStorageFolderModal(true);
+          return;
+        }
+        const effectiveConfig = status.updatedConfig ?? storageDir;
+        if (status.updatedConfig) {
+          setStorageDir(status.updatedConfig);
+          saveStorageDirConfig(status.updatedConfig);
+          storageDirRef.current = status.updatedConfig;
+        }
+        setLocalFsReady(status.ready);
+
+        if (status.ready && status.isRealDisk) {
+          const pulled = await checkAndPullExternalLocalFsChanges(
+            foldersRef.current,
+            docsRef.current,
+            effectiveConfig,
+            { forceScan: true }
+          );
+          if (cancelled) return;
+          if (pulled.changed) {
+            setFolders(pulled.folders);
+            setDocs(pulled.docs);
+            setFoldersDirty(true);
+          }
+          await syncWorkspaceToLocalFs(pulled.folders, pulled.docs, effectiveConfig);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLocalFsReady(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Continuously mirror folder & document mutations to the bound local folder on disk
+  useEffect(() => {
+    if (!storageDir.initialized || !localFsReady) return;
+    if (localFsTimerRef.current !== null) {
+      window.clearTimeout(localFsTimerRef.current);
+    }
+    localFsTimerRef.current = window.setTimeout(() => {
+      localFsTimerRef.current = null;
+      void syncWorkspaceToLocalFs(foldersRef.current, docsRef.current, storageDirRef.current);
+    }, 280);
+    return () => {
+      if (localFsTimerRef.current !== null) {
+        window.clearTimeout(localFsTimerRef.current);
+        localFsTimerRef.current = null;
+      }
+    };
+  }, [folders, docs, storageDir, localFsReady]);
+
+  // Real-time two-way sync: check for external edits immediately on app resume & every 3s in foreground
+  useEffect(() => {
+    if (!storageDir.initialized || !localFsReady) return;
+
+    const unsubscribeResume = subscribeLocalStorageResume(() => {
+      void pullExternalLocalChanges();
+    });
+
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void pullExternalLocalChanges();
+      }
+    }, 3000);
+
+    return () => {
+      unsubscribeResume();
+      window.clearInterval(interval);
+    };
+  }, [storageDir.initialized, localFsReady]);
+
+  // Flush pending local disk writes immediately when app goes to background or closes
+  useEffect(() => {
+    if (!storageDir.initialized || !localFsReady) return;
+    const flushNow = () => {
+      if (localFsTimerRef.current !== null) {
+        window.clearTimeout(localFsTimerRef.current);
+        localFsTimerRef.current = null;
+      }
+      void syncWorkspaceToLocalFs(foldersRef.current, docsRef.current, storageDirRef.current);
+    };
+    const onVisChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushNow();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisChange);
+    window.addEventListener('pagehide', flushNow);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisChange);
+      window.removeEventListener('pagehide', flushNow);
+    };
+  }, [storageDir.initialized, localFsReady]);
 
   // Automatically permanently delete Trash items older than 30 days on launch and periodically
   const runExpiredTrashCleanup = () => {
@@ -2030,19 +2209,60 @@ export default function App() {
         </div>
       </footer>
 
-      {/* First-Launch Storage Folder Selector Modal */}
-      {!storageDir.initialized && (
+      {/* First-Launch or User-Triggered Real Storage Folder Selector Modal */}
+      {(!storageDir.initialized || showStorageFolderModal) && (
         <StorageFolderModal
           initialPath={storageDir.folderPath}
-          onConfirm={(folderPath) => {
+          allowCancel={storageDir.initialized && !storageModalSubtitle}
+          subtitle={storageModalSubtitle}
+          onCancel={() => {
+            setShowStorageFolderModal(false);
+            setStorageModalSubtitle(undefined);
+          }}
+          onConfirm={async (result: StorageFolderConfirmResult) => {
             const next: StorageDirectoryConfig = {
               initialized: true,
-              folderPath,
+              folderPath: result.folderPath,
+              storageMode: result.storageMode,
+              treeUri: result.treeUri,
               selectedAt: Date.now(),
             };
+            resetLocalFsSyncManifest();
             setStorageDir(next);
             saveStorageDirConfig(next);
-            showToast(`文档存放目录已设为 ${folderPath}`);
+            storageDirRef.current = next;
+            setLocalFsReady(true);
+            setShowStorageFolderModal(false);
+            setStorageModalSubtitle(undefined);
+
+            if (result.storageMode !== 'browser-only') {
+              const merged = await scanAndMergeFromLocalFs(
+                foldersRef.current,
+                docsRef.current,
+                next
+              );
+              if (merged.importedFolderCount > 0 || merged.importedDocCount > 0) {
+                setFolders(merged.folders);
+                setDocs(merged.docs);
+              }
+              const synced = await syncWorkspaceToLocalFs(
+                merged.folders,
+                merged.docs,
+                next,
+                { forceFull: true }
+              );
+              if (!synced.ok) {
+                showToast(synced.error || '目录已绑定，但写入文件失败');
+              } else if (merged.importedDocCount > 0) {
+                showToast(
+                  `已绑定 ${result.folderPath}，载入 ${merged.importedDocCount} 篇本地文档`
+                );
+              } else {
+                showToast(`已创建并绑定目录 ${result.folderPath}`);
+              }
+            } else {
+              showToast(`文档目录已设为 ${result.folderPath}`);
+            }
           }}
         />
       )}
@@ -2051,6 +2271,12 @@ export default function App() {
       {showSyncModal && (
         <SyncModal
           config={webDavConfig}
+          storageFolderPath={storageDir.folderPath}
+          onChangeStorageFolder={() => {
+            setShowSyncModal(false);
+            setStorageModalSubtitle(undefined);
+            setShowStorageFolderModal(true);
+          }}
           lanRunning={lanRunning}
           lanUrl={lanUrl}
           lanLoading={lanLoading}

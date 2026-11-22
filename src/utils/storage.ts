@@ -26,10 +26,14 @@ const KEYS = {
   DOC_FONTS: 'feiartical_doc_fonts_v1',
 };
 
+export type LocalStorageBackendMode = 'saf' | 'path' | 'web-fs' | 'browser-only';
+
 export interface StorageDirectoryConfig {
   initialized: boolean;
   folderPath: string;
   selectedAt: number;
+  storageMode?: LocalStorageBackendMode;
+  treeUri?: string;
 }
 
 export interface PersistedTreeState {
@@ -82,7 +86,11 @@ export function loadFolders(): FolderNode[] {
 }
 
 export function saveFolders(folders: FolderNode[]): void {
-  localStorage.setItem(KEYS.FOLDERS, JSON.stringify(folders));
+  try {
+    localStorage.setItem(KEYS.FOLDERS, JSON.stringify(folders));
+  } catch {
+    // Ignore localStorage quota errors when real filesystem persistence is active
+  }
 }
 
 export function loadDocs(): ArticleDoc[] {
@@ -90,7 +98,11 @@ export function loadDocs(): ArticleDoc[] {
 }
 
 export function saveDocs(docs: ArticleDoc[]): void {
-  localStorage.setItem(KEYS.DOCS, JSON.stringify(docs));
+  try {
+    localStorage.setItem(KEYS.DOCS, JSON.stringify(docs));
+  } catch {
+    // Ignore localStorage quota errors when large docs exceed browser 5MB cap
+  }
 }
 
 export function loadReaderSettings(): ReaderSettings {
@@ -184,6 +196,14 @@ export function loadStorageDirConfig(): StorageDirectoryConfig {
     localStorage.getItem(KEYS.STORAGE_DIR),
     {}
   );
+  const rawMode = parsed.storageMode;
+  const storageMode: LocalStorageBackendMode | undefined =
+    rawMode === 'saf' ||
+    rawMode === 'path' ||
+    rawMode === 'web-fs' ||
+    rawMode === 'browser-only'
+      ? rawMode
+      : undefined;
   return {
     initialized: parsed.initialized === true,
     folderPath:
@@ -191,6 +211,8 @@ export function loadStorageDirConfig(): StorageDirectoryConfig {
         ? parsed.folderPath.trim()
         : '/Documents/FeiArtical',
     selectedAt: typeof parsed.selectedAt === 'number' ? parsed.selectedAt : 0,
+    storageMode,
+    treeUri: typeof parsed.treeUri === 'string' && parsed.treeUri.trim() ? parsed.treeUri.trim() : undefined,
   };
 }
 
