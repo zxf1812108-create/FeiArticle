@@ -524,7 +524,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
             </button>
             <button
               type="submit"
-              className="flex-1 h-9 rounded-xl bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium hover:opacity-90 transition-opacity select-none"
+              className="flex-1 h-9 rounded-xl bg-[var(--fei-bg-subtle)] text-[13px] font-medium text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] transition-colors select-none"
             >
               保存
             </button>
