@@ -507,7 +507,6 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 public class ReaderNativePlugin extends Plugin {
     private static volatile ReaderNativePlugin activeInstance;
     public static volatile boolean volumeKeyInterceptEnabled = false;
-    public static volatile boolean suppressSelectionMenu = false;
 
     @Override
     public void load() {
@@ -521,24 +520,12 @@ public class ReaderNativePlugin extends Plugin {
             activeInstance = null;
         }
         volumeKeyInterceptEnabled = false;
-        suppressSelectionMenu = false;
         super.handleOnDestroy();
     }
 
     @PluginMethod
     public void setVolumeKeyIntercept(PluginCall call) {
         volumeKeyInterceptEnabled = Boolean.TRUE.equals(call.getBoolean("enabled", false));
-        call.resolve();
-    }
-
-    @PluginMethod
-    public void setSuppressSelectionMenu(PluginCall call) {
-        boolean next = Boolean.TRUE.equals(call.getBoolean("suppress", false));
-        suppressSelectionMenu = next;
-        if (getActivity() instanceof MainActivity) {
-            MainActivity activity = (MainActivity) getActivity();
-            activity.runOnUiThread(() -> activity.applySelectionActionModeSuppression(next));
-        }
         call.resolve();
     }
 
@@ -555,9 +542,7 @@ public class ReaderNativePlugin extends Plugin {
   const mainActivityJava = `package com.feiartical.app;
 
 import android.content.res.Configuration;
-import android.os.Build;
 import android.os.Bundle;
-import android.view.ActionMode;
 import android.view.KeyEvent;
 import android.view.View;
 import androidx.core.graphics.Insets;
@@ -567,8 +552,6 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
-    private ActionMode activeActionMode = null;
-
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(WebDavPlugin.class);
@@ -592,39 +575,6 @@ public class MainActivity extends BridgeActivity {
             }
         }
         return super.dispatchKeyEvent(event);
-    }
-
-    @Override
-    public void onActionModeStarted(ActionMode mode) {
-        super.onActionModeStarted(mode);
-        activeActionMode = mode;
-        if (ReaderNativePlugin.suppressSelectionMenu) {
-            applySelectionActionModeSuppression(true);
-        }
-    }
-
-    @Override
-    public void onActionModeFinished(ActionMode mode) {
-        if (activeActionMode == mode) {
-            activeActionMode = null;
-        }
-        super.onActionModeFinished(mode);
-    }
-
-    public void applySelectionActionModeSuppression(boolean suppress) {
-        ActionMode mode = activeActionMode;
-        if (mode == null) return;
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                if (suppress) {
-                    mode.hide(3600000L);
-                } else {
-                    mode.hide(0L);
-                    mode.invalidateContentRect();
-                }
-            }
-        } catch (Exception ignored) {
-        }
     }
 
     @Override

@@ -4,7 +4,6 @@ export type VolumeKeyDirection = 'up' | 'down';
 
 interface ReaderNativePlugin {
   setVolumeKeyIntercept(options: { enabled: boolean }): Promise<void>;
-  setSuppressSelectionMenu(options: { suppress: boolean }): Promise<void>;
   addListener(
     eventName: 'volumeKey',
     listenerFunc: (event: { direction: VolumeKeyDirection }) => void
@@ -20,11 +19,6 @@ function hasReaderNative(): boolean {
 export function setNativeVolumeKeyIntercept(enabled: boolean): void {
   if (!hasReaderNative()) return;
   ReaderNative.setVolumeKeyIntercept({ enabled }).catch(() => {});
-}
-
-export function setNativeSuppressSelectionMenu(suppress: boolean): void {
-  if (!hasReaderNative()) return;
-  ReaderNative.setSuppressSelectionMenu({ suppress }).catch(() => {});
 }
 
 export function subscribeNativeVolumeKeys(

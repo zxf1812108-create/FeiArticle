@@ -18,7 +18,6 @@ import {
   resolveReadViewportCharOffset,
 } from '../utils/docAnchor';
 import {
-  setNativeSuppressSelectionMenu,
   setNativeVolumeKeyIntercept,
   subscribeNativeVolumeKeys,
 } from '../utils/readerNative';
@@ -132,89 +131,202 @@ function collectVisualLines(scrollEl: HTMLElement, articleEl: HTMLElement): Visu
 }
 
 /**
- * Create a temporary off-screen mirror element matching a textarea's exact typography & width
- * to convert between character offsets and pixel Y offsets accurately.
+ * Browser <textarea> normalizes CRLF (\r\n) and CR (\r) to LF (\n) internally.
+ * Convert raw content & offset to match textarea.value 1:1.
  */
-function createTextareaMirror(textarea: HTMLTextAreaElement): HTMLDivElement {
+function normalizeForTextarea(raw: string, rawOffset: number): { text: string; offset: number } {
+  const safeOffset = Math.min(raw.length, Math.max(0, rawOffset));
+  if (!raw.includes('\r')) {
+    return { text: raw, offset: safeOffset };
+  }
+  let text = '';
+  let mappedOffset = 0;
+  for (let i = 0; i < raw.length; i++) {
+    if (i === safeOffset) {
+      mappedOffset = text.length;
+    }
+    const ch = raw[i];
+    if (ch === '\r') {
+      if (i + 1 < raw.length && raw[i + 1] === '\n') {
+        i++;
+        if (i === safeOffset) {
+          mappedOffset = text.length;
+        }
+      }
+      text += '\n';
+    } else {
+      text += ch;
+    }
+  }
+  if (safeOffset >= raw.length) {
+    mappedOffset = text.length;
+  }
+  return { text, offset: mappedOffset };
+}
+
+function mapTextareaOffsetToRaw(raw: string, taOffset: number): number {
+  if (!raw.includes('\r')) {
+    return Math.min(raw.length, Math.max(0, taOffset));
+  }
+  let taIdx = 0;
+  for (let i = 0; i < raw.length; i++) {
+    if (taIdx >= taOffset) return i;
+    if (raw[i] === '\r' && i + 1 < raw.length && raw[i + 1] === '\n') {
+      i++;
+    }
+    taIdx++;
+  }
+  return raw.length;
+}
+
+/**
+ * Create a temporary off-screen <textarea> clone using the exact same browser text-control
+ * layout engine and computed typography/wrapping styles as the real editor, eliminating any
+ * cumulative height drift between a <div> mirror and <textarea>.
+ */
+function createTextareaProbe(textarea: HTMLTextAreaElement): {
+  probe: HTMLTextAreaElement;
+  singleLineHeight: number;
+  padTop: number;
+} {
   const style = window.getComputedStyle(textarea);
-  const mirror = document.createElement('div');
-  mirror.style.position = 'fixed';
-  mirror.style.top = '-9999px';
-  mirror.style.left = '-9999px';
-  mirror.style.visibility = 'hidden';
-  mirror.style.pointerEvents = 'none';
-  mirror.style.whiteSpace = 'pre-wrap';
-  mirror.style.wordWrap = 'break-word';
-  mirror.style.overflowWrap = 'anywhere';
-  mirror.style.wordBreak = style.wordBreak;
-  mirror.style.tabSize = style.tabSize;
-  mirror.style.boxSizing = 'border-box';
-  mirror.style.width = `${textarea.clientWidth}px`;
-  mirror.style.fontFamily = style.fontFamily;
-  mirror.style.fontSize = style.fontSize;
-  mirror.style.fontWeight = style.fontWeight;
-  mirror.style.lineHeight = style.lineHeight;
-  mirror.style.letterSpacing = style.letterSpacing;
-  mirror.style.paddingTop = style.paddingTop;
-  mirror.style.paddingRight = style.paddingRight;
-  mirror.style.paddingBottom = style.paddingBottom;
-  mirror.style.paddingLeft = style.paddingLeft;
-  document.body.appendChild(mirror);
-  return mirror;
-}
+  const probe = document.createElement('textarea');
+  probe.setAttribute('aria-hidden', 'true');
+  probe.tabIndex = -1;
+  probe.readOnly = true;
+  probe.style.position = 'fixed';
+  probe.style.top = '-9999px';
+  probe.style.left = '-9999px';
+  probe.style.visibility = 'hidden';
+  probe.style.pointerEvents = 'none';
+  probe.style.boxSizing = 'border-box';
+  probe.style.border = '0';
+  probe.style.margin = '0';
+  probe.style.outline = 'none';
+  probe.style.resize = 'none';
+  probe.style.overflow = 'hidden';
+  probe.style.height = '0px';
+  probe.style.minHeight = '0px';
+  probe.style.width = `${textarea.clientWidth}px`;
+  probe.style.paddingTop = '0px';
+  probe.style.paddingBottom = '0px';
+  probe.style.paddingLeft = style.paddingLeft;
+  probe.style.paddingRight = style.paddingRight;
+  probe.style.fontFamily = style.fontFamily;
+  probe.style.fontSize = style.fontSize;
+  probe.style.fontWeight = style.fontWeight;
+  probe.style.fontStyle = style.fontStyle;
+  probe.style.fontVariant = style.fontVariant;
+  probe.style.lineHeight = style.lineHeight;
+  probe.style.letterSpacing = style.letterSpacing;
+  probe.style.wordSpacing = style.wordSpacing;
+  probe.style.whiteSpace = style.whiteSpace;
+  probe.style.overflowWrap = style.overflowWrap;
+  probe.style.wordBreak = style.wordBreak;
+  probe.style.tabSize = style.tabSize;
+  probe.style.textIndent = style.textIndent;
+  probe.style.textTransform = style.textTransform;
+  probe.style.direction = style.direction;
+  document.body.appendChild(probe);
 
-function measureCharTopInMirror(mirror: HTMLDivElement, text: string, idx: number): number {
-  mirror.textContent = '';
-  if (idx > 0) {
-    mirror.appendChild(document.createTextNode(text.slice(0, idx)));
-  }
-  const marker = document.createElement('span');
-  const ch = idx < text.length ? text[idx] : '';
-  marker.textContent = ch && ch !== '\n' && ch !== '\r' ? ch : '\u200b';
-  mirror.appendChild(marker);
-  if (idx + 1 < text.length) {
-    mirror.appendChild(
-      document.createTextNode(text.slice(idx + 1, Math.min(text.length, idx + 64)))
-    );
-  }
-  return marker.offsetTop;
-}
-
-function measureCharOffsetY(textarea: HTMLTextAreaElement, text: string, charIndex: number): number {
-  if (charIndex <= 0 || !text) {
-    return parseFloat(window.getComputedStyle(textarea).paddingTop) || 0;
-  }
-  const mirror = createTextareaMirror(textarea);
-  try {
-    const safeIdx = Math.min(text.length, Math.max(0, charIndex));
-    return measureCharTopInMirror(mirror, text, safeIdx);
-  } finally {
-    document.body.removeChild(mirror);
-  }
-}
-
-function findCharOffsetAtY(textarea: HTMLTextAreaElement, text: string, targetY: number): number {
-  if (targetY <= 0 || !text) return 0;
-  const style = window.getComputedStyle(textarea);
+  probe.value = '测A';
+  const measuredLh = probe.scrollHeight;
   const parsedLh = parseFloat(style.lineHeight);
-  const lineHeight = Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : 24;
+  const singleLineHeight =
+    measuredLh > 4 ? measuredLh : Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : 24;
   const padTop = parseFloat(style.paddingTop) || 0;
-  const minVisibleTop = Math.max(padTop, targetY + padTop - lineHeight * 0.35);
 
-  const mirror = createTextareaMirror(textarea);
+  return { probe, singleLineHeight, padTop };
+}
+
+function measureParaTopInProbe(
+  probe: HTMLTextAreaElement,
+  text: string,
+  paraStart: number
+): number {
+  if (paraStart <= 0) return 0;
+  probe.value = text.slice(0, paraStart - 1);
+  return probe.scrollHeight;
+}
+
+function measureIntraParaTopInProbe(
+  probe: HTMLTextAreaElement,
+  paraText: string,
+  localIdx: number,
+  singleLineHeight: number
+): number {
+  if (localIdx <= 0 || !paraText) return 0;
+  const clamped = Math.min(paraText.length, localIdx);
+  let wordEnd = Math.min(paraText.length, clamped + 1);
+  if (clamped < paraText.length && /[A-Za-z0-9_'’-]/.test(paraText[clamped])) {
+    const limit = Math.min(paraText.length, clamped + 48);
+    while (wordEnd < limit && /[A-Za-z0-9_'’-]/.test(paraText[wordEnd])) {
+      wordEnd++;
+    }
+  }
+  probe.value = paraText.slice(0, wordEnd);
+  return Math.max(0, probe.scrollHeight - singleLineHeight);
+}
+
+function measureCharOffsetY(
+  textarea: HTMLTextAreaElement,
+  rawText: string,
+  rawCharIndex: number
+): number {
+  const padTopFallback = parseFloat(window.getComputedStyle(textarea).paddingTop) || 0;
+  if (rawCharIndex <= 0 || !rawText || textarea.clientWidth <= 0) {
+    return padTopFallback;
+  }
+  const { text, offset } = normalizeForTextarea(rawText, rawCharIndex);
+  if (offset <= 0) return padTopFallback;
+
+  const { probe, singleLineHeight, padTop } = createTextareaProbe(textarea);
   try {
+    const paraStart = offset > 0 ? text.lastIndexOf('\n', offset - 1) + 1 : 0;
+    const paraEndRaw = text.indexOf('\n', paraStart);
+    const paraEnd = paraEndRaw === -1 ? text.length : paraEndRaw;
+    const paraTopY = measureParaTopInProbe(probe, text, paraStart);
+    const localIdx = Math.max(0, offset - paraStart);
+    const intraParaY =
+      localIdx > 0
+        ? measureIntraParaTopInProbe(
+            probe,
+            text.slice(paraStart, paraEnd),
+            localIdx,
+            singleLineHeight
+          )
+        : 0;
+    return padTop + paraTopY + intraParaY;
+  } finally {
+    document.body.removeChild(probe);
+  }
+}
+
+function findCharOffsetAtY(
+  textarea: HTMLTextAreaElement,
+  rawText: string,
+  targetScrollTop: number
+): number {
+  if (targetScrollTop <= 0 || !rawText || textarea.clientWidth <= 0) return 0;
+  const { text } = normalizeForTextarea(rawText, 0);
+  if (!text) return 0;
+
+  const { probe, singleLineHeight } = createTextareaProbe(textarea);
+  try {
+    const minVisibleTop = Math.max(0, targetScrollTop - singleLineHeight * 0.35);
+
     const lineStarts: number[] = [0];
     for (let i = 0; i < text.length; i++) {
       if (text[i] === '\n') lineStarts.push(i + 1);
     }
 
-    // Stage 1: locate the raw paragraph containing minVisibleTop
+    // Stage 1: binary search raw paragraphs to locate the one spanning minVisibleTop
     let lo = 0;
     let hi = lineStarts.length - 1;
     let bestLineIdx = 0;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      const y = measureCharTopInMirror(mirror, text, lineStarts[mid]);
+      const y = measureParaTopInProbe(probe, text, lineStarts[mid]);
       if (y < minVisibleTop) {
         bestLineIdx = mid;
         lo = mid + 1;
@@ -224,30 +336,44 @@ function findCharOffsetAtY(textarea: HTMLTextAreaElement, text: string, targetY:
     }
 
     const paraStart = lineStarts[bestLineIdx];
-    const paraEnd =
+    const nextParaStart =
       bestLineIdx + 1 < lineStarts.length ? lineStarts[bestLineIdx + 1] : text.length;
+    const paraEnd =
+      nextParaStart > paraStart && text[nextParaStart - 1] === '\n'
+        ? nextParaStart - 1
+        : nextParaStart;
+    const paraTopY = measureParaTopInProbe(probe, text, paraStart);
+    const paraText = text.slice(paraStart, paraEnd);
 
-    // Stage 2: binary search inside wrapped paragraph for exact first visible line character
-    let charLo = paraStart;
-    let charHi = paraEnd;
-    let result = paraEnd;
+    // Stage 2: binary search inside wrapped paragraph for the exact first visible visual line
+    let charLo = 0;
+    let charHi = paraText.length;
+    let resultTaOffset = nextParaStart;
     while (charLo <= charHi) {
       const mid = (charLo + charHi) >> 1;
-      const y = measureCharTopInMirror(mirror, text, mid);
-      if (y >= minVisibleTop) {
-        result = mid;
+      const intraY =
+        mid < paraText.length
+          ? measureIntraParaTopInProbe(probe, paraText, mid, singleLineHeight)
+          : measureIntraParaTopInProbe(
+              probe,
+              paraText,
+              Math.max(0, paraText.length - 1),
+              singleLineHeight
+            );
+      if (paraTopY + intraY >= minVisibleTop) {
+        resultTaOffset = paraStart + mid;
         charHi = mid - 1;
       } else {
         charLo = mid + 1;
       }
     }
 
-    while (result < text.length && (text[result] === '\n' || text[result] === '\r')) {
-      result++;
+    while (resultTaOffset < text.length && text[resultTaOffset] === '\n') {
+      resultTaOffset++;
     }
-    return Math.min(text.length, result);
+    return mapTextareaOffsetToRaw(rawText, Math.min(text.length, resultTaOffset));
   } finally {
-    document.body.removeChild(mirror);
+    document.body.removeChild(probe);
   }
 }
 
@@ -288,12 +414,15 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const [fetching, setFetching] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
     const [articleOverflow, setArticleOverflow] = useState(false);
+    const articleOverflowRef = useRef(false);
+    articleOverflowRef.current = articleOverflow;
     const [showOutline, setShowOutline] = useState(false);
     const [topClipPx, setTopClipPx] = useState(0);
     const [bottomClipPx, setBottomClipPx] = useState(0);
     const topClipPxRef = useRef(0);
     const bottomClipPxRef = useRef(0);
     const clipRafRef = useRef<number | null>(null);
+    const editAlignTimerRef = useRef<number | null>(null);
 
     const titleRef = useRef(doc.title);
     const contentRef = useRef(content);
@@ -449,6 +578,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const clearTypographyLock = () => {
       pendingTypographyAnchorRef.current = null;
       typographyLockUntilRef.current = 0;
+      if (editAlignTimerRef.current !== null) {
+        window.clearTimeout(editAlignTimerRef.current);
+        editAlignTimerRef.current = null;
+      }
     };
 
     const computeReadProgress = (): number => {
@@ -503,7 +636,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const el = scrollRef.current;
       const articleEl = articleRef.current;
-      if (!el || !articleEl || el.scrollTop <= 10 || !articleOverflow) return 0;
+      if (!el || !articleEl || !articleOverflowRef.current) return 0;
+      if (el.scrollTop <= 10) {
+        const firstBlock = articleEl.querySelector<HTMLElement>('[data-start-offset]');
+        const firstStart = Number(firstBlock?.getAttribute('data-start-offset'));
+        return Number.isFinite(firstStart) && firstStart > 0 ? firstStart : 0;
+      }
 
       const lines = collectVisualLines(el, articleEl);
       const effectiveViewTop = el.scrollTop + topClipPxRef.current;
@@ -711,7 +849,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (charOffset > 0) {
         const measuredY = measureCharOffsetY(ta, contentRef.current, charOffset);
         const padTop = parseFloat(window.getComputedStyle(ta).paddingTop) || 0;
-        targetTop = Math.min(maxScroll, Math.max(0, Math.floor(measuredY - padTop)));
+        targetTop = Math.min(maxScroll, Math.max(0, Math.round(measuredY - padTop)));
       }
       lastProgrammaticScrollAtRef.current = performance.now();
       ta.scrollTop = targetTop;
@@ -871,12 +1009,21 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         // Never auto-focus textarea on Browse -> Edit: keyboard must wait until user taps to place cursor
         const targetOffset = anchor.kind === 'top' ? 0 : anchor.charOffset;
         const targetTop = scrollEditToCharOffset(targetOffset);
+        if (editAlignTimerRef.current !== null) {
+          window.clearTimeout(editAlignTimerRef.current);
+          editAlignTimerRef.current = null;
+        }
         window.requestAnimationFrame(() => {
-          if (textareaRef.current && Math.abs(textareaRef.current.scrollTop - targetTop) > 2) {
-            lastProgrammaticScrollAtRef.current = performance.now();
-            textareaRef.current.scrollTop = targetTop;
+          if (isEditingRef.current && textareaRef.current) {
+            scrollEditToCharOffset(targetOffset);
           }
         });
+        editAlignTimerRef.current = window.setTimeout(() => {
+          editAlignTimerRef.current = null;
+          if (isEditingRef.current && textareaRef.current) {
+            scrollEditToCharOffset(targetOffset);
+          }
+        }, 60);
         const readProgress = reportReadProgress();
         onViewStateChangeRef.current({
           mode: 'edit',
@@ -1009,15 +1156,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       };
     }, []);
 
-    // Sync Android native Copy/Paste ActionMode suppression with dictionary popup visibility
-    useEffect(() => {
-      const shouldSuppress = !isEditing && isMdictPopupOpen;
-      void setNativeSuppressSelectionMenu(shouldSuppress);
-      return () => {
-        void setNativeSuppressSelectionMenu(false);
-      };
-    }, [isEditing, isMdictPopupOpen]);
-
     const flushDraftNow = () => {
       if (debounceSaveRef.current) {
         window.clearTimeout(debounceSaveRef.current);
@@ -1040,6 +1178,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         if (keyboardCenterTimerRef.current !== null) {
           window.clearTimeout(keyboardCenterTimerRef.current);
         }
+        if (editAlignTimerRef.current !== null) {
+          window.clearTimeout(editAlignTimerRef.current);
+        }
       };
     }, []);
 
@@ -1053,7 +1194,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         const activeEl = isEditingRef.current ? textareaRef.current : scrollRef.current;
         if (!activeEl) return;
 
-        if (activeEl.scrollTop <= 10 || (!isEditingRef.current && !articleOverflow)) {
+        if (activeEl.scrollTop <= 10 || (!isEditingRef.current && !articleOverflowRef.current)) {
           pendingTypographyAnchorRef.current = { kind: 'top' };
           typographyLockUntilRef.current = now + 2500;
           return;
@@ -1071,14 +1212,37 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           window.clearTimeout(debounceScrollRef.current);
           debounceScrollRef.current = null;
         }
+        if (editAlignTimerRef.current !== null) {
+          window.clearTimeout(editAlignTimerRef.current);
+          editAlignTimerRef.current = null;
+        }
         clearTypographyLock();
 
         const activeScrollEl = isEditingRef.current ? textareaRef.current : scrollRef.current;
         if (!activeScrollEl) return;
 
-        if (activeScrollEl.scrollTop <= 10 || (!isEditingRef.current && !articleOverflow)) {
-          if (isEditingRef.current) flushDraftNow();
-          pendingAnchorRef.current = { kind: 'top' };
+        if (!isEditingRef.current && !articleOverflowRef.current) {
+          const firstBlock = articleRef.current?.querySelector<HTMLElement>('[data-start-offset]');
+          const firstStart = Number(firstBlock?.getAttribute('data-start-offset'));
+          pendingAnchorRef.current =
+            Number.isFinite(firstStart) && firstStart > 0
+              ? { kind: 'to-edit', charOffset: firstStart }
+              : { kind: 'top' };
+          return;
+        }
+
+        if (activeScrollEl.scrollTop <= 10) {
+          if (isEditingRef.current) {
+            flushDraftNow();
+            pendingAnchorRef.current = { kind: 'top' };
+          } else {
+            const firstBlock = articleRef.current?.querySelector<HTMLElement>('[data-start-offset]');
+            const firstStart = Number(firstBlock?.getAttribute('data-start-offset'));
+            pendingAnchorRef.current =
+              Number.isFinite(firstStart) && firstStart > 0
+                ? { kind: 'to-edit', charOffset: firstStart }
+                : { kind: 'top' };
+          }
           return;
         }
 
@@ -1838,7 +2002,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               fontSize: `${fontSize}px`,
               fontFamily: docFontFamily || 'var(--font-doc-body)',
             }}
-            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none pt-1 pb-[calc(100vh-110px)] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent font-doc-body leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words [overflow-wrap:anywhere] outline-none resize-none"
+            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none pt-1 pb-[calc(100vh-110px)] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent font-doc-body leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none"
           />
         ) : (
           <div className="relative flex-1 min-h-0 w-full flex flex-col">
@@ -1856,16 +2020,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               onTouchCancel={() => {
                 isPointerActiveRef.current = false;
               }}
-              onContextMenu={(e) => {
-                if (isMdictPopupOpenRef.current) {
-                  e.preventDefault();
-                }
-              }}
               onClick={handleContainerClick}
               onScroll={handleScroll}
-              className={`flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none ${
-                isMdictPopupOpen ? '[-webkit-touch-callout:none]' : ''
-              }`}
+              className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none"
             >
               <div
                 className={`max-w-[720px] w-full min-w-0 mx-auto px-5 sm:px-8 min-h-full flex flex-col pt-1 ${
@@ -1897,7 +2054,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                         fontSize: `${fontSize}px`,
                         fontFamily: docFontFamily || 'var(--font-doc-body)',
                       }}
-                      className="leading-[1.62] text-[var(--fei-text-primary)] break-words [overflow-wrap:anywhere]"
+                      className="leading-[1.62] text-[var(--fei-text-primary)] break-words"
                     >
                       {blocks.length === 0 ? (
                         <p className="text-[var(--fei-text-muted)]">
