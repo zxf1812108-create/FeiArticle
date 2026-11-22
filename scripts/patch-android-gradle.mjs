@@ -100,6 +100,7 @@ if (fs.existsSync(manifestPath)) {
     '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />',
     '<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />',
     '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
+    '<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />',
   ];
   for (const tag of perms) {
     const nameMatch = tag.match(/android:name="([^"]+)"/);
@@ -1641,6 +1642,8 @@ public class LocalStoragePlugin extends Plugin {
 
   const mainActivityJava = `package com.feiartical.app;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.os.Bundle;
 import android.os.Handler;
@@ -1651,13 +1654,16 @@ import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.webkit.PermissionRequest;
 import android.webkit.WebView;
 import android.widget.PopupMenu;
+import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.BridgeWebChromeClient;
 
 public class MainActivity extends BridgeActivity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -1765,7 +1771,45 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ReaderNativePlugin.class);
         registerPlugin(LocalStoragePlugin.class);
         super.onCreate(savedInstanceState);
+        installAudioPermissionWebChromeClient();
         applySystemBarAndCutoutInsets();
+    }
+
+    private void installAudioPermissionWebChromeClient() {
+        if (getBridge() == null || getBridge().getWebView() == null) return;
+        getBridge().getWebView().setWebChromeClient(new BridgeWebChromeClient(getBridge()) {
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                if (request == null) return;
+                String[] resources = request.getResources();
+                boolean asksAudio = false;
+                boolean asksVideo = false;
+                if (resources != null) {
+                    for (String res : resources) {
+                        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
+                            asksAudio = true;
+                        } else if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) {
+                            asksVideo = true;
+                        }
+                    }
+                }
+                if (
+                    asksAudio &&
+                    !asksVideo &&
+                    ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO)
+                        == PackageManager.PERMISSION_GRANTED
+                ) {
+                    runOnUiThread(() -> {
+                        try {
+                            request.grant(resources);
+                        } catch (Exception ignored) {
+                        }
+                    });
+                    return;
+                }
+                super.onPermissionRequest(request);
+            }
+        });
     }
 
     @Override
