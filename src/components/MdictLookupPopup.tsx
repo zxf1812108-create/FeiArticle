@@ -542,27 +542,6 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       scheduleEdgeClipUpdate();
     }, [queryWord, result, scheduleEdgeClipUpdate]);
 
-    // Immediately clear the document's text selection once the lookup popup opens
-    useEffect(() => {
-      const clearDocSelection = () => {
-        try {
-          const sel = window.getSelection();
-          if (sel && (!sel.isCollapsed || sel.rangeCount > 0)) {
-            sel.removeAllRanges();
-          }
-        } catch {
-          // ignore
-        }
-      };
-      clearDocSelection();
-      const rafId = window.requestAnimationFrame(clearDocSelection);
-      const t1 = window.setTimeout(clearDocSelection, 60);
-      return () => {
-        window.cancelAnimationFrame(rafId);
-        window.clearTimeout(t1);
-      };
-    }, [queryWord]);
-
     useLayoutEffect(() => {
       updatePopupEdgeClips();
     }, [isExpanded, popupFontSize, loading, error, updatePopupEdgeClips]);

@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   BookA,
   ChevronsUp,
+  Copy,
   Download,
   Lock,
   LockOpen,
@@ -242,6 +243,7 @@ export default function App() {
   const mdictPopupRef = useRef<MdictLookupPopupHandle>(null);
   const toolbarBtnRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map());
   const suppressToolbarClickRef = useRef(false);
+  const pendingCopyTextRef = useRef('');
   const treeToolbarOrderRef = useRef<TreeToolbarIconId[]>(treeToolbarOrder);
   treeToolbarOrderRef.current = treeToolbarOrder;
   const docToolbarOrderRef = useRef<DocToolbarIconId[]>(docToolbarOrder);
@@ -1693,6 +1695,53 @@ export default function App() {
     }
   };
 
+  const handleCopySelectedText = async () => {
+    const liveSel = window.getSelection()?.toString() || '';
+    const textToCopy = (liveSel || pendingCopyTextRef.current).replace(/\u00AD/g, '');
+    pendingCopyTextRef.current = '';
+
+    if (!textToCopy.trim()) {
+      showToast('请先选中要复制的文档内容');
+      return;
+    }
+
+    let copied = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(textToCopy);
+        copied = true;
+      }
+    } catch {
+      copied = false;
+    }
+
+    if (!copied) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = textToCopy;
+        ta.setAttribute('readonly', 'true');
+        ta.style.position = 'fixed';
+        ta.style.top = '-9999px';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, textToCopy.length);
+        copied = document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch {
+        copied = false;
+      }
+    }
+
+    try {
+      window.getSelection()?.removeAllRanges();
+    } catch {
+      // ignore
+    }
+
+    showToast(copied ? '已复制选中内容' : '复制失败，请重试');
+  };
+
   const handleRunLiveSync = async () => {
     setIsSyncing(true);
     try {
@@ -1991,6 +2040,16 @@ export default function App() {
       {/* Bottom Toolbar (All icons use monochrome tone; all non-rightmost icons support drag reordering) */}
       <footer
         aria-label="底部工具栏"
+        onPointerDownCapture={() => {
+          if (mdictLookup) {
+            setMdictLookup(null);
+          }
+        }}
+        onClickCapture={() => {
+          if (mdictLookup) {
+            setMdictLookup(null);
+          }
+        }}
         onContextMenu={(e) => e.preventDefault()}
         className="shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)] select-none"
       >
@@ -2271,6 +2330,45 @@ export default function App() {
                       }`}
                     >
                       <ALargeSmall className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                    </button>
+                  );
+                }
+
+                if (iconId === 'copy') {
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        const selText = window.getSelection()?.toString() || '';
+                        if (selText) {
+                          pendingCopyTextRef.current = selText;
+                        }
+                      }}
+                      onTouchStart={() => {
+                        const selText = window.getSelection()?.toString() || '';
+                        if (selText) {
+                          pendingCopyTextRef.current = selText;
+                        }
+                      }}
+                      onPointerDown={(e) => {
+                        const selText = window.getSelection()?.toString() || '';
+                        if (selText) {
+                          pendingCopyTextRef.current = selText;
+                        }
+                        handleToolbarIconPointerDown(e, 'copy', 'doc');
+                      }}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        void handleCopySelectedText();
+                      }}
+                      aria-label="复制选中内容"
+                      title="复制文档中被选中的内容（可拖动调整图标位置）"
+                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                    >
+                      <Copy className="w-[20px] h-[20px]" strokeWidth={1.8} />
                     </button>
                   );
                 }

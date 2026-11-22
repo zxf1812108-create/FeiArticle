@@ -540,13 +540,22 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const lastTouchStartAtRef = useRef(0);
     const isPointerActiveRef = useRef(false);
     const lastPopupOpenedAtRef = useRef(0);
+    const popupJustRequestedRef = useRef(false);
     const selectionCheckTimerRef = useRef<number | null>(null);
+    const clearSelectionTimerRef = useRef<number | null>(null);
     const lastReportedProgressRef = useRef<number>(-1);
 
     const hasActiveMdictRef = useRef(hasActiveMdict);
     hasActiveMdictRef.current = hasActiveMdict;
     const isMdictPopupOpenRef = useRef(isMdictPopupOpen);
     isMdictPopupOpenRef.current = isMdictPopupOpen;
+    const prevMdictOpenRef = useRef(isMdictPopupOpen);
+    if (prevMdictOpenRef.current !== isMdictPopupOpen) {
+      prevMdictOpenRef.current = isMdictPopupOpen;
+      if (!isMdictPopupOpen) {
+        popupJustRequestedRef.current = false;
+      }
+    }
     const onEnglishWordSelectedRef = useRef(onEnglishWordSelected);
     onEnglishWordSelectedRef.current = onEnglishWordSelected;
     const onClearMdictLookupRef = useRef(onClearMdictLookup);
@@ -1227,6 +1236,28 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       scheduleEmitViewState(260);
     };
 
+    const isPopupActive = () =>
+      isMdictPopupOpenRef.current || popupJustRequestedRef.current;
+
+    const scheduleClearSelectionIfPopupOpen = (delayMs = 80) => {
+      if (clearSelectionTimerRef.current) {
+        window.clearTimeout(clearSelectionTimerRef.current);
+      }
+      clearSelectionTimerRef.current = window.setTimeout(() => {
+        clearSelectionTimerRef.current = null;
+        if (!isPointerActiveRef.current && isPopupActive()) {
+          try {
+            const sel = window.getSelection();
+            if (sel && (!sel.isCollapsed || sel.rangeCount > 0)) {
+              sel.removeAllRanges();
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }, delayMs);
+    };
+
     const evaluateSelectionForMdict = () => {
       if (!hasActiveMdictRef.current) return;
       const articleEl = articleRef.current;
@@ -1241,6 +1272,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const word = extractEnglishLookupWord(sel.toString());
       if (!word) {
+        // User expanded selection into a sentence / non-lookup text (e.g., to copy); dismiss lookup popup and keep selection
+        if (isPopupActive()) {
+          popupJustRequestedRef.current = false;
+          onClearMdictLookupRef.current?.();
+        }
         return;
       }
 
@@ -1249,11 +1285,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const wordMidY = rect.height > 0 ? (rect.top + rect.bottom) / 2 : vh * 0.25;
       const placement: 'top' | 'bottom' = wordMidY >= vh * 0.5 ? 'top' : 'bottom';
       lastPopupOpenedAtRef.current = performance.now();
+      popupJustRequestedRef.current = true;
       onEnglishWordSelectedRef.current?.({ word, placement });
-      try {
-        sel.removeAllRanges();
-      } catch {
-        // ignore
+
+      // Do NOT clear selection while finger/pointer is still pressing the screen;
+      // only clear once released and the lookup popup is still open.
+      if (!isPointerActiveRef.current) {
+        scheduleClearSelectionIfPopupOpen(50);
       }
     };
 
@@ -1268,6 +1306,38 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     useEffect(() => {
+      const onTouchStartGlobal = (e: TouchEvent) => {
+        isPointerActiveRef.current = e.touches.length > 0;
+        if (clearSelectionTimerRef.current) {
+          window.clearTimeout(clearSelectionTimerRef.current);
+          clearSelectionTimerRef.current = null;
+        }
+      };
+
+      const onTouchEndGlobal = (e: TouchEvent) => {
+        isPointerActiveRef.current = e.touches.length > 0;
+        if (!isPointerActiveRef.current && isPopupActive()) {
+          scheduleClearSelectionIfPopupOpen(90);
+        }
+      };
+
+      const onPointerDownGlobal = (e: PointerEvent) => {
+        if (e.pointerType === 'touch') return;
+        isPointerActiveRef.current = true;
+        if (clearSelectionTimerRef.current) {
+          window.clearTimeout(clearSelectionTimerRef.current);
+          clearSelectionTimerRef.current = null;
+        }
+      };
+
+      const onPointerEndGlobal = (e: PointerEvent) => {
+        if (e.pointerType === 'touch') return;
+        isPointerActiveRef.current = false;
+        if (isPopupActive()) {
+          scheduleClearSelectionIfPopupOpen(90);
+        }
+      };
+
       const handleSelectionChange = () => {
         if (!hasActiveMdictRef.current) return;
 
@@ -1286,12 +1356,28 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         scheduleMdictSelectionCheck(isPointerActiveRef.current ? 140 : 90);
       };
 
+      window.addEventListener('touchstart', onTouchStartGlobal, { capture: true, passive: true });
+      window.addEventListener('touchend', onTouchEndGlobal, { capture: true, passive: true });
+      window.addEventListener('touchcancel', onTouchEndGlobal, { capture: true, passive: true });
+      window.addEventListener('pointerdown', onPointerDownGlobal, true);
+      window.addEventListener('pointerup', onPointerEndGlobal, true);
+      window.addEventListener('pointercancel', onPointerEndGlobal, true);
       document.addEventListener('selectionchange', handleSelectionChange);
       return () => {
+        window.removeEventListener('touchstart', onTouchStartGlobal, true);
+        window.removeEventListener('touchend', onTouchEndGlobal, true);
+        window.removeEventListener('touchcancel', onTouchEndGlobal, true);
+        window.removeEventListener('pointerdown', onPointerDownGlobal, true);
+        window.removeEventListener('pointerup', onPointerEndGlobal, true);
+        window.removeEventListener('pointercancel', onPointerEndGlobal, true);
         document.removeEventListener('selectionchange', handleSelectionChange);
         if (selectionCheckTimerRef.current) {
           window.clearTimeout(selectionCheckTimerRef.current);
           selectionCheckTimerRef.current = null;
+        }
+        if (clearSelectionTimerRef.current) {
+          window.clearTimeout(clearSelectionTimerRef.current);
+          clearSelectionTimerRef.current = null;
         }
       };
     }, []);
