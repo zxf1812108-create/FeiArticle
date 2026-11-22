@@ -43,6 +43,7 @@ export interface DocReadMetrics {
 export interface MinimalDocViewHandle {
   captureTypographyAnchor: () => void;
   flushAndCaptureViewState: () => DocViewStateSnapshot;
+  turnPageDown: () => void;
 }
 
 interface MinimalDocViewProps {
@@ -1279,6 +1280,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           charOffset: captureCurrentCharOffset(),
           readProgress: computeReadProgress(),
         };
+      },
+      turnPageDown() {
+        if (
+          showOutlineRef.current ||
+          isMdictPopupOpenRef.current ||
+          document.querySelector('[role="dialog"]')
+        ) {
+          return;
+        }
+        performPageDownRef.current();
       },
     }));
 

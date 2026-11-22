@@ -59,6 +59,7 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   defaultDocFont: 'system',
   autoHyphenate: false,
   progressDisplayMode: 'percent',
+  whistleSensitivity: 'medium',
 };
 
 export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {
@@ -302,7 +303,7 @@ export function saveDocFontsMap(map: Record<string, string>): void {
 }
 
 export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'sync' | 'settings';
-export type DocToolbarIconId = 'back' | 'font';
+export type DocToolbarIconId = 'back' | 'font' | 'whistle';
 
 export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
   'import',
@@ -316,6 +317,7 @@ export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
 export const DEFAULT_DOC_TOOLBAR_ORDER: DocToolbarIconId[] = [
   'back',
   'font',
+  'whistle',
 ];
 
 function normalizeToolbarOrder<T extends string>(raw: unknown, defaults: readonly T[]): T[] {

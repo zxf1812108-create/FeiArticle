@@ -13,6 +13,7 @@ interface ReaderNativePlugin {
   setTouchStateTracking(options: { enabled: boolean }): Promise<{ pressed: boolean }>;
   setInputPasteTracking(options: { enabled: boolean }): Promise<void>;
   readClipboardText(): Promise<{ text: string }>;
+  requestMicrophonePermission(): Promise<{ granted: boolean }>;
   addListener(
     eventName: 'volumeKey',
     listenerFunc: (event: { direction: VolumeKeyDirection }) => void
@@ -35,6 +36,16 @@ function hasReaderNative(): boolean {
 
 export function hasNativeTouchTracking(): boolean {
   return hasReaderNative();
+}
+
+export async function ensureNativeMicrophonePermission(): Promise<boolean> {
+  if (!hasReaderNative()) return true;
+  try {
+    const res = await ReaderNative.requestMicrophonePermission();
+    return Boolean(res?.granted);
+  } catch {
+    return true;
+  }
 }
 
 export async function readSystemClipboardText(): Promise<{ ok: boolean; text: string }> {

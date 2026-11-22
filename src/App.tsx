@@ -5,6 +5,7 @@ import {
   Download,
   Lock,
   LockOpen,
+  Mic,
   Minus,
   Pencil,
   Plus,
@@ -54,6 +55,7 @@ import {
   SyncedTreeState,
   SyncLogEntry,
   WebDavConfig,
+  WhistleSensitivity,
 } from './types';
 import {
   buildDocFontFamily,
@@ -135,6 +137,7 @@ import {
   stopLanDirectServer,
   subscribeLanDirectActions,
 } from './utils/lanDirect';
+import { formatMicErrorMessage, WhistleDetector } from './utils/whistleDetector';
 
 type MainView = 'tree' | 'doc';
 
@@ -221,6 +224,14 @@ export default function App() {
   const [progressDisplayMode, setProgressDisplayMode] = useState<'percent' | 'pages'>(() =>
     loadReaderSettings().progressDisplayMode === 'pages' ? 'pages' : 'percent'
   );
+  const [whistleSensitivity, setWhistleSensitivity] = useState<WhistleSensitivity>(() => {
+    const raw = loadReaderSettings().whistleSensitivity;
+    return raw === 'low' || raw === 'high' ? raw : 'medium';
+  });
+  const [whistleEnabled, setWhistleEnabled] = useState(false);
+  const [whistleStarting, setWhistleStarting] = useState(false);
+  const whistleDetectorRef = useRef<WhistleDetector | null>(null);
+  const whistleIdleTimerRef = useRef<number | null>(null);
   const [livePageInfo, setLivePageInfo] = useState<{ currentPage: number; totalPages: number }>({
     currentPage: 1,
     totalPages: 1,
@@ -1369,6 +1380,7 @@ export default function App() {
     setMdictLookupPending(false);
     setMdictLookup(null);
     setShowFontSizeBar(false);
+    setWhistleEnabled(false);
     setMainView('tree');
   };
 
@@ -1398,6 +1410,123 @@ export default function App() {
       return next;
     });
   };
+
+  const handleChangeWhistleSensitivity = (next: WhistleSensitivity) => {
+    setWhistleSensitivity(next);
+    const current = loadReaderSettings();
+    saveReaderSettings({ ...current, whistleSensitivity: next });
+  };
+
+  const stopWhistleDetector = () => {
+    if (whistleIdleTimerRef.current !== null) {
+      window.clearTimeout(whistleIdleTimerRef.current);
+      whistleIdleTimerRef.current = null;
+    }
+    if (whistleDetectorRef.current) {
+      whistleDetectorRef.current.stop();
+      whistleDetectorRef.current = null;
+    }
+  };
+
+  const resetWhistleIdleTimer = () => {
+    if (whistleIdleTimerRef.current !== null) {
+      window.clearTimeout(whistleIdleTimerRef.current);
+    }
+    // Auto-stop after 15 minutes of inactivity to conserve battery
+    whistleIdleTimerRef.current = window.setTimeout(() => {
+      stopWhistleDetector();
+      setWhistleEnabled(false);
+      showToast('声控翻页长时间未使用，已自动关闭');
+    }, 15 * 60 * 1000);
+  };
+
+  const handleToggleWhistlePageTurn = async () => {
+    if (whistleStarting) return;
+    if (whistleEnabled) {
+      stopWhistleDetector();
+      setWhistleEnabled(false);
+      showToast('声控翻页已关闭');
+      return;
+    }
+
+    setWhistleStarting(true);
+    const detector = new WhistleDetector({
+      sensitivity: whistleSensitivity,
+      onWhistle: () => {
+        resetWhistleIdleTimer();
+        docViewRef.current?.turnPageDown();
+      },
+    });
+    whistleDetectorRef.current = detector;
+
+    try {
+      await detector.start();
+      if (whistleDetectorRef.current === detector) {
+        setWhistleEnabled(true);
+        resetWhistleIdleTimer();
+        showToast('声控翻页已开启，吹口哨翻下一页');
+      } else {
+        detector.stop();
+      }
+    } catch (err) {
+      if (whistleDetectorRef.current === detector) {
+        whistleDetectorRef.current = null;
+      }
+      setWhistleEnabled(false);
+      showToast(formatMicErrorMessage(err));
+    } finally {
+      setWhistleStarting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (whistleDetectorRef.current) {
+      whistleDetectorRef.current.setSensitivity(whistleSensitivity);
+    }
+  }, [whistleSensitivity]);
+
+  // Release microphone automatically when leaving doc view, opening modals, or backgrounding app
+  useEffect(() => {
+    if (!whistleEnabled) {
+      stopWhistleDetector();
+      return;
+    }
+    if (
+      mainView !== 'doc' ||
+      showSyncModal ||
+      showImportModal ||
+      showTrashModal ||
+      showStorageFolderModal
+    ) {
+      stopWhistleDetector();
+      setWhistleEnabled(false);
+      return;
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        stopWhistleDetector();
+        setWhistleEnabled(false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [
+    whistleEnabled,
+    mainView,
+    showSyncModal,
+    showImportModal,
+    showTrashModal,
+    showStorageFolderModal,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      stopWhistleDetector();
+    };
+  }, []);
 
   const currentDocFont = useMemo<DocFontId>(() => {
     if (!selectedDocId) return defaultDocFont;
@@ -2328,6 +2457,38 @@ export default function App() {
                   );
                 }
 
+                if (iconId === 'whistle') {
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      disabled={whistleStarting}
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'whistle', 'doc')}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        void handleToggleWhistlePageTurn();
+                      }}
+                      aria-label={whistleEnabled ? '关闭声控翻页' : '开启声控翻页（吹口哨翻下一页）'}
+                      aria-pressed={whistleEnabled}
+                      title={
+                        whistleEnabled
+                          ? '声控翻页已开启，吹口哨翻下一页（点击关闭，可拖动调整位置）'
+                          : '开启声控翻页：吹口哨翻下一页（可拖动调整图标位置）'
+                      }
+                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none disabled:opacity-50 ${
+                        isDraggingThis
+                          ? dragCls
+                          : whistleEnabled
+                            ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)]'
+                            : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
+                      }`}
+                    >
+                      <Mic className="w-[21px] h-[21px]" strokeWidth={1.8} />
+                    </button>
+                  );
+                }
+
                 return (
                   <button
                     key={iconId}
@@ -2441,6 +2602,8 @@ export default function App() {
         <SyncModal
           themeMode={themeMode}
           onChangeThemeMode={setThemeMode}
+          whistleSensitivity={whistleSensitivity}
+          onChangeWhistleSensitivity={handleChangeWhistleSensitivity}
           config={webDavConfig}
           storageFolderPath={storageDir.folderPath}
           onChangeStorageFolder={() => {

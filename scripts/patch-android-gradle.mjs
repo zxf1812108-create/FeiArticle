@@ -99,6 +99,7 @@ if (fs.existsSync(manifestPath)) {
     '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
     '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />',
     '<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />',
+    '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
   ];
   for (const tag of perms) {
     const nameMatch = tag.match(/android:name="([^"]+)"/);
@@ -512,17 +513,29 @@ public class LanServerPlugin extends Plugin {
 
   const readerNativePluginJava = `package com.feiartical.app;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
-@CapacitorPlugin(name = "ReaderNative")
+@CapacitorPlugin(
+    name = "ReaderNative",
+    permissions = {
+        @Permission(
+            alias = "microphone",
+            strings = { Manifest.permission.RECORD_AUDIO }
+        )
+    }
+)
 public class ReaderNativePlugin extends Plugin {
     private static volatile ReaderNativePlugin activeInstance;
     public static volatile boolean volumeKeyInterceptEnabled = false;
@@ -598,6 +611,24 @@ public class ReaderNativePlugin extends Plugin {
             res.put("text", text);
             call.resolve(res);
         });
+    }
+
+    @PluginMethod
+    public void requestMicrophonePermission(PluginCall call) {
+        if (getPermissionState("microphone") == PermissionState.GRANTED) {
+            JSObject res = new JSObject();
+            res.put("granted", true);
+            call.resolve(res);
+            return;
+        }
+        requestPermissionForAlias("microphone", call, "onMicrophonePermResult");
+    }
+
+    @PermissionCallback
+    private void onMicrophonePermResult(PluginCall call) {
+        JSObject res = new JSObject();
+        res.put("granted", getPermissionState("microphone") == PermissionState.GRANTED);
+        call.resolve(res);
     }
 
     public static void dispatchVolumeKey(String direction) {

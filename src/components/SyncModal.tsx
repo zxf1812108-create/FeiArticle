@@ -8,20 +8,25 @@ import {
   EyeOff,
   FileCode2,
   Folder,
+  Mic,
+  MicOff,
   Moon,
   Sun,
   Trash2,
   Upload,
   X,
 } from 'lucide-react';
-import { MdictDictionarySummary, WebDavConfig } from '../types';
+import { MdictDictionarySummary, WebDavConfig, WhistleSensitivity } from '../types';
 import { stripDictExt } from '../utils/mdictStorage';
 import { AppThemeMode } from '../utils/storage';
 import { DEFAULT_JIANGUOYUN_URL, normalizeWebDavBaseUrl } from '../utils/webdavSync';
+import { formatMicErrorMessage, WhistleDetector } from '../utils/whistleDetector';
 
 interface SyncModalProps {
   themeMode: AppThemeMode;
   onChangeThemeMode: (mode: AppThemeMode) => void;
+  whistleSensitivity: WhistleSensitivity;
+  onChangeWhistleSensitivity: (sensitivity: WhistleSensitivity) => void;
   config: WebDavConfig;
   storageFolderPath: string;
   onChangeStorageFolder: () => void;
@@ -43,6 +48,8 @@ interface SyncModalProps {
 export const SyncModal: React.FC<SyncModalProps> = ({
   themeMode,
   onChangeThemeMode,
+  whistleSensitivity,
+  onChangeWhistleSensitivity,
   config,
   storageFolderPath,
   onChangeStorageFolder,
@@ -78,6 +85,84 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const [dictImporting, setDictImporting] = useState(false);
   const [busyDictId, setBusyDictId] = useState<string | null>(null);
   const [dictErrorMsg, setDictErrorMsg] = useState<string | null>(null);
+
+  const testDetectorRef = useRef<WhistleDetector | null>(null);
+  const [whistleTesting, setWhistleTesting] = useState(false);
+  const [whistleTestBusy, setWhistleTestBusy] = useState(false);
+  const [whistleTestResult, setWhistleTestResult] = useState<{
+    count: number;
+    frequencyHz: number;
+  } | null>(null);
+  const [whistleTestError, setWhistleTestError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (testDetectorRef.current) {
+      testDetectorRef.current.setSensitivity(whistleSensitivity);
+    }
+  }, [whistleSensitivity]);
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden' && testDetectorRef.current) {
+        testDetectorRef.current.stop();
+        testDetectorRef.current = null;
+        setWhistleTesting(false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (testDetectorRef.current) {
+        testDetectorRef.current.stop();
+        testDetectorRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleToggleWhistleTest = async () => {
+    if (whistleTestBusy) return;
+    if (whistleTesting) {
+      testDetectorRef.current?.stop();
+      testDetectorRef.current = null;
+      setWhistleTesting(false);
+      return;
+    }
+
+    setWhistleTestError(null);
+    setWhistleTestResult(null);
+    setWhistleTestBusy(true);
+
+    const detector = new WhistleDetector({
+      sensitivity: whistleSensitivity,
+      onWhistle: (evt) => {
+        setWhistleTestResult((prev) => ({
+          count: (prev?.count ?? 0) + 1,
+          frequencyHz: evt.frequencyHz,
+        }));
+      },
+      onError: (msg) => {
+        setWhistleTestError(msg);
+      },
+    });
+    testDetectorRef.current = detector;
+
+    try {
+      await detector.start();
+      if (testDetectorRef.current === detector) {
+        setWhistleTesting(true);
+      } else {
+        detector.stop();
+      }
+    } catch (err) {
+      if (testDetectorRef.current === detector) {
+        testDetectorRef.current = null;
+      }
+      setWhistleTesting(false);
+      setWhistleTestError(formatMicErrorMessage(err));
+    } finally {
+      setWhistleTestBusy(false);
+    }
+  };
 
   const handleDictFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -225,6 +310,93 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                   </button>
                 );
               })}
+            </div>
+          </section>
+
+          {/* 区域零点五：声控翻页 */}
+          <section className="space-y-2">
+            <h3 className="px-0.5 text-[13.5px] font-medium text-[var(--fei-text-primary)]">
+              声控翻页
+            </h3>
+
+            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] divide-y divide-[var(--fei-border)] overflow-hidden">
+              <div className="px-3.5 py-2.5 flex items-center justify-between gap-3">
+                <span className="text-[12.5px] text-[var(--fei-text-muted)] shrink-0">
+                  灵敏度
+                </span>
+                <div
+                  role="radiogroup"
+                  aria-label="声控翻页灵敏度"
+                  className="flex-1 max-w-[196px] rounded-lg bg-[var(--fei-bg-surface)]/70 dark:bg-black/20 eink:bg-white border border-[var(--fei-border)] p-0.5 grid grid-cols-3 gap-0.5"
+                >
+                  {(
+                    [
+                      { id: 'low', label: '低' },
+                      { id: 'medium', label: '中' },
+                      { id: 'high', label: '高' },
+                    ] as const
+                  ).map((opt) => {
+                    const isSelected = whistleSensitivity === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={isSelected}
+                        onClick={() => onChangeWhistleSensitivity(opt.id)}
+                        className={`h-7 rounded-md text-[12px] border transition-colors cursor-pointer select-none ${
+                          isSelected
+                            ? 'bg-[var(--fei-bg-surface)] dark:bg-[var(--fei-bg-selected)] eink:bg-[var(--fei-bg-selected)] border-[var(--fei-border)] dark:border-[var(--fei-border-strong)] eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)] font-medium shadow-[0_1px_2px_rgba(0,0,0,0.05)] dark:shadow-none eink:shadow-none'
+                            : 'border-transparent text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="px-3.5 py-2.5 flex items-center justify-between gap-2.5">
+                <div className="min-w-0 flex-1">
+                  <div
+                    className={`text-[12px] text-[var(--fei-text-muted)] ${
+                      whistleTestError ? 'leading-relaxed' : 'truncate'
+                    }`}
+                  >
+                    {whistleTestError ? (
+                      <span className="text-[var(--fei-text-primary)]">{whistleTestError}</span>
+                    ) : whistleTesting ? (
+                      whistleTestResult ? (
+                        <span className="text-[var(--fei-text-primary)]">
+                          已识别 · {whistleTestResult.frequencyHz} Hz（第 {whistleTestResult.count} 次）
+                        </span>
+                      ) : (
+                        '监听中，吹一声口哨试试…'
+                      )
+                    ) : (
+                      '吹一声口哨翻下一页'
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={whistleTestBusy}
+                  onClick={() => void handleToggleWhistleTest()}
+                  className={`h-7 px-2.5 rounded-lg inline-flex items-center gap-1 text-[12px] border bg-[var(--fei-bg-subtle)] hover:bg-[var(--fei-bg-selected)] transition-colors shrink-0 whitespace-nowrap cursor-pointer disabled:opacity-50 ${
+                    whistleTesting
+                      ? 'border-[var(--fei-border-strong)] text-[var(--fei-text-primary)] font-medium'
+                      : 'border-[var(--fei-border)] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)]'
+                  }`}
+                >
+                  {whistleTesting ? (
+                    <MicOff className="w-3.5 h-3.5 shrink-0" strokeWidth={1.75} />
+                  ) : (
+                    <Mic className="w-3.5 h-3.5 shrink-0" strokeWidth={1.75} />
+                  )}
+                  <span>{whistleTestBusy ? '启动中…' : whistleTesting ? '停止测试' : '试吹测试'}</span>
+                </button>
+              </div>
             </div>
           </section>
 

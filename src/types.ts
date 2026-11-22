@@ -139,6 +139,7 @@ export type ReaderFont = 'serif' | 'sans' | 'mono';
 export type ReaderPaper = 'white' | 'paper' | 'dark';
 export type ReaderWidth = 'narrow' | 'medium' | 'wide';
 export type DocFontId = 'system' | 'noto-sans-sc' | 'noto-serif-sc' | 'inter';
+export type WhistleSensitivity = 'low' | 'medium' | 'high';
 
 export interface ReaderSettings {
   fontFamily: ReaderFont;
@@ -150,6 +151,7 @@ export interface ReaderSettings {
   defaultDocFont?: DocFontId;
   autoHyphenate?: boolean;
   progressDisplayMode?: 'percent' | 'pages';
+  whistleSensitivity?: WhistleSensitivity;
 }
 
 export type SmartView = 'all' | 'recent' | 'starred' | 'dirty' | 'highlights' | 'trash';
