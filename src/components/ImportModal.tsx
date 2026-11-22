@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Check, Download, FileText, Folder, Plus, X } from 'lucide-react';
 import { FolderNode } from '../types';
+import { parseEpubFile } from '../utils/epubParser';
 import { INBOX_FOLDER_ID, isReservedInboxName } from '../utils/inbox';
 import { readTextFileSmart } from '../utils/textParser';
 
@@ -48,36 +49,76 @@ export const ImportModal: React.FC<ImportModalProps> = ({
   const [pasteTitle, setPasteTitle] = useState('');
   const [pasteContent, setPasteContent] = useState('');
   const [dragging, setDragging] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const isEpubFile = (file: File) =>
+    /\.epub$/i.test(file.name) || file.type === 'application/epub+zip';
+
+  const isSupportedImportFile = (file: File) =>
+    isEpubFile(file) ||
+    /\.(txt|md|markdown|text)$/i.test(file.name) ||
+    file.type.startsWith('text/');
+
   const processFiles = async (fileList: FileList | File[]) => {
+    if (importing) return;
     setError(null);
     if (!effectiveFolderId) {
       setError('请先新建一个目标目录后再导入。');
       return;
     }
-    const files = Array.from(fileList).filter(
-      (f) => /\.(txt|md|markdown|text)$/i.test(f.name) || f.type.startsWith('text/')
-    );
+    const files = Array.from(fileList).filter(isSupportedImportFile);
     if (files.length === 0) {
-      setError('请选择 .txt 或 .md 文本文档（支持多选）。');
+      setError('请选择 .txt、.md 或 .epub 文档（支持多选）。');
       return;
     }
 
-    const parsed: Array<{
-      title: string;
-      content: string;
-      folderId: string | null;
-      format: 'txt';
-    }> = [];
-    for (const file of files) {
-      const content = await readTextFileSmart(file);
-      const title = file.name.replace(/\.(txt|md|markdown|text)$/i, '').trim() || '导入文档';
-      parsed.push({ title, content, folderId: effectiveFolderId, format: 'txt' });
+    setImporting(true);
+    try {
+      const parsed: Array<{
+        title: string;
+        content: string;
+        folderId: string | null;
+        format: 'txt';
+      }> = [];
+      const failedMessages: string[] = [];
+
+      for (const file of files) {
+        if (isEpubFile(file)) {
+          try {
+            const epubDoc = await parseEpubFile(file);
+            parsed.push({
+              title: epubDoc.title,
+              content: epubDoc.content,
+              folderId: effectiveFolderId,
+              format: 'txt',
+            });
+          } catch (err) {
+            failedMessages.push(
+              err instanceof Error ? err.message : `解析「${file.name}」失败`
+            );
+          }
+        } else {
+          const content = await readTextFileSmart(file);
+          const title = file.name.replace(/\.(txt|md|markdown|text)$/i, '').trim() || '导入文档';
+          parsed.push({ title, content, folderId: effectiveFolderId, format: 'txt' });
+        }
+      }
+
+      if (parsed.length > 0) {
+        onImportDocs(parsed);
+        if (failedMessages.length === 0) {
+          onClose();
+        } else {
+          setError(`已导入 ${parsed.length} 篇文档；部分失败：${failedMessages[0]}`);
+        }
+      } else {
+        setError(failedMessages[0] || '未能导入所选文档，请检查文件是否完整。');
+      }
+    } finally {
+      setImporting(false);
     }
-    onImportDocs(parsed);
-    onClose();
   };
 
   const handleImportPasted = () => {
@@ -258,39 +299,44 @@ export const ImportModal: React.FC<ImportModalProps> = ({
           <div
             onDragOver={(e) => {
               e.preventDefault();
-              setDragging(true);
+              if (!importing) setDragging(true);
             }}
             onDragLeave={() => setDragging(false)}
             onDrop={(e) => {
               e.preventDefault();
               setDragging(false);
-              if (e.dataTransfer.files.length > 0) {
-                processFiles(e.dataTransfer.files);
+              if (!importing && e.dataTransfer.files.length > 0) {
+                void processFiles(e.dataTransfer.files);
               }
             }}
-            onClick={() => fileInputRef.current?.click()}
-            className={`py-6 px-4 rounded-xl border border-dashed text-center cursor-pointer transition-colors space-y-1.5 ${
-              dragging
-                ? 'border-[var(--fei-text-primary)] bg-[var(--fei-bg-selected)]'
-                : 'border-[var(--fei-border-strong)] hover:border-[var(--fei-text-muted)]'
+            onClick={() => {
+              if (!importing) fileInputRef.current?.click();
+            }}
+            className={`py-6 px-4 rounded-xl border border-dashed text-center transition-colors space-y-1.5 ${
+              importing
+                ? 'border-[var(--fei-border)] opacity-60 cursor-wait'
+                : dragging
+                  ? 'border-[var(--fei-text-primary)] bg-[var(--fei-bg-selected)] cursor-pointer'
+                  : 'border-[var(--fei-border-strong)] hover:border-[var(--fei-text-muted)] cursor-pointer'
             }`}
           >
             <Download className="w-5 h-5 mx-auto text-[var(--fei-text-muted)]" />
             <div className="text-[14px] font-medium text-[var(--fei-text-primary)]">
-              选择 .txt / .md 文件（可多选）
+              {importing ? '正在解析并转换文档…' : '选择 .txt / .md / .epub 文件（可多选）'}
             </div>
             <p className="text-[12px] text-[var(--fei-text-muted)]">
-              导入后默认存放为 .txt 文本文档，自动兼容 UTF-8 / GBK 编码
+              默认以 UTF-8 编码存放为 .txt 文本，EPUB 文档结构自动转为 Markdown 保留
             </p>
             <input
               ref={fileInputRef}
               type="file"
               multiple
-              accept=".txt,.md,.markdown,text/plain,text/markdown"
+              disabled={importing}
+              accept=".txt,.md,.markdown,.epub,text/plain,text/markdown,application/epub+zip"
               className="hidden"
               onChange={(e) => {
                 if (e.target.files && e.target.files.length > 0) {
-                  processFiles(e.target.files);
+                  void processFiles(e.target.files);
                 }
                 e.target.value = '';
               }}

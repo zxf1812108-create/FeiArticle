@@ -108,6 +108,7 @@ import {
   StorageDirectoryConfig,
   TreeToolbarIconId,
 } from './utils/storage';
+import { parseEpubFile } from './utils/epubParser';
 import {
   extractExcerpt,
   getByteSize,
@@ -1923,17 +1924,44 @@ export default function App() {
     if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
     e.preventDefault();
     setWindowDragging(false);
-    const files = Array.from(e.dataTransfer.files).filter((f) =>
-      /\.(txt|md|markdown|text)$/i.test(f.name)
+    const files = Array.from(e.dataTransfer.files).filter(
+      (f) =>
+        /\.(txt|md|markdown|text|epub)$/i.test(f.name) ||
+        f.type === 'application/epub+zip'
     );
     if (files.length === 0) return;
-    const parsed: Array<{ title: string; content: string; folderId: string | null }> = [];
+    const parsed: Array<{
+      title: string;
+      content: string;
+      folderId: string | null;
+      format: 'txt';
+    }> = [];
+    const failedMsgs: string[] = [];
     for (const file of files) {
-      const content = await readTextFileSmart(file);
-      const title = file.name.replace(/\.(txt|md|markdown|text)$/i, '').trim() || '导入文档';
-      parsed.push({ title, content, folderId: defaultImportFolderId });
+      if (/\.epub$/i.test(file.name) || file.type === 'application/epub+zip') {
+        try {
+          const epubDoc = await parseEpubFile(file);
+          parsed.push({
+            title: epubDoc.title,
+            content: epubDoc.content,
+            folderId: defaultImportFolderId,
+            format: 'txt',
+          });
+        } catch (err) {
+          failedMsgs.push(err instanceof Error ? err.message : `解析「${file.name}」失败`);
+        }
+      } else {
+        const content = await readTextFileSmart(file);
+        const title = file.name.replace(/\.(txt|md|markdown|text)$/i, '').trim() || '导入文档';
+        parsed.push({ title, content, folderId: defaultImportFolderId, format: 'txt' });
+      }
     }
-    await handleImportDocs(parsed);
+    if (parsed.length > 0) {
+      await handleImportDocs(parsed);
+    }
+    if (failedMsgs.length > 0) {
+      showToast(failedMsgs[0]);
+    }
   };
 
   return (
@@ -2088,7 +2116,7 @@ export default function App() {
                         setShowImportModal(true);
                       }}
                       aria-label="导入文本文档"
-                      title="导入 .txt / .md 文档或粘贴文本（可拖动调整图标位置）"
+                      title="导入 .txt / .md / .epub 文档或粘贴文本（可拖动调整图标位置）"
                       className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
                     >
                       <Download className="w-[22px] h-[22px]" strokeWidth={1.8} />
@@ -2610,7 +2638,7 @@ export default function App() {
       {windowDragging && (
         <div className="fixed inset-0 z-50 bg-transparent dark:bg-black/25 flex items-center justify-center pointer-events-none">
           <div className="px-5 py-3 rounded-xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-none dark:shadow-lg text-[14px] text-[var(--fei-text-primary)]">
-            松开导入 .txt / .md 文档
+            松开导入 .txt / .md / .epub 文档
           </div>
         </div>
       )}
