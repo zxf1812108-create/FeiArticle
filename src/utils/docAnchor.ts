@@ -417,18 +417,21 @@ export function resolveReadViewportCharOffset(
     }
     if (!targetBlock && bottom >= topBandY - 2) {
       targetBlock = { el, start, end, top, bottom };
-      break;
     }
   }
 
-  const targetNorm = normalizeTextForAnchor(lineExactText, false);
+  // Strip inline formatting symbols identically to localMap so literal _, ~, |, *, ` never block exact matching
+  const targetNorm = normalizeTextForAnchor(lineExactText, false).replace(/[`*_~|]/g, '');
 
   if (targetBlock) {
     const blockRaw = rawContent.slice(targetBlock.start, targetBlock.end);
     const blockHeight = Math.max(1, targetBlock.bottom - targetBlock.top);
+    const lineHeight = Math.max(12, bottomBandY - topBandY);
     const intraRatio = Math.min(1, Math.max(0, (topBandY - targetBlock.top) / blockHeight));
 
-    if (intraRatio <= 0.04) {
+    // When the first visible line is the very first visual line of this block (regardless of block line count),
+    // anchor cleanly to the exact start of the block in source text.
+    if (topBandY - targetBlock.top <= Math.min(14, lineHeight * 0.55)) {
       return targetBlock.start;
     }
 

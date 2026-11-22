@@ -180,49 +180,120 @@ function mapTextareaOffsetToRaw(raw: string, taOffset: number): number {
 }
 
 /**
- * Create a temporary off-screen <textarea> clone using the exact same browser text-control
- * layout engine and computed typography/wrapping styles as the real editor, eliminating any
- * cumulative height drift between a <div> mirror and <textarea>.
+ * Create a temporary off-screen <div> mirror with the exact sub-pixel content width,
+ * font, line-height, and wrapping rules of the zero-padding, zero-scrollbar <textarea>.
+ */
+function createEditMirror(textarea: HTMLTextAreaElement): {
+  mirror: HTMLDivElement;
+  singleLineHeight: number;
+  halfLeading: number;
+} {
+  const style = window.getComputedStyle(textarea);
+  const rect = textarea.getBoundingClientRect();
+  const width = rect.width > 0 ? rect.width : textarea.clientWidth;
+
+  const mirror = document.createElement('div');
+  mirror.setAttribute('aria-hidden', 'true');
+  mirror.style.position = 'fixed';
+  mirror.style.top = '-99999px';
+  mirror.style.left = '-99999px';
+  mirror.style.visibility = 'hidden';
+  mirror.style.pointerEvents = 'none';
+  mirror.style.boxSizing = 'border-box';
+  mirror.style.width = `${width}px`;
+  mirror.style.padding = '0px';
+  mirror.style.border = '0px';
+  mirror.style.margin = '0px';
+  mirror.style.fontFamily = style.fontFamily;
+  mirror.style.fontSize = style.fontSize;
+  mirror.style.fontWeight = style.fontWeight;
+  mirror.style.fontStyle = style.fontStyle;
+  mirror.style.fontVariant = style.fontVariant;
+  mirror.style.fontKerning = style.fontKerning;
+  mirror.style.fontFeatureSettings = style.fontFeatureSettings;
+  mirror.style.textRendering = style.textRendering;
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.letterSpacing = style.letterSpacing;
+  mirror.style.wordSpacing = style.wordSpacing;
+  mirror.style.whiteSpace = 'pre-wrap';
+  mirror.style.overflowWrap = style.overflowWrap || 'break-word';
+  mirror.style.wordBreak = style.wordBreak || 'normal';
+  mirror.style.tabSize = style.tabSize;
+  mirror.style.textIndent = style.textIndent;
+  mirror.style.textTransform = style.textTransform;
+  mirror.style.direction = style.direction;
+  document.body.appendChild(mirror);
+
+  const sampleNode = document.createTextNode('测A');
+  mirror.appendChild(sampleNode);
+  const mirrorBox = mirror.getBoundingClientRect();
+  const parsedLh = parseFloat(style.lineHeight);
+  const singleLineHeight =
+    mirrorBox.height > 4
+      ? mirrorBox.height
+      : Number.isFinite(parsedLh) && parsedLh > 0
+        ? parsedLh
+        : 24;
+
+  const range = document.createRange();
+  range.setStart(sampleNode, 0);
+  range.setEnd(sampleNode, 1);
+  const glyphRect = range.getClientRects()[0] || range.getBoundingClientRect();
+  const halfLeading =
+    glyphRect && glyphRect.height > 0
+      ? Math.max(0, glyphRect.top - mirrorBox.top)
+      : 0;
+
+  mirror.textContent = '';
+  return { mirror, singleLineHeight, halfLeading };
+}
+
+/**
+ * Fallback off-screen <textarea> probe with exact width, zero padding, and zero scrollbar
+ * in case a WebView's <textarea> wraps slightly differently from a <div> mirror.
  */
 function createTextareaProbe(textarea: HTMLTextAreaElement): {
   probe: HTMLTextAreaElement;
   singleLineHeight: number;
-  padTop: number;
 } {
   const style = window.getComputedStyle(textarea);
+  const rect = textarea.getBoundingClientRect();
+  const width = rect.width > 0 ? rect.width : textarea.clientWidth;
+
   const probe = document.createElement('textarea');
   probe.setAttribute('aria-hidden', 'true');
   probe.tabIndex = -1;
   probe.readOnly = true;
+  probe.rows = 1;
   probe.style.position = 'fixed';
-  probe.style.top = '-9999px';
-  probe.style.left = '-9999px';
+  probe.style.top = '-99999px';
+  probe.style.left = '-99999px';
   probe.style.visibility = 'hidden';
   probe.style.pointerEvents = 'none';
   probe.style.boxSizing = 'border-box';
-  probe.style.border = '0';
-  probe.style.margin = '0';
+  probe.style.border = '0px';
+  probe.style.margin = '0px';
+  probe.style.padding = '0px';
   probe.style.outline = 'none';
   probe.style.resize = 'none';
   probe.style.overflow = 'hidden';
   probe.style.height = '0px';
   probe.style.minHeight = '0px';
-  probe.style.width = `${textarea.clientWidth}px`;
-  probe.style.paddingTop = '0px';
-  probe.style.paddingBottom = '0px';
-  probe.style.paddingLeft = style.paddingLeft;
-  probe.style.paddingRight = style.paddingRight;
+  probe.style.width = `${width}px`;
   probe.style.fontFamily = style.fontFamily;
   probe.style.fontSize = style.fontSize;
   probe.style.fontWeight = style.fontWeight;
   probe.style.fontStyle = style.fontStyle;
   probe.style.fontVariant = style.fontVariant;
+  probe.style.fontKerning = style.fontKerning;
+  probe.style.fontFeatureSettings = style.fontFeatureSettings;
+  probe.style.textRendering = style.textRendering;
   probe.style.lineHeight = style.lineHeight;
   probe.style.letterSpacing = style.letterSpacing;
   probe.style.wordSpacing = style.wordSpacing;
   probe.style.whiteSpace = style.whiteSpace;
-  probe.style.overflowWrap = style.overflowWrap;
-  probe.style.wordBreak = style.wordBreak;
+  probe.style.overflowWrap = style.overflowWrap || 'break-word';
+  probe.style.wordBreak = style.wordBreak || 'normal';
   probe.style.tabSize = style.tabSize;
   probe.style.textIndent = style.textIndent;
   probe.style.textTransform = style.textTransform;
@@ -234,9 +305,8 @@ function createTextareaProbe(textarea: HTMLTextAreaElement): {
   const parsedLh = parseFloat(style.lineHeight);
   const singleLineHeight =
     measuredLh > 4 ? measuredLh : Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : 24;
-  const padTop = parseFloat(style.paddingTop) || 0;
 
-  return { probe, singleLineHeight, padTop };
+  return { probe, singleLineHeight };
 }
 
 function measureParaTopInProbe(
@@ -268,19 +338,12 @@ function measureIntraParaTopInProbe(
   return Math.max(0, probe.scrollHeight - singleLineHeight);
 }
 
-function measureCharOffsetY(
+function measureCharOffsetYInProbe(
   textarea: HTMLTextAreaElement,
-  rawText: string,
-  rawCharIndex: number
+  text: string,
+  offset: number
 ): number {
-  const padTopFallback = parseFloat(window.getComputedStyle(textarea).paddingTop) || 0;
-  if (rawCharIndex <= 0 || !rawText || textarea.clientWidth <= 0) {
-    return padTopFallback;
-  }
-  const { text, offset } = normalizeForTextarea(rawText, rawCharIndex);
-  if (offset <= 0) return padTopFallback;
-
-  const { probe, singleLineHeight, padTop } = createTextareaProbe(textarea);
+  const { probe, singleLineHeight } = createTextareaProbe(textarea);
   try {
     const paraStart = offset > 0 ? text.lastIndexOf('\n', offset - 1) + 1 : 0;
     const paraEndRaw = text.indexOf('\n', paraStart);
@@ -296,21 +359,18 @@ function measureCharOffsetY(
             singleLineHeight
           )
         : 0;
-    return padTop + paraTopY + intraParaY;
+    return paraTopY + intraParaY;
   } finally {
     document.body.removeChild(probe);
   }
 }
 
-function findCharOffsetAtY(
+function findCharOffsetAtYInProbe(
   textarea: HTMLTextAreaElement,
   rawText: string,
+  text: string,
   targetScrollTop: number
 ): number {
-  if (targetScrollTop <= 0 || !rawText || textarea.clientWidth <= 0) return 0;
-  const { text } = normalizeForTextarea(rawText, 0);
-  if (!text) return 0;
-
   const { probe, singleLineHeight } = createTextareaProbe(textarea);
   try {
     const minVisibleTop = Math.max(0, targetScrollTop - singleLineHeight * 0.35);
@@ -320,7 +380,6 @@ function findCharOffsetAtY(
       if (text[i] === '\n') lineStarts.push(i + 1);
     }
 
-    // Stage 1: binary search raw paragraphs to locate the one spanning minVisibleTop
     let lo = 0;
     let hi = lineStarts.length - 1;
     let bestLineIdx = 0;
@@ -345,7 +404,6 @@ function findCharOffsetAtY(
     const paraTopY = measureParaTopInProbe(probe, text, paraStart);
     const paraText = text.slice(paraStart, paraEnd);
 
-    // Stage 2: binary search inside wrapped paragraph for the exact first visible visual line
     let charLo = 0;
     let charHi = paraText.length;
     let resultTaOffset = nextParaStart;
@@ -375,6 +433,187 @@ function findCharOffsetAtY(
   } finally {
     document.body.removeChild(probe);
   }
+}
+
+/**
+ * Measure the exact CSS line-box top Y (relative to the top of <textarea>) for `rawCharIndex`.
+ * Uses an unbroken single-TextNode mirror verified against the textarea's live content height,
+ * automatically falling back to an exact-width <textarea> probe if engine heights ever diverge.
+ */
+function measureCharOffsetY(
+  textarea: HTMLTextAreaElement,
+  rawText: string,
+  rawCharIndex: number,
+  taTrueContentHeight = 0
+): number {
+  const width = textarea.getBoundingClientRect().width || textarea.clientWidth;
+  if (rawCharIndex <= 0 || !rawText || width <= 0) {
+    return 0;
+  }
+  const { text, offset } = normalizeForTextarea(rawText, rawCharIndex);
+  if (offset <= 0 || !text) return 0;
+
+  const { mirror, singleLineHeight, halfLeading } = createEditMirror(textarea);
+  let diverged = false;
+  try {
+    const textNode = document.createTextNode(`${text}\u200b`);
+    mirror.appendChild(textNode);
+    const mirrorRect = mirror.getBoundingClientRect();
+
+    if (
+      taTrueContentHeight > 0 &&
+      mirrorRect.height > 0 &&
+      Math.abs(mirrorRect.height - taTrueContentHeight) >
+        Math.max(singleLineHeight * 1.5, taTrueContentHeight * 0.015)
+    ) {
+      diverged = true;
+    } else {
+      const range = document.createRange();
+      const measureIndex = (idx: number): number | null => {
+        if (idx < 0 || idx >= text.length) return null;
+        range.setStart(textNode, idx);
+        range.setEnd(textNode, idx + 1);
+        const rects = range.getClientRects();
+        const r = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
+        if (!r || r.height <= 0) return null;
+        return Math.max(0, r.top - mirrorRect.top - halfLeading);
+      };
+
+      // Case 1: Normal character (not a newline)
+      if (offset < text.length && text[offset] !== '\n') {
+        const y = measureIndex(offset);
+        if (y !== null) return y;
+      }
+
+      // Case 2: End of a non-empty line (cursor right before \n or EOF)
+      if (offset > 0 && text[offset - 1] !== '\n') {
+        const y = measureIndex(offset - 1);
+        if (y !== null) return y;
+      }
+
+      // Case 3: Blank line (both neighbors are \n or string boundaries, so inline marker cannot alter wrapping)
+      mirror.textContent = '';
+      mirror.appendChild(document.createTextNode(text.slice(0, offset)));
+      const marker = document.createElement('span');
+      marker.textContent = '\u200b';
+      mirror.appendChild(marker);
+      mirror.appendChild(document.createTextNode(`${text.slice(offset)}\u200b`));
+      const freshMirrorRect = mirror.getBoundingClientRect();
+      const markerRect = marker.getBoundingClientRect();
+      return Math.max(0, markerRect.top - freshMirrorRect.top - halfLeading);
+    }
+  } finally {
+    document.body.removeChild(mirror);
+  }
+
+  if (diverged) {
+    return measureCharOffsetYInProbe(textarea, text, offset);
+  }
+  return 0;
+}
+
+/**
+ * Inverse mapping (Edit -> Browse): find the exact raw character offset of the first visible
+ * visual line at `targetScrollTop` inside the edit scroll container.
+ */
+function findCharOffsetAtY(
+  textarea: HTMLTextAreaElement,
+  rawText: string,
+  targetScrollTop: number,
+  taTrueContentHeight = 0
+): number {
+  const width = textarea.getBoundingClientRect().width || textarea.clientWidth;
+  if (targetScrollTop <= 0 || !rawText || width <= 0) return 0;
+  const { text } = normalizeForTextarea(rawText, 0);
+  if (!text) return 0;
+
+  const { mirror, singleLineHeight, halfLeading } = createEditMirror(textarea);
+  let diverged = false;
+  try {
+    const textNode = document.createTextNode(`${text}\u200b`);
+    mirror.appendChild(textNode);
+    const mirrorRect = mirror.getBoundingClientRect();
+
+    if (
+      taTrueContentHeight > 0 &&
+      mirrorRect.height > 0 &&
+      Math.abs(mirrorRect.height - taTrueContentHeight) >
+        Math.max(singleLineHeight * 1.5, taTrueContentHeight * 0.015)
+    ) {
+      diverged = true;
+    } else {
+      const minVisibleTop = Math.max(0, targetScrollTop - singleLineHeight * 0.35);
+      const range = document.createRange();
+
+      const getCharLineTop = (idx: number): number | null => {
+        if (idx < 0 || idx >= text.length || text[idx] === '\n') return null;
+        range.setStart(textNode, idx);
+        range.setEnd(textNode, idx + 1);
+        const rects = range.getClientRects();
+        const r = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
+        if (!r || r.height <= 0) return null;
+        return Math.max(0, r.top - mirrorRect.top - halfLeading);
+      };
+
+      let lo = 0;
+      let hi = text.length - 1;
+      let resultTaOffset = text.length;
+
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        let probeIdx = mid;
+        let y = getCharLineTop(probeIdx);
+
+        if (y === null) {
+          let right = mid + 1;
+          while (right <= hi && y === null) {
+            y = getCharLineTop(right);
+            if (y !== null) {
+              probeIdx = right;
+              break;
+            }
+            right++;
+          }
+        }
+        if (y === null) {
+          let left = mid - 1;
+          while (left >= lo && y === null) {
+            y = getCharLineTop(left);
+            if (y !== null) {
+              probeIdx = left;
+              break;
+            }
+            left--;
+          }
+        }
+        if (y === null) {
+          break;
+        }
+
+        if (y >= minVisibleTop) {
+          resultTaOffset = Math.min(resultTaOffset, probeIdx);
+          hi = probeIdx - 1;
+        } else {
+          lo = probeIdx + 1;
+        }
+      }
+
+      if (resultTaOffset >= text.length) {
+        resultTaOffset = Math.max(0, text.length - 1);
+      }
+      while (resultTaOffset < text.length && text[resultTaOffset] === '\n') {
+        resultTaOffset++;
+      }
+      return mapTextareaOffsetToRaw(rawText, Math.min(text.length, resultTaOffset));
+    }
+  } finally {
+    document.body.removeChild(mirror);
+  }
+
+  if (diverged) {
+    return findCharOffsetAtYInProbe(textarea, rawText, text, targetScrollTop);
+  }
+  return 0;
 }
 
 type PendingAnchor =
@@ -408,7 +647,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
   ) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const articleRef = useRef<HTMLElement>(null);
+    const editScrollRef = useRef<HTMLDivElement>(null);
+    const editHeightHolderRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const taContentHeightRef = useRef<number>(0);
 
     const [content, setContent] = useState(doc.content);
     const [fetching, setFetching] = useState(false);
@@ -538,7 +780,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const entry = historyRef.current[targetIndex];
       if (!entry) return;
       const ta = textareaRef.current;
-      const prevScrollTop = ta?.scrollTop ?? 0;
+      const prevScrollTop = editScrollRef.current?.scrollTop ?? 0;
       const wasFocused = Boolean(ta && document.activeElement === ta);
 
       historyIndexRef.current = targetIndex;
@@ -553,7 +795,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       requestAnimationFrame(() => {
         const el = textareaRef.current;
+        const scroller = editScrollRef.current;
         if (!el) return;
+        syncTextareaHeight();
         if (wasFocused) {
           try {
             el.setSelectionRange(entry.selStart, entry.selEnd);
@@ -561,7 +805,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             // ignore selection errors on mobile
           }
         }
-        el.scrollTop = prevScrollTop;
+        if (scroller) {
+          scroller.scrollTop = prevScrollTop;
+        }
       });
     };
 
@@ -588,13 +834,23 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (!contentRef.current.trim()) return 0;
 
       if (isEditingRef.current) {
+        const scroller = editScrollRef.current;
         const ta = textareaRef.current;
-        if (!ta) return doc.readProgress ?? 0;
-        const maxScroll = Math.max(0, ta.scrollHeight - ta.clientHeight);
-        if (maxScroll <= 2) return 100;
-        if (ta.scrollTop <= 2) return 0;
-        const charOffset = findCharOffsetAtY(ta, contentRef.current, ta.scrollTop);
-        return Math.min(100, Math.max(0, Math.round((charOffset / Math.max(1, contentRef.current.length)) * 100)));
+        if (!scroller || !ta) return doc.readProgress ?? 0;
+        const contentBottom = taContentHeightRef.current || ta.scrollHeight;
+        const effectiveMax = Math.max(0, contentBottom - scroller.clientHeight);
+        if (effectiveMax <= 2) return 100;
+        if (scroller.scrollTop <= 2) return 0;
+        const charOffset = findCharOffsetAtY(
+          ta,
+          contentRef.current,
+          scroller.scrollTop,
+          taContentHeightRef.current
+        );
+        return Math.min(
+          100,
+          Math.max(0, Math.round((charOffset / Math.max(1, contentRef.current.length)) * 100))
+        );
       }
 
       const el = scrollRef.current;
@@ -629,14 +885,15 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (!raw) return 0;
 
       if (isEditingRef.current) {
+        const scroller = editScrollRef.current;
         const ta = textareaRef.current;
-        if (!ta || ta.scrollTop <= 10) return 0;
-        return findCharOffsetAtY(ta, raw, ta.scrollTop);
+        if (!scroller || !ta || scroller.scrollTop <= 10) return 0;
+        return findCharOffsetAtY(ta, raw, scroller.scrollTop, taContentHeightRef.current);
       }
 
       const el = scrollRef.current;
       const articleEl = articleRef.current;
-      if (!el || !articleEl || !articleOverflowRef.current) return 0;
+      if (!el || !articleEl) return 0;
       if (el.scrollTop <= 10) {
         const firstBlock = articleEl.querySelector<HTMLElement>('[data-start-offset]');
         const firstStart = Number(firstBlock?.getAttribute('data-start-offset'));
@@ -670,7 +927,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     const emitCurrentViewState = () => {
       const mode: 'read' | 'edit' = isEditingRef.current ? 'edit' : 'read';
-      const el = mode === 'edit' ? textareaRef.current : scrollRef.current;
+      const el = mode === 'edit' ? editScrollRef.current : scrollRef.current;
       const scrollTop = el?.scrollTop ?? 0;
       const charOffset = captureCurrentCharOffset();
       const readProgress = reportReadProgress();
@@ -841,19 +1098,51 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return el.scrollTop;
     };
 
+    /**
+     * Auto-size the zero-padding Edit <textarea> to its exact full content height inside
+     * editScrollRef without ever collapsing scrollHeight or clamping editScrollRef.scrollTop.
+     */
+    const syncTextareaHeight = (): number => {
+      const ta = textareaRef.current;
+      const scroller = editScrollRef.current;
+      const holder = editHeightHolderRef.current;
+      if (!ta) return 0;
+
+      const prevRenderedH = ta.offsetHeight;
+      if (holder && prevRenderedH > 0) {
+        holder.style.minHeight = `${prevRenderedH}px`;
+      }
+
+      ta.style.minHeight = '0px';
+      ta.style.height = '0px';
+      const trueContentH = ta.scrollHeight;
+      taContentHeightRef.current = trueContentH;
+
+      const viewportMinH = scroller ? Math.max(120, scroller.clientHeight - 40) : 240;
+      const nextH = Math.max(trueContentH, viewportMinH);
+      ta.style.height = `${nextH}px`;
+
+      if (holder) {
+        holder.style.minHeight = '';
+      }
+      return trueContentH;
+    };
+
     const scrollEditToCharOffset = (charOffset: number): number => {
       const ta = textareaRef.current;
-      if (!ta) return 0;
-      const maxScroll = Math.max(0, ta.scrollHeight - ta.clientHeight);
+      const scroller = editScrollRef.current;
+      if (!ta || !scroller) return 0;
+
+      const trueContentH = syncTextareaHeight();
+      const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
       let targetTop = 0;
       if (charOffset > 0) {
-        const measuredY = measureCharOffsetY(ta, contentRef.current, charOffset);
-        const padTop = parseFloat(window.getComputedStyle(ta).paddingTop) || 0;
-        targetTop = Math.min(maxScroll, Math.max(0, Math.round(measuredY - padTop)));
+        const measuredY = measureCharOffsetY(ta, contentRef.current, charOffset, trueContentH);
+        targetTop = Math.min(maxScroll, Math.max(0, Math.round(measuredY)));
       }
       lastProgrammaticScrollAtRef.current = performance.now();
-      ta.scrollTop = targetTop;
-      return ta.scrollTop;
+      scroller.scrollTop = targetTop;
+      return scroller.scrollTop;
     };
 
     const applyTypographyAnchorIfLocked = () => {
@@ -866,7 +1155,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       if (isEditingRef.current) {
         const ta = textareaRef.current;
-        if (!ta) return false;
+        const scroller = editScrollRef.current;
+        if (!ta || !scroller) return false;
         const targetOffset = anchor.kind === 'top' ? 0 : anchor.charOffset;
         const nextTop = scrollEditToCharOffset(targetOffset);
         const readProgress = reportReadProgress();
@@ -902,6 +1192,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         bottomClipPxRef.current = 0;
         setTopClipPx(0);
         setBottomClipPx(0);
+        syncTextareaHeight();
       } else {
         measureReadOverflow();
       }
@@ -912,10 +1203,28 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     }, [isEditing, content, doc.id, fontSize, docFontFamily, articleOverflow]);
 
     useEffect(() => {
-      if (isEditing) return;
+      if (typeof ResizeObserver === 'undefined') return;
+      if (isEditing) {
+        const scroller = editScrollRef.current;
+        if (!scroller) return;
+        let lastWidth = scroller.clientWidth;
+        const ro = new ResizeObserver(() => {
+          const nextWidth = scroller.clientWidth;
+          if (nextWidth !== lastWidth) {
+            lastWidth = nextWidth;
+            syncTextareaHeight();
+            if (pendingTypographyAnchorRef.current && Date.now() <= typographyLockUntilRef.current) {
+              applyTypographyAnchorIfLocked();
+            }
+          }
+        });
+        ro.observe(scroller);
+        return () => ro.disconnect();
+      }
+
       const el = scrollRef.current;
       const articleEl = articleRef.current;
-      if (!el || !articleEl || typeof ResizeObserver === 'undefined') return;
+      if (!el || !articleEl) return;
       const ro = new ResizeObserver(() => {
         const needed = articleEl.offsetHeight + 24 > el.clientHeight;
         setArticleOverflow((prev) => (prev === needed ? prev : needed));
@@ -941,6 +1250,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         rafId = window.requestAnimationFrame(() => {
           rafId = null;
           if (cancelled) return;
+          if (isEditingRef.current) {
+            syncTextareaHeight();
+          }
           if (pendingTypographyAnchorRef.current && Date.now() <= typographyLockUntilRef.current) {
             applyTypographyAnchorIfLocked();
           } else if (!isEditingRef.current) {
@@ -985,8 +1297,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         return;
       }
 
-      const targetEl = isEditing ? textareaRef.current : scrollRef.current;
+      const targetEl = isEditing ? editScrollRef.current : scrollRef.current;
       if (!targetEl) return;
+      if (isEditing) {
+        syncTextareaHeight();
+      }
       lastProgrammaticScrollAtRef.current = performance.now();
       targetEl.scrollTop = savedCharOffset === 0 ? 0 : (doc.lastScrollTop ?? 0);
       if (!isEditing) {
@@ -1004,23 +1319,38 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       if (isEditing) {
         const ta = textareaRef.current;
-        if (!ta) return;
+        const scroller = editScrollRef.current;
+        if (!ta || !scroller) return;
 
         // Never auto-focus textarea on Browse -> Edit: keyboard must wait until user taps to place cursor
         const targetOffset = anchor.kind === 'top' ? 0 : anchor.charOffset;
         const targetTop = scrollEditToCharOffset(targetOffset);
+        pendingTypographyAnchorRef.current =
+          targetOffset > 0 ? { kind: 'edit', charOffset: targetOffset } : { kind: 'top' };
+        typographyLockUntilRef.current = Date.now() + 1200;
+
         if (editAlignTimerRef.current !== null) {
           window.clearTimeout(editAlignTimerRef.current);
           editAlignTimerRef.current = null;
         }
         window.requestAnimationFrame(() => {
-          if (isEditingRef.current && textareaRef.current) {
+          if (
+            isEditingRef.current &&
+            textareaRef.current &&
+            pendingTypographyAnchorRef.current &&
+            Date.now() <= typographyLockUntilRef.current
+          ) {
             scrollEditToCharOffset(targetOffset);
           }
         });
         editAlignTimerRef.current = window.setTimeout(() => {
           editAlignTimerRef.current = null;
-          if (isEditingRef.current && textareaRef.current) {
+          if (
+            isEditingRef.current &&
+            textareaRef.current &&
+            pendingTypographyAnchorRef.current &&
+            Date.now() <= typographyLockUntilRef.current
+          ) {
             scrollEditToCharOffset(targetOffset);
           }
         }, 60);
@@ -1040,6 +1370,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const targetOffset = anchor.kind === 'top' ? 0 : anchor.charOffset;
       const targetTop = scrollReadToCharOffset(targetOffset);
+      pendingTypographyAnchorRef.current =
+        targetOffset > 0 ? { kind: 'read', charOffset: targetOffset } : { kind: 'top' };
+      typographyLockUntilRef.current = Date.now() + 1200;
       const readProgress = reportReadProgress();
       onViewStateChangeRef.current({
         mode: 'read',
@@ -1051,26 +1384,28 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     // Center the active cursor line in the screen area above the soft keyboard when it opens
     const centerCursorAboveKeyboard = (ta: HTMLTextAreaElement) => {
-      if (document.activeElement !== ta) return;
+      const scroller = editScrollRef.current;
+      if (!scroller || document.activeElement !== ta) return;
       const vv = window.visualViewport;
       const vvBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
-      const taRect = ta.getBoundingClientRect();
-      const visibleTop = Math.max(0, taRect.top);
-      const visibleBottom = Math.min(taRect.bottom, vvBottom);
+      const scrollerRect = scroller.getBoundingClientRect();
+      const visibleTop = Math.max(0, scrollerRect.top);
+      const visibleBottom = Math.min(scrollerRect.bottom, vvBottom);
       const visibleHeight = Math.max(60, visibleBottom - visibleTop);
 
       const style = window.getComputedStyle(ta);
       const parsedLh = parseFloat(style.lineHeight);
       const lineHeight = Number.isFinite(parsedLh) && parsedLh > 0 ? parsedLh : fontSize * 1.62;
       const cursorIdx = ta.selectionStart ?? 0;
-      const cursorY = measureCharOffsetY(ta, contentRef.current, cursorIdx);
+      const cursorY =
+        measureCharOffsetY(ta, contentRef.current, cursorIdx, taContentHeightRef.current) + 4;
 
       const desiredTop = cursorY + lineHeight * 0.5 - visibleHeight * 0.5;
-      const maxScroll = Math.max(0, ta.scrollHeight - ta.clientHeight);
+      const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
       const nextTop = Math.min(maxScroll, Math.max(0, Math.round(desiredTop)));
 
       lastProgrammaticScrollAtRef.current = performance.now();
-      ta.scrollTop = nextTop;
+      scroller.scrollTop = nextTop;
       emitCurrentViewState();
     };
 
@@ -1191,7 +1526,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           typographyLockUntilRef.current = now + 2500;
           return;
         }
-        const activeEl = isEditingRef.current ? textareaRef.current : scrollRef.current;
+        const activeEl = isEditingRef.current ? editScrollRef.current : scrollRef.current;
         if (!activeEl) return;
 
         if (activeEl.scrollTop <= 10 || (!isEditingRef.current && !articleOverflowRef.current)) {
@@ -1218,17 +1553,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
         clearTypographyLock();
 
-        const activeScrollEl = isEditingRef.current ? textareaRef.current : scrollRef.current;
+        const activeScrollEl = isEditingRef.current ? editScrollRef.current : scrollRef.current;
         if (!activeScrollEl) return;
 
-        if (!isEditingRef.current && !articleOverflowRef.current) {
-          const firstBlock = articleRef.current?.querySelector<HTMLElement>('[data-start-offset]');
-          const firstStart = Number(firstBlock?.getAttribute('data-start-offset'));
-          pendingAnchorRef.current =
-            Number.isFinite(firstStart) && firstStart > 0
-              ? { kind: 'to-edit', charOffset: firstStart }
-              : { kind: 'top' };
-          return;
+        if (!isEditingRef.current) {
+          // Ensure topClipPxRef is 100% fresh right before capturing the top visible line
+          updateEdgeClips();
         }
 
         if (activeScrollEl.scrollTop <= 10) {
@@ -1258,7 +1588,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       flushAndCaptureViewState() {
         flushDraftNow();
         const mode: 'read' | 'edit' = isEditingRef.current ? 'edit' : 'read';
-        const activeEl = mode === 'edit' ? textareaRef.current : scrollRef.current;
+        const activeEl = mode === 'edit' ? editScrollRef.current : scrollRef.current;
         return {
           mode,
           scrollTop: activeEl?.scrollTop ?? 0,
@@ -1270,7 +1600,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         const ta = textareaRef.current;
         if (!ta) return;
 
-        const prevScrollTop = ta.scrollTop;
+        const prevScrollTop = editScrollRef.current?.scrollTop ?? 0;
         const current = contentRef.current;
         const selStart = ta.selectionStart ?? current.length;
         const selEnd = ta.selectionEnd ?? selStart;
@@ -1329,14 +1659,18 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
         requestAnimationFrame(() => {
           const el = textareaRef.current;
+          const scroller = editScrollRef.current;
           if (!el) return;
+          syncTextareaHeight();
           try {
             el.focus({ preventScroll: true });
             el.setSelectionRange(nextSelStart, nextSelEnd);
           } catch {
             // ignore focus errors on mobile
           }
-          el.scrollTop = prevScrollTop;
+          if (scroller) {
+            scroller.scrollTop = prevScrollTop;
+          }
         });
       },
       undo() {
@@ -1360,7 +1694,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     const handleScroll = () => {
-      const el = isEditing ? textareaRef.current : scrollRef.current;
+      const el = isEditing ? editScrollRef.current : scrollRef.current;
       if (!el) return;
       if (!isEditing) {
         scheduleEdgeClipUpdate();
@@ -1939,71 +2273,81 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     return (
       <div className="relative w-full h-full flex flex-col bg-[var(--fei-bg)] pt-6 overflow-x-hidden">
         {isEditing ? (
-          <textarea
-            ref={textareaRef}
-            value={content}
-            onFocus={(e) => {
-              const currentH = window.visualViewport?.height ?? window.innerHeight;
-              if (baselineViewportHeightRef.current - currentH >= 100) {
-                wasKeyboardOpenRef.current = true;
-                scheduleCenterCursorAboveKeyboard(e.currentTarget);
-              }
-            }}
+          <div
+            ref={editScrollRef}
             onScroll={handleScroll}
             onWheel={clearTypographyLock}
             onTouchMove={clearTypographyLock}
-            onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && !e.altKey) {
-                const key = e.key.toLowerCase();
-                if (key === 'z') {
-                  e.preventDefault();
-                  if (e.shiftKey) {
-                    performRedo();
-                  } else {
-                    performUndo();
-                  }
-                } else if (key === 'y' && !e.shiftKey) {
-                  e.preventDefault();
-                  performRedo();
-                }
-              }
-            }}
-            onChange={(e) => {
-              clearTypographyLock();
-              const prevVal = contentRef.current;
-              const nextVal = e.target.value;
-              const selStart = e.target.selectionStart ?? nextVal.length;
-              const selEnd = e.target.selectionEnd ?? selStart;
-              const delta = nextVal.length - prevVal.length;
+            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none"
+          >
+            <div className="max-w-[720px] w-full min-w-0 mx-auto px-5 sm:px-8 pt-1 pb-[calc(100vh-110px)]">
+              <div ref={editHeightHolderRef} className="w-full min-w-0">
+                <textarea
+                  ref={textareaRef}
+                  rows={1}
+                  value={content}
+                  onFocus={(e) => {
+                    const currentH = window.visualViewport?.height ?? window.innerHeight;
+                    if (baselineViewportHeightRef.current - currentH >= 100) {
+                      wasKeyboardOpenRef.current = true;
+                      scheduleCenterCursorAboveKeyboard(e.currentTarget);
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+                      const key = e.key.toLowerCase();
+                      if (key === 'z') {
+                        e.preventDefault();
+                        if (e.shiftKey) {
+                          performRedo();
+                        } else {
+                          performUndo();
+                        }
+                      } else if (key === 'y' && !e.shiftKey) {
+                        e.preventDefault();
+                        performRedo();
+                      }
+                    }
+                  }}
+                  onChange={(e) => {
+                    clearTypographyLock();
+                    const prevVal = contentRef.current;
+                    const nextVal = e.target.value;
+                    const selStart = e.target.selectionStart ?? nextVal.length;
+                    const selEnd = e.target.selectionEnd ?? selStart;
+                    const delta = nextVal.length - prevVal.length;
 
-              let editKind: 'typing' | 'delete' | 'other' = 'other';
-              let coalesce = false;
-              if (delta === 1) {
-                const inserted = nextVal.slice(Math.max(0, selStart - 1), selStart);
-                if (inserted && inserted !== '\n' && inserted !== '\r') {
-                  editKind = 'typing';
-                  coalesce = true;
-                }
-              } else if (delta === -1) {
-                const removed = prevVal.slice(selStart, selStart + 1);
-                if (removed && removed !== '\n' && removed !== '\r') {
-                  editKind = 'delete';
-                  coalesce = true;
-                }
-              }
+                    let editKind: 'typing' | 'delete' | 'other' = 'other';
+                    let coalesce = false;
+                    if (delta === 1) {
+                      const inserted = nextVal.slice(Math.max(0, selStart - 1), selStart);
+                      if (inserted && inserted !== '\n' && inserted !== '\r') {
+                        editKind = 'typing';
+                        coalesce = true;
+                      }
+                    } else if (delta === -1) {
+                      const removed = prevVal.slice(selStart, selStart + 1);
+                      if (removed && removed !== '\n' && removed !== '\r') {
+                        editKind = 'delete';
+                        coalesce = true;
+                      }
+                    }
 
-              contentRef.current = nextVal;
-              setContent(nextVal);
-              recordEditHistory(nextVal, selStart, selEnd, coalesce, editKind);
-              scheduleSave(titleRef.current, nextVal);
-            }}
-            placeholder="开始输入正文…"
-            style={{
-              fontSize: `${fontSize}px`,
-              fontFamily: docFontFamily || 'var(--font-doc-body)',
-            }}
-            className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none pt-1 pb-[calc(100vh-110px)] px-[max(1.25rem,calc(50%-360px+1.25rem))] sm:px-[max(2rem,calc(50%-360px+2rem))] bg-transparent font-doc-body leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none"
-          />
+                    contentRef.current = nextVal;
+                    setContent(nextVal);
+                    recordEditHistory(nextVal, selStart, selEnd, coalesce, editKind);
+                    scheduleSave(titleRef.current, nextVal);
+                  }}
+                  placeholder="开始输入正文…"
+                  style={{
+                    fontSize: `${fontSize}px`,
+                    fontFamily: docFontFamily || 'var(--font-doc-body)',
+                  }}
+                  className="block w-full min-h-[calc(100vh-140px)] overflow-hidden bg-transparent font-doc-body leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none p-0 m-0 border-0"
+                />
+              </div>
+            </div>
+          </div>
         ) : (
           <div className="relative flex-1 min-h-0 w-full flex flex-col">
             <div
