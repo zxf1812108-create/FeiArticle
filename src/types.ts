@@ -149,6 +149,7 @@ export interface ReaderSettings {
   indentFirstLine: boolean;
   defaultDocFont?: DocFontId;
   autoHyphenate?: boolean;
+  progressDisplayMode?: 'percent' | 'pages';
 }
 
 export type SmartView = 'all' | 'recent' | 'starred' | 'dirty' | 'highlights' | 'trash';

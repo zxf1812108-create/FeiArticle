@@ -33,6 +33,12 @@ export interface DocViewStateSnapshot {
   readProgress: number;
 }
 
+export interface DocReadMetrics {
+  progress: number;
+  currentPage: number;
+  totalPages: number;
+}
+
 export interface MinimalDocViewHandle {
   captureTypographyAnchor: () => void;
   flushAndCaptureViewState: () => DocViewStateSnapshot;
@@ -50,6 +56,7 @@ interface MinimalDocViewProps {
   onMdictPopupVolumeKey?: (direction: VolumeKeyDirection) => void;
   onViewStateChange: (state: DocViewStateSnapshot) => void;
   onReadProgressChange?: (progress: number) => void;
+  onReadMetricsChange?: (metrics: DocReadMetrics) => void;
   onFetchRemoteBody: () => Promise<void>;
 }
 
@@ -503,6 +510,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       onMdictPopupVolumeKey,
       onViewStateChange,
       onReadProgressChange,
+      onReadMetricsChange,
       onFetchRemoteBody,
     },
     ref
@@ -544,6 +552,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const selectionCheckTimerRef = useRef<number | null>(null);
     const clearSelectionTimerRef = useRef<number | null>(null);
     const lastReportedProgressRef = useRef<number>(-1);
+    const lastReportedPageKeyRef = useRef<string>('');
 
     const hasActiveMdictRef = useRef(hasActiveMdict);
     hasActiveMdictRef.current = hasActiveMdict;
@@ -566,6 +575,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     onViewStateChangeRef.current = onViewStateChange;
     const onReadProgressChangeRef = useRef(onReadProgressChange);
     onReadProgressChangeRef.current = onReadProgressChange;
+    const onReadMetricsChangeRef = useRef(onReadMetricsChange);
+    onReadMetricsChangeRef.current = onReadMetricsChange;
 
     const { blocks, toc } = useMemo(
       () => getParsedDocumentCached(doc.id, content),
@@ -689,14 +700,20 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       typographyLockUntilRef.current = 0;
     };
 
-    const computeReadProgress = (): number => {
-      if (!contentRef.current.trim()) return 0;
+    const computeReadMetrics = (): DocReadMetrics => {
+      if (!contentRef.current.trim()) {
+        return { progress: 0, currentPage: 1, totalPages: 1 };
+      }
       const el = scrollRef.current;
       const articleEl = articleRef.current;
-      if (!el || !articleEl) return doc.readProgress ?? 0;
+      if (!el || !articleEl) {
+        return { progress: doc.readProgress ?? 0, currentPage: 1, totalPages: 1 };
+      }
 
       const viewHeight = el.clientHeight;
-      if (viewHeight <= 0) return doc.readProgress ?? 0;
+      if (viewHeight <= 0) {
+        return { progress: doc.readProgress ?? 0, currentPage: 1, totalPages: 1 };
+      }
 
       const containerRect = el.getBoundingClientRect();
       const articleRect = articleEl.getBoundingClientRect();
@@ -704,18 +721,45 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const articleBottom = articleRect.bottom + baseOffset;
       const effectiveMax = Math.max(0, articleBottom - viewHeight);
 
-      if (effectiveMax <= 2) return 100;
-      if (el.scrollTop <= 2) return 0;
-      return Math.min(100, Math.max(0, Math.round((el.scrollTop / effectiveMax) * 100)));
+      if (effectiveMax <= 4) {
+        return { progress: 100, currentPage: 1, totalPages: 1 };
+      }
+
+      // Effective height advanced per screen turn (accounting for edge-line alignment)
+      const effectivePageStep = Math.max(100, viewHeight - Math.round(fontSize * 1.0));
+      const totalPages = Math.max(2, 1 + Math.ceil(effectiveMax / effectivePageStep));
+
+      if (el.scrollTop <= 2) {
+        return { progress: 0, currentPage: 1, totalPages };
+      }
+
+      if (el.scrollTop >= effectiveMax - 4) {
+        return { progress: 100, currentPage: totalPages, totalPages };
+      }
+
+      const progress = Math.min(100, Math.max(0, Math.round((el.scrollTop / effectiveMax) * 100)));
+      const currentPage = Math.min(
+        totalPages,
+        Math.max(1, 1 + Math.round(el.scrollTop / effectivePageStep))
+      );
+
+      return { progress, currentPage, totalPages };
     };
 
+    const computeReadProgress = (): number => computeReadMetrics().progress;
+
     const reportReadProgress = (): number => {
-      const pct = computeReadProgress();
-      if (pct !== lastReportedProgressRef.current) {
-        lastReportedProgressRef.current = pct;
-        onReadProgressChangeRef.current?.(pct);
+      const metrics = computeReadMetrics();
+      if (metrics.progress !== lastReportedProgressRef.current) {
+        lastReportedProgressRef.current = metrics.progress;
+        onReadProgressChangeRef.current?.(metrics.progress);
       }
-      return pct;
+      const pageKey = `${metrics.progress}|${metrics.currentPage}/${metrics.totalPages}`;
+      if (pageKey !== lastReportedPageKeyRef.current) {
+        lastReportedPageKeyRef.current = pageKey;
+        onReadMetricsChangeRef.current?.(metrics);
+      }
+      return metrics.progress;
     };
 
     const captureCurrentCharOffset = (): number => {
@@ -797,6 +841,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       contentRef.current = doc.content;
       hadSelectionOnDownRef.current = false;
       lastReportedProgressRef.current = -1;
+      lastReportedPageKeyRef.current = '';
       restoredDocIdRef.current = null;
       pendingJumpRef.current = null;
       measuredChunkHeightsRef.current = [];

@@ -58,6 +58,7 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   indentFirstLine: false,
   defaultDocFont: 'system',
   autoHyphenate: false,
+  progressDisplayMode: 'percent',
 };
 
 export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {

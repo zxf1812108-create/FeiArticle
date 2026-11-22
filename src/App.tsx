@@ -20,6 +20,7 @@ import { ImportModal } from './components/ImportModal';
 import { MdictDictModal } from './components/MdictDictModal';
 import { MdictLookupPopup, MdictLookupPopupHandle } from './components/MdictLookupPopup';
 import {
+  DocReadMetrics,
   DocViewStateSnapshot,
   MinimalDocView,
   MinimalDocViewHandle,
@@ -216,6 +217,13 @@ export default function App() {
   const [autoHyphenate, setAutoHyphenate] = useState<boolean>(() =>
     Boolean(loadReaderSettings().autoHyphenate)
   );
+  const [progressDisplayMode, setProgressDisplayMode] = useState<'percent' | 'pages'>(() =>
+    loadReaderSettings().progressDisplayMode === 'pages' ? 'pages' : 'percent'
+  );
+  const [livePageInfo, setLivePageInfo] = useState<{ currentPage: number; totalPages: number }>({
+    currentPage: 1,
+    totalPages: 1,
+  });
   const [docFontsMap, setDocFontsMap] = useState<Record<string, string>>(() =>
     loadDocFontsMap()
   );
@@ -1383,6 +1391,15 @@ export default function App() {
     });
   };
 
+  const handleToggleProgressDisplayMode = () => {
+    setProgressDisplayMode((prev) => {
+      const next: 'percent' | 'pages' = prev === 'percent' ? 'pages' : 'percent';
+      const current = loadReaderSettings();
+      saveReaderSettings({ ...current, progressDisplayMode: next });
+      return next;
+    });
+  };
+
   const currentDocFont = useMemo<DocFontId>(() => {
     if (!selectedDocId) return defaultDocFont;
     return resolveDocFont(docFontsMap[selectedDocId], defaultDocFont);
@@ -2002,6 +2019,14 @@ export default function App() {
             }}
             onViewStateChange={(state) => handleUpdateDocViewState(selectedDoc.id, state)}
             onReadProgressChange={setLiveReadProgress}
+            onReadMetricsChange={(metrics: DocReadMetrics) => {
+              setLiveReadProgress(metrics.progress);
+              setLivePageInfo((prev) =>
+                prev.currentPage === metrics.currentPage && prev.totalPages === metrics.totalPages
+                  ? prev
+                  : { currentPage: metrics.currentPage, totalPages: metrics.totalPages }
+              );
+            }}
             onFetchRemoteBody={() => handleFetchRemoteBody(selectedDoc.id)}
           />
         ) : (
@@ -2408,13 +2433,26 @@ export default function App() {
                 );
               })}
 
-              {/* 最右侧固定：阅读进度百分比（不参与拖动排序） */}
-              <span
-                aria-label={`当前阅读进度 ${liveReadProgress}%`}
-                className="ml-auto pr-1 text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] select-none whitespace-nowrap shrink-0"
+              {/* 最右侧固定：阅读进度（点击在百分比与当前页数/总页数之间切换，不参与拖动排序） */}
+              <button
+                type="button"
+                onClick={handleToggleProgressDisplayMode}
+                aria-label={
+                  progressDisplayMode === 'pages'
+                    ? `当前第 ${livePageInfo.currentPage} 页，共 ${livePageInfo.totalPages} 页，点击切换为百分比进度`
+                    : `当前阅读进度 ${liveReadProgress}%，点击切换为页数显示`
+                }
+                title={
+                  progressDisplayMode === 'pages'
+                    ? '点击切换为百分比进度'
+                    : '点击切换为 当前页数/总页数'
+                }
+                className="ml-auto h-[40px] px-1.5 -mr-0.5 inline-flex items-center justify-center rounded-lg text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors select-none whitespace-nowrap shrink-0 cursor-pointer"
               >
-                {liveReadProgress}%
-              </span>
+                {progressDisplayMode === 'pages'
+                  ? `${livePageInfo.currentPage}/${livePageInfo.totalPages}`
+                  : `${liveReadProgress}%`}
+              </button>
             </>
           )}
         </div>
