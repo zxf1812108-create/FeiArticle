@@ -105,7 +105,7 @@ export const TrashModal: React.FC<TrashModalProps> = ({
                       onEmptyTrash();
                       setConfirmEmpty(false);
                     }}
-                    className="h-7 px-2.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[12px] font-medium hover:opacity-90 transition-opacity whitespace-nowrap"
+                    className="h-7 px-2.5 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border-strong)] text-[var(--fei-text-primary)] text-[12px] font-medium hover:bg-[var(--fei-bg-selected)] transition-colors whitespace-nowrap cursor-pointer"
                   >
                     确认清空
                   </button>

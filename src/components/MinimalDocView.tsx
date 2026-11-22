@@ -2157,7 +2157,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                       type="button"
                       onClick={handleFetch}
                       disabled={fetching}
-                      className="h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium disabled:opacity-60"
+                      className={`h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13px] transition-colors ${
+                        fetching
+                          ? 'text-[var(--fei-text-muted)]/65 cursor-wait'
+                          : 'text-[var(--fei-text-primary)] font-medium hover:bg-[var(--fei-bg-selected)] active:bg-[var(--fei-bg-selected)] cursor-pointer'
+                      }`}
                     >
                       <CloudDownload className="w-4 h-4" />
                       <span>{fetching ? '拉取中…' : '拉取正文'}</span>

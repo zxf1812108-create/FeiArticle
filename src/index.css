@@ -29,6 +29,10 @@
     --fei-popup-border: #C8C6BE;
     --fei-popup-divider: #DDDCD5;
     --fei-popup-handle: #C2C0B8;
+    --fei-switch-track-off: #E2E0D9;
+    --fei-switch-thumb-off: #8D8B84;
+    --fei-switch-track-on: #6B6A64;
+    --fei-switch-thumb-on: #F7F6F2;
   }
 
   html.dark {
@@ -52,6 +56,10 @@
     --fei-popup-border: #787878;
     --fei-popup-divider: #4A4A4A;
     --fei-popup-handle: #5E5E5E;
+    --fei-switch-track-off: #2A2A2A;
+    --fei-switch-thumb-off: #787878;
+    --fei-switch-track-on: #5C5C5C;
+    --fei-switch-thumb-on: #E0E0E0;
   }
 
   html.eink {
@@ -75,6 +83,10 @@
     --fei-popup-border: #262626;
     --fei-popup-divider: #BDBDBD;
     --fei-popup-handle: #B0B0B0;
+    --fei-switch-track-off: #FFFFFF;
+    --fei-switch-thumb-off: #595959;
+    --fei-switch-track-on: #595959;
+    --fei-switch-thumb-on: #FFFFFF;
   }
 
   *,

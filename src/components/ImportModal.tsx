@@ -242,7 +242,12 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                 <button
                   type="button"
                   onClick={handleConfirmNewFolder}
-                  className="h-9 px-3 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium whitespace-nowrap"
+                  disabled={!newFolderName.trim()}
+                  className={`h-9 px-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13px] transition-colors whitespace-nowrap ${
+                    newFolderName.trim()
+                      ? 'text-[var(--fei-text-primary)] font-medium hover:bg-[var(--fei-bg-selected)] active:bg-[var(--fei-bg-selected)] cursor-pointer'
+                      : 'text-[var(--fei-text-muted)]/55 cursor-not-allowed'
+                  }`}
                 >
                   创建
                 </button>
@@ -283,15 +288,24 @@ export const ImportModal: React.FC<ImportModalProps> = ({
               className="w-full p-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13.5px] leading-relaxed text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none focus:border-[var(--fei-border-strong)] resize-none"
             />
             <div className="flex justify-end">
-              <button
-                type="button"
-                onClick={handleImportPasted}
-                disabled={!pasteContent.trim() || !effectiveFolderId}
-                className="h-9 px-3.5 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-35 whitespace-nowrap"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span>导入粘贴文本</span>
-              </button>
+              {(() => {
+                const canImportPasted = Boolean(pasteContent.trim() && effectiveFolderId);
+                return (
+                  <button
+                    type="button"
+                    onClick={handleImportPasted}
+                    disabled={!canImportPasted}
+                    className={`h-9 px-3.5 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13px] transition-colors whitespace-nowrap ${
+                      canImportPasted
+                        ? 'text-[var(--fei-text-primary)] font-medium hover:bg-[var(--fei-bg-selected)] active:bg-[var(--fei-bg-selected)] cursor-pointer'
+                        : 'text-[var(--fei-text-muted)]/55 cursor-not-allowed'
+                    }`}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>导入粘贴文本</span>
+                  </button>
+                );
+              })()}
             </div>
           </div>
 

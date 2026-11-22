@@ -376,17 +376,17 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                   aria-label="切换电脑直连"
                   disabled={lanLoading}
                   onClick={() => onToggleLan(!lanRunning)}
-                  className={`relative inline-flex h-[22px] w-[40px] shrink-0 items-center rounded-full transition-colors duration-150 disabled:opacity-50 ${
+                  className={`relative inline-flex h-[22px] w-[40px] shrink-0 items-center rounded-full border transition-colors duration-150 disabled:opacity-50 cursor-pointer ${
                     lanRunning
-                      ? 'bg-[var(--fei-btn-primary-bg)]'
-                      : 'bg-[var(--fei-border-strong)]'
+                      ? 'bg-[var(--fei-switch-track-on)] border-[var(--fei-switch-track-on)]'
+                      : 'bg-[var(--fei-switch-track-off)] border-[var(--fei-border-strong)]'
                   }`}
                 >
                   <span
                     className={`inline-block h-[16px] w-[16px] rounded-full transition-transform duration-150 ${
                       lanRunning
-                        ? 'translate-x-[21px] bg-[var(--fei-btn-primary-text)]'
-                        : 'translate-x-[3px] bg-[var(--fei-bg-surface)]'
+                        ? 'translate-x-[20px] bg-[var(--fei-switch-thumb-on)]'
+                        : 'translate-x-[2px] bg-[var(--fei-switch-thumb-off)]'
                     }`}
                   />
                 </button>

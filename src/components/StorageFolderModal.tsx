@@ -242,7 +242,11 @@ export const StorageFolderModal: React.FC<StorageFolderModalProps> = ({
           <button
             type="submit"
             disabled={submitting || picking}
-            className="w-full h-10 rounded-xl bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13.5px] font-medium hover:opacity-90 transition-opacity disabled:opacity-60"
+            className={`w-full h-10 rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13.5px] transition-colors ${
+              submitting || picking
+                ? 'text-[var(--fei-text-muted)]/65 cursor-not-allowed'
+                : 'text-[var(--fei-text-primary)] font-medium hover:bg-[var(--fei-bg-selected)] active:bg-[var(--fei-bg-selected)] cursor-pointer'
+            }`}
           >
             {submitting ? '正在创建并绑定目录…' : '确定'}
           </button>

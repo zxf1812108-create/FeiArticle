@@ -2582,16 +2582,16 @@ export default function App() {
                 onClick={handleToggleAutoHyphenate}
                 className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
                   autoHyphenate
-                    ? 'bg-[var(--fei-btn-primary-bg)] border-[var(--fei-btn-primary-bg)]'
-                    : 'bg-[var(--fei-bg-subtle)] border-[var(--fei-border-strong)]'
+                    ? 'bg-[var(--fei-switch-track-on)] border-[var(--fei-switch-track-on)]'
+                    : 'bg-[var(--fei-switch-track-off)] border-[var(--fei-border-strong)]'
                 }`}
               >
                 <span
                   aria-hidden="true"
                   className={`inline-block h-4 w-4 rounded-full transition-transform ${
                     autoHyphenate
-                      ? 'translate-x-[22px] bg-[var(--fei-btn-primary-text)]'
-                      : 'translate-x-[3px] bg-[var(--fei-text-muted)]'
+                      ? 'translate-x-[23px] bg-[var(--fei-switch-thumb-on)]'
+                      : 'translate-x-[3px] bg-[var(--fei-switch-thumb-off)]'
                   }`}
                 />
               </button>
