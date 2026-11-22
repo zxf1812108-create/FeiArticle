@@ -10,7 +10,7 @@ import React, {
 } from 'react';
 import { CloudDownload, Copy } from 'lucide-react';
 import { ArticleDoc } from '../types';
-import { extractEnglishLookupWord } from '../utils/mdict';
+import { extractLookupWord } from '../utils/mdict';
 import { DocOutlineModal } from './DocOutlineModal';
 import { BlockNode, formatBytes, parseDocumentBlocks, TocItem } from '../utils/textParser';
 import {
@@ -1481,7 +1481,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return;
         }
         // If selection expanded beyond a single lookup word before release, keep it and close popup
-        const word = extractEnglishLookupWord(sel.toString());
+        const word = extractLookupWord(sel.toString());
         if (!word) {
           onClearMdictLookupRef.current?.();
           return;
@@ -1524,7 +1524,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const commonAncestor = range.commonAncestorContainer;
       if (!articleEl.contains(commonAncestor)) return;
 
-      const word = extractEnglishLookupWord(sel.toString());
+      const word = extractLookupWord(sel.toString());
       if (!word) {
         // User expanded selection into a sentence / non-lookup text (e.g., to copy); dismiss lookup popup and keep selection
         if (isMdictPopupOpenRef.current) {
@@ -1585,7 +1585,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         if (articleEl && sel && !sel.isCollapsed && sel.rangeCount > 0) {
           const range = sel.getRangeAt(0);
           if (articleEl.contains(range.commonAncestorContainer)) {
-            const word = extractEnglishLookupWord(sel.toString());
+            const word = extractLookupWord(sel.toString());
             if (!word) {
               if (selectionCheckTimerRef.current) {
                 window.clearTimeout(selectionCheckTimerRef.current);
@@ -1723,10 +1723,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return;
         }
 
-        // If user dragged selection into multiple words / non-English text, immediately close popup and keep selection
+        // If user dragged selection into a sentence / non-lookup text, immediately close popup and keep selection
         const articleEl = articleRef.current;
         if (articleEl && sel.rangeCount > 0 && articleEl.contains(sel.getRangeAt(0).commonAncestorContainer)) {
-          if (!extractEnglishLookupWord(sel.toString())) {
+          if (!extractLookupWord(sel.toString())) {
             if (selectionCheckTimerRef.current) {
               window.clearTimeout(selectionCheckTimerRef.current);
               selectionCheckTimerRef.current = null;

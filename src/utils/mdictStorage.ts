@@ -1,5 +1,6 @@
 import { MdictDictionaryRecord, MdictDictionarySummary, MdictLookupResult } from '../types';
 import {
+  clearMdictLookupCache,
   lookupInMdictBlob,
   parseMdictIndexFromBlob,
   sanitizeMdictCss,
@@ -118,6 +119,7 @@ export async function deleteMdictDictionary(id: string): Promise<void> {
     tx.objectStore(STORE_BLOBS).delete(id);
     tx.oncomplete = () => {
       recordCache.delete(id);
+      clearMdictLookupCache(id);
       db.close();
       resolve();
     };

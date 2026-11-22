@@ -300,7 +300,17 @@ function readUIntBE(dv: DataView, offset: number, width: 4 | 8): { value: number
 function normalizeEncoding(raw?: string): MdictEncoding {
   const lower = (raw || 'utf-8').trim().toLowerCase();
   if (lower === 'utf-16' || lower === 'utf16' || lower === 'utf-16le') return 'utf-16le';
-  if (lower === 'gbk' || lower === 'gb2312' || lower === 'gb18030') return 'gb18030';
+  if (
+    lower === 'gbk' ||
+    lower === 'gb2312' ||
+    lower === 'gb18030' ||
+    lower === 'gb-2312' ||
+    lower === 'gb_2312-80' ||
+    lower === 'gbk2312' ||
+    lower === 'cp936'
+  ) {
+    return 'gb18030';
+  }
   if (lower === 'big5') return 'big5';
   return 'utf-8';
 }
@@ -675,17 +685,33 @@ export async function parseMdictIndexFromBlob(
 // Word Extraction, Morphological Candidates & On-Demand Lookup
 // ---------------------------------------------------------------------------
 
-export function extractEnglishLookupWord(rawSelection: string): string | null {
+const LEADING_TRIM_RE = /^[\s"'“”‘’.,;:!?()[\]{}<>《》「」『』—–·•/\\，。！？；：、（）【】…～~]+/;
+const TRAILING_TRIM_RE = /[\s"'“”‘’.,;:!?()[\]{}<>《》「」『』—–·•/\\，。！？；：、（）【】…～~]+$/;
+const PURE_HAN_RE = /^\p{Script=Han}+$/u;
+const MAX_HAN_LOOKUP_CHARS = 8;
+
+export function extractLookupWord(rawSelection: string): string | null {
   if (!rawSelection || rawSelection.includes('\n') || rawSelection.includes('\r')) {
     return null;
   }
   const cleaned = rawSelection
     .replace(/\u00AD/g, '')
     .trim()
-    .replace(/^[\s"'“”‘’.,;:!?()[\]{}<>《》「」『』—–·•/\\]+/, '')
-    .replace(/[\s"'“”‘’.,;:!?()[\]{}<>《》「」『』—–·•/\\]+$/, '');
+    .replace(LEADING_TRIM_RE, '')
+    .replace(TRAILING_TRIM_RE, '');
 
-  if (!cleaned || cleaned.length > 48) return null;
+  if (!cleaned) return null;
+
+  // Support single Chinese characters (e.g. 新华字典) and Chinese words/idioms (up to 8 Han chars)
+  if (PURE_HAN_RE.test(cleaned)) {
+    const charCount = Array.from(cleaned).length;
+    if (charCount >= 1 && charCount <= MAX_HAN_LOOKUP_CHARS) {
+      return cleaned;
+    }
+    return null;
+  }
+
+  if (cleaned.length > 48) return null;
   if (!/[A-Za-z]/.test(cleaned)) return null;
 
   // Reject sentences or multi-word prose: allow up to 3 English words/hyphenated/apostrophe tokens
@@ -699,7 +725,9 @@ export function extractEnglishLookupWord(rawSelection: string): string | null {
   return cleaned;
 }
 
-export function buildEnglishLookupCandidates(word: string): string[] {
+export const extractEnglishLookupWord = extractLookupWord;
+
+export function buildLookupCandidates(word: string): string[] {
   const candidates: string[] = [];
   const push = (w: string) => {
     const trimmed = w.trim();
@@ -709,6 +737,16 @@ export function buildEnglishLookupCandidates(word: string): string[] {
   };
 
   push(word);
+  const nfc = word.normalize('NFC');
+  if (nfc !== word) {
+    push(nfc);
+  }
+
+  // Skip English inflection rules for pure CJK / non-Latin queries
+  if (!/[A-Za-z]/.test(word)) {
+    return candidates;
+  }
+
   const lower = word.toLowerCase();
   push(lower);
 
@@ -783,27 +821,56 @@ export function buildEnglishLookupCandidates(word: string): string[] {
   return candidates;
 }
 
+export const buildEnglishLookupCandidates = buildLookupCandidates;
+
 function stripKeyForSort(s: string): string {
   return s.replace(/[()., '/\\@_-]+/g, '').toLowerCase();
 }
 
-function compareMdictKeys(a: string, b: string, isStripKey: boolean, isCaseSensitive: boolean): number {
+function compareCodePoints(a: string, b: string): number {
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    const ca = a.codePointAt(i)!;
+    const cb = b.codePointAt(j)!;
+    if (ca !== cb) return ca < cb ? -1 : 1;
+    i += ca > 0xffff ? 2 : 1;
+    j += cb > 0xffff ? 2 : 1;
+  }
+  if (i < a.length) return 1;
+  if (j < b.length) return -1;
+  return 0;
+}
+
+function compareRawStrings(a: string, b: string, useCodePointOrder: boolean): number {
+  if (useCodePointOrder) {
+    return compareCodePoints(a, b);
+  }
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function compareMdictKeys(
+  a: string,
+  b: string,
+  isStripKey: boolean,
+  isCaseSensitive: boolean,
+  useCodePointOrder: boolean
+): number {
   const ka = isStripKey ? stripKeyForSort(a) : isCaseSensitive ? a : a.toLowerCase();
   const kb = isStripKey ? stripKeyForSort(b) : isCaseSensitive ? b : b.toLowerCase();
-  if (ka < kb) return -1;
-  if (ka > kb) return 1;
-  const la = a.toLowerCase();
-  const lb = b.toLowerCase();
-  if (la < lb) return -1;
-  if (la > lb) return 1;
-  return 0;
+  const primary = compareRawStrings(ka, kb, useCodePointOrder);
+  if (primary !== 0) return primary;
+  return compareRawStrings(a.toLowerCase(), b.toLowerCase(), useCodePointOrder);
 }
 
 function selectCandidateKeyBlockIndices(
   keyBlocks: MdictKeyBlockMeta[],
   target: string,
   isStripKey: boolean,
-  isCaseSensitive: boolean
+  isCaseSensitive: boolean,
+  useCodePointOrder: boolean
 ): number[] {
   if (keyBlocks.length === 0) return [];
   if (keyBlocks.length <= 4) {
@@ -825,8 +892,20 @@ function selectCandidateKeyBlockIndices(
 
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      const cmpFirst = compareMdictKeys(keyBlocks[mid].firstKey, target, stripMode, caseMode);
-      const cmpLast = compareMdictKeys(keyBlocks[mid].lastKey, target, stripMode, caseMode);
+      const cmpFirst = compareMdictKeys(
+        keyBlocks[mid].firstKey,
+        target,
+        stripMode,
+        caseMode,
+        useCodePointOrder
+      );
+      const cmpLast = compareMdictKeys(
+        keyBlocks[mid].lastKey,
+        target,
+        stripMode,
+        caseMode,
+        useCodePointOrder
+      );
       if (cmpFirst <= 0 && cmpLast >= 0) {
         best = mid;
         picked.add(mid);
@@ -846,6 +925,220 @@ function selectCandidateKeyBlockIndices(
   }
 
   return Array.from(picked).sort((a, b) => a - b);
+}
+
+function isKeyBlocksMonotonicForMode(
+  keyBlocks: MdictKeyBlockMeta[],
+  isStripKey: boolean,
+  isCaseSensitive: boolean,
+  useCodePointOrder: boolean
+): boolean {
+  if (keyBlocks.length <= 1) return true;
+  for (let i = 0; i < keyBlocks.length; i++) {
+    const kb = keyBlocks[i];
+    if (kb.numEntries > 0 && (!kb.firstKey || !kb.lastKey)) {
+      return false;
+    }
+    if (
+      kb.firstKey &&
+      kb.lastKey &&
+      compareMdictKeys(kb.firstKey, kb.lastKey, isStripKey, isCaseSensitive, useCodePointOrder) > 0
+    ) {
+      return false;
+    }
+    if (i > 0) {
+      const prev = keyBlocks[i - 1];
+      if (
+        prev.lastKey &&
+        kb.firstKey &&
+        compareMdictKeys(
+          prev.lastKey,
+          kb.firstKey,
+          isStripKey,
+          isCaseSensitive,
+          useCodePointOrder
+        ) > 0
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+const monotonicOrderCache = new Map<string, boolean>();
+
+function hasMonotonicUnicodeOrder(meta: MdictDictionaryRecord): boolean {
+  const cached = monotonicOrderCache.get(meta.id);
+  if (cached !== undefined) return cached;
+  const useCodePointOrder = meta.encoding === 'utf-8';
+  const monotonic =
+    isKeyBlocksMonotonicForMode(
+      meta.keyBlocks,
+      meta.isStripKey,
+      meta.isCaseSensitive,
+      useCodePointOrder
+    ) || isKeyBlocksMonotonicForMode(meta.keyBlocks, false, false, useCodePointOrder);
+  monotonicOrderCache.set(meta.id, monotonic);
+  return monotonic;
+}
+
+interface KeyRangeRef {
+  key: string;
+  start: number;
+  end: number;
+}
+
+const MAX_FALLBACK_INDEX_DICTS = 3;
+const MAX_FALLBACK_INDEX_ENTRIES = 250_000;
+const fallbackKeyIndexCache = new Map<string, Map<string, KeyRangeRef[]>>();
+const fallbackKeyIndexPromises = new Map<string, Promise<Map<string, KeyRangeRef[]>>>();
+
+export function clearMdictLookupCache(dictId?: string): void {
+  if (dictId) {
+    fallbackKeyIndexCache.delete(dictId);
+    fallbackKeyIndexPromises.delete(dictId);
+    monotonicOrderCache.delete(dictId);
+    return;
+  }
+  fallbackKeyIndexCache.clear();
+  fallbackKeyIndexPromises.clear();
+  monotonicOrderCache.clear();
+}
+
+function normalizeFallbackKey(s: string): string {
+  return s.trim().toLowerCase().normalize('NFC');
+}
+
+async function getOrBuildFallbackKeyIndex(
+  blob: Blob,
+  meta: MdictDictionaryRecord
+): Promise<Map<string, KeyRangeRef[]>> {
+  const existing = fallbackKeyIndexCache.get(meta.id);
+  if (existing) {
+    // Refresh LRU order
+    fallbackKeyIndexCache.delete(meta.id);
+    fallbackKeyIndexCache.set(meta.id, existing);
+    return existing;
+  }
+
+  const inFlight = fallbackKeyIndexPromises.get(meta.id);
+  if (inFlight) return inFlight;
+
+  const buildPromise = (async () => {
+    const index = new Map<string, KeyRangeRef[]>();
+    let pendingTailRef: KeyRangeRef | null = null;
+
+    for (let blockIdx = 0; blockIdx < meta.keyBlocks.length; blockIdx++) {
+      const entries = await readKeyBlockEntries(blob, meta, blockIdx);
+      if (entries.length === 0) continue;
+
+      if (pendingTailRef) {
+        pendingTailRef.end = entries[0].recordStartOffset;
+        pendingTailRef = null;
+      }
+
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        const end =
+          i + 1 < entries.length
+            ? entries[i + 1].recordStartOffset
+            : meta.totalRecordDecompressedSize;
+        const ref: KeyRangeRef = {
+          key: entry.key,
+          start: entry.recordStartOffset,
+          end,
+        };
+        const normKey = normalizeFallbackKey(entry.key);
+        if (normKey) {
+          const list = index.get(normKey);
+          if (list) {
+            list.push(ref);
+          } else {
+            index.set(normKey, [ref]);
+          }
+        }
+        if (i === entries.length - 1) {
+          pendingTailRef = ref;
+        }
+      }
+    }
+
+    if (fallbackKeyIndexCache.size >= MAX_FALLBACK_INDEX_DICTS) {
+      const oldestKey = fallbackKeyIndexCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        fallbackKeyIndexCache.delete(oldestKey);
+      }
+    }
+    fallbackKeyIndexCache.set(meta.id, index);
+    return index;
+  })();
+
+  fallbackKeyIndexPromises.set(meta.id, buildPromise);
+  try {
+    return await buildPromise;
+  } finally {
+    fallbackKeyIndexPromises.delete(meta.id);
+  }
+}
+
+async function scanRemainingKeyBlocksForWord(
+  blob: Blob,
+  meta: MdictDictionaryRecord,
+  word: string,
+  checkedBlocks: Set<number>
+): Promise<KeyRangeRef[]> {
+  const normTarget = normalizeFallbackKey(word);
+  const exactMatches: KeyRangeRef[] = [];
+  const trimmedMatches: KeyRangeRef[] = [];
+  const normMatches: KeyRangeRef[] = [];
+
+  for (let blockIdx = 0; blockIdx < meta.keyBlocks.length; blockIdx++) {
+    if (checkedBlocks.has(blockIdx)) continue;
+    const entries = await readKeyBlockEntries(blob, meta, blockIdx);
+    const matchedIndices: Array<{ idx: number; tier: 0 | 1 | 2 }> = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const k = entries[i].key;
+      if (k === word) {
+        matchedIndices.push({ idx: i, tier: 0 });
+      } else if (k.trim() === word) {
+        matchedIndices.push({ idx: i, tier: 1 });
+      } else if (normalizeFallbackKey(k) === normTarget) {
+        matchedIndices.push({ idx: i, tier: 2 });
+      }
+    }
+
+    if (matchedIndices.length === 0) continue;
+
+    let nextBlockFirstOffset: number | null = null;
+    for (const { idx, tier } of matchedIndices) {
+      const start = entries[idx].recordStartOffset;
+      let end: number;
+      if (idx + 1 < entries.length) {
+        end = entries[idx + 1].recordStartOffset;
+      } else if (blockIdx + 1 < meta.keyBlocks.length) {
+        if (nextBlockFirstOffset === null) {
+          const nextEntries = await readKeyBlockEntries(blob, meta, blockIdx + 1);
+          nextBlockFirstOffset =
+            nextEntries.length > 0
+              ? nextEntries[0].recordStartOffset
+              : meta.totalRecordDecompressedSize;
+        }
+        end = nextBlockFirstOffset;
+      } else {
+        end = meta.totalRecordDecompressedSize;
+      }
+      const ref: KeyRangeRef = { key: entries[idx].key, start, end };
+      if (tier === 0) exactMatches.push(ref);
+      else if (tier === 1) trimmedMatches.push(ref);
+      else normMatches.push(ref);
+    }
+  }
+
+  if (exactMatches.length > 0) return exactMatches;
+  if (trimmedMatches.length > 0) return trimmedMatches;
+  return normMatches;
 }
 
 async function readKeyBlockEntries(
@@ -924,34 +1217,40 @@ async function lookupExactWord(
   word: string,
   visited = new Set<string>()
 ): Promise<{ matchedHeadword: string; htmlDefinitions: string[] } | null> {
-  const visitKey = word.toLowerCase();
+  const visitKey = normalizeFallbackKey(word);
   if (visited.has(visitKey) || visited.size >= 4) return null;
   visited.add(visitKey);
 
+  const useCodePointOrder = meta.encoding === 'utf-8';
   const candidateBlocks = selectCandidateKeyBlockIndices(
     meta.keyBlocks,
     word,
     meta.isStripKey,
-    meta.isCaseSensitive
+    meta.isCaseSensitive,
+    useCodePointOrder
   );
 
-  const matchedRanges: Array<{ key: string; start: number; end: number }> = [];
+  const matchedRanges: KeyRangeRef[] = [];
   const lowerTarget = word.toLowerCase();
   const strippedTarget = stripKeyForSort(word);
 
   for (const blockIdx of candidateBlocks) {
     const entries = await readKeyBlockEntries(blob, meta, blockIdx);
     const exactIndices: number[] = [];
+    const trimmedExactIndices: number[] = [];
     const ciIndices: number[] = [];
     const strippedIndices: number[] = [];
 
     for (let i = 0; i < entries.length; i++) {
       const k = entries[i].key;
+      const trimmedK = k.trim();
       if (k === word) {
         exactIndices.push(i);
-      } else if (k.toLowerCase() === lowerTarget) {
+      } else if (trimmedK === word) {
+        trimmedExactIndices.push(i);
+      } else if (trimmedK.toLowerCase() === lowerTarget) {
         ciIndices.push(i);
-      } else if (meta.isStripKey && strippedTarget && stripKeyForSort(k) === strippedTarget) {
+      } else if (meta.isStripKey && strippedTarget && stripKeyForSort(trimmedK) === strippedTarget) {
         strippedIndices.push(i);
       }
     }
@@ -959,9 +1258,11 @@ async function lookupExactWord(
     const chosen =
       exactIndices.length > 0
         ? exactIndices
-        : ciIndices.length > 0
-          ? ciIndices
-          : strippedIndices;
+        : trimmedExactIndices.length > 0
+          ? trimmedExactIndices
+          : ciIndices.length > 0
+            ? ciIndices
+            : strippedIndices;
 
     if (chosen.length === 0) continue;
 
@@ -986,7 +1287,44 @@ async function lookupExactWord(
       matchedRanges.push({ key: entries[idx].key, start, end });
     }
 
-    if (exactIndices.length > 0) break;
+    // Only stop early if all exact matches are strictly before the end of this block
+    if (
+      exactIndices.length > 0 &&
+      exactIndices[exactIndices.length - 1] < entries.length - 1
+    ) {
+      break;
+    }
+  }
+
+  // Fallback for Chinese/GBK/Big5/Pinyin/non-Unicode-sorted .mdx dictionaries (and non-BMP chars)
+  // where binary search in Unicode order cannot locate the headword's key block.
+  if (matchedRanges.length === 0 && candidateBlocks.length < meta.keyBlocks.length) {
+    const hasNonBmp = word.length > Array.from(word).length;
+    const needsFallback =
+      meta.encoding === 'gb18030' ||
+      meta.encoding === 'big5' ||
+      hasNonBmp ||
+      !hasMonotonicUnicodeOrder(meta);
+
+    if (needsFallback) {
+      if (meta.numEntries <= MAX_FALLBACK_INDEX_ENTRIES) {
+        const index = await getOrBuildFallbackKeyIndex(blob, meta);
+        const bucket = index.get(visitKey);
+        if (bucket && bucket.length > 0) {
+          const exact = bucket.filter((r) => r.key === word);
+          const trimmed = exact.length > 0 ? exact : bucket.filter((r) => r.key.trim() === word);
+          matchedRanges.push(...(trimmed.length > 0 ? trimmed : bucket));
+        }
+      } else {
+        const scanned = await scanRemainingKeyBlocksForWord(
+          blob,
+          meta,
+          word,
+          new Set(candidateBlocks)
+        );
+        matchedRanges.push(...scanned);
+      }
+    }
   }
 
   if (matchedRanges.length === 0) return null;
@@ -1023,7 +1361,7 @@ export async function lookupInMdictBlob(
   meta: MdictDictionaryRecord,
   rawQuery: string
 ): Promise<MdictLookupResult | null> {
-  const candidates = buildEnglishLookupCandidates(rawQuery);
+  const candidates = buildLookupCandidates(rawQuery);
   for (const candidate of candidates) {
     const res = await lookupExactWord(blob, meta, candidate);
     if (res) {
