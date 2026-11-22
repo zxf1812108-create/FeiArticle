@@ -50,6 +50,8 @@
     max-width: 100%;
     overflow-x: hidden;
     overscroll-behavior-x: none;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
     font-family: var(--font-sans);
     background-color: var(--fei-bg);
     color: var(--fei-text-primary);

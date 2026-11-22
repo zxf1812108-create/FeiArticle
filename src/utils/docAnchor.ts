@@ -37,14 +37,27 @@ export function buildNormalizedTextMap(
       }
       if (i >= len) break;
 
-      const lineEndIdx = raw.indexOf('\n', i);
+      const nextLf = raw.indexOf('\n', i);
+      const nextCr = raw.indexOf('\r', i);
+      const lineEndIdx =
+        nextLf === -1
+          ? nextCr
+          : nextCr === -1
+            ? nextLf
+            : Math.min(nextLf, nextCr);
       const lineEnd = lineEndIdx === -1 ? len : lineEndIdx;
-      const lineSlice = raw.slice(i, lineEnd).replace(/\r$/, '');
+      const lineSlice = raw.slice(i, lineEnd);
+      const nextLineStart =
+        lineEndIdx === -1
+          ? len
+          : raw[lineEndIdx] === '\r' && lineEndIdx + 1 < len && raw[lineEndIdx + 1] === '\n'
+            ? lineEndIdx + 2
+            : lineEndIdx + 1;
 
       // Skip fenced code delimiters (```lang / ```)
       if (/^```/.test(lineSlice)) {
         inCodeFence = !inCodeFence;
-        i = lineEndIdx === -1 ? len : lineEndIdx + 1;
+        i = nextLineStart;
         atLineStart = true;
         continue;
       }
@@ -52,14 +65,14 @@ export function buildNormalizedTextMap(
       if (!inCodeFence) {
         // Skip horizontal rule / Setext underline lines (---, ***, ___, ===)
         if (/^(?:---+|\*\*\*+|___+|===+)\s*$/.test(lineSlice)) {
-          i = lineEndIdx === -1 ? len : lineEndIdx + 1;
+          i = nextLineStart;
           atLineStart = true;
           continue;
         }
 
         // Skip Markdown table delimiter rows (| --- | :---: |)
         if (lineSlice.includes('|') && /^\|?[\s:|-]+\|?$/.test(lineSlice) && lineSlice.includes('-')) {
-          i = lineEndIdx === -1 ? len : lineEndIdx + 1;
+          i = nextLineStart;
           atLineStart = true;
           continue;
         }
@@ -76,7 +89,10 @@ export function buildNormalizedTextMap(
     }
 
     const ch = raw[i];
-    if (ch === '\n') {
+    if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && i + 1 < len && raw[i + 1] === '\n') {
+        i++;
+      }
       atLineStart = true;
       i++;
       continue;
@@ -89,7 +105,7 @@ export function buildNormalizedTextMap(
       continue;
     }
 
-    if (stripMarkdown && !inCodeFence && (ch === '`' || ch === '*' || ch === '_' || ch === '~' || ch === '|')) {
+    if (stripMarkdown && (ch === '`' || ch === '*' || ch === '_' || ch === '~' || ch === '|')) {
       i++;
       continue;
     }
@@ -190,10 +206,11 @@ export function collectNormalizedDomMap(rootEl: HTMLElement): DomNormalizedMap {
     const val = textNode.nodeValue || '';
     for (let i = 0; i < val.length; i++) {
       const ch = val[i];
-      if (!isIgnorableWs(ch)) {
-        chars.push(ch.toLowerCase());
-        points.push({ node: textNode, offset: i });
+      if (isIgnorableWs(ch) || ch === '`' || ch === '*' || ch === '_' || ch === '~' || ch === '|') {
+        continue;
       }
+      chars.push(ch.toLowerCase());
+      points.push({ node: textNode, offset: i });
     }
     current = walker.nextNode();
   }

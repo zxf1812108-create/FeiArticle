@@ -207,14 +207,23 @@ function splitLinesWithOffsets(content: string): RawLineSpan[] {
   let lineStart = 0;
 
   for (let i = 0; i < len; i++) {
-    if (content[i] === '\n') {
-      const hasCr = i > lineStart && content[i - 1] === '\r';
-      const lineEnd = hasCr ? i - 1 : i;
+    const ch = content[i];
+    if (ch === '\n') {
       spans.push({
-        text: content.slice(lineStart, lineEnd),
+        text: content.slice(lineStart, i),
         startOffset: lineStart,
-        endOffset: lineEnd,
+        endOffset: i,
       });
+      lineStart = i + 1;
+    } else if (ch === '\r') {
+      spans.push({
+        text: content.slice(lineStart, i),
+        startOffset: lineStart,
+        endOffset: i,
+      });
+      if (i + 1 < len && content[i + 1] === '\n') {
+        i++;
+      }
       lineStart = i + 1;
     }
   }

@@ -179,9 +179,12 @@ function mapTextareaOffsetToRaw(raw: string, taOffset: number): number {
   return raw.length;
 }
 
+const DOC_LINE_HEIGHT = '1.62';
+const EDIT_TOP_PADDING_PX = 4;
+
 /**
  * Create a temporary off-screen <div> mirror with the exact sub-pixel content width,
- * font, line-height, and wrapping rules of the zero-padding, zero-scrollbar <textarea>.
+ * font, unitless line-height, and wrapping rules of the zero-padding, zero-scrollbar <textarea>.
  */
 function createEditMirror(textarea: HTMLTextAreaElement): {
   mirror: HTMLDivElement;
@@ -212,7 +215,9 @@ function createEditMirror(textarea: HTMLTextAreaElement): {
   mirror.style.fontKerning = style.fontKerning;
   mirror.style.fontFeatureSettings = style.fontFeatureSettings;
   mirror.style.textRendering = style.textRendering;
-  mirror.style.lineHeight = style.lineHeight;
+  // Use the exact unitless line-height (never computedStyle.lineHeight px string, which rounds
+  // Chromium LayoutUnits by +1/64px per line and causes multi-line drift on long documents).
+  mirror.style.lineHeight = DOC_LINE_HEIGHT;
   mirror.style.letterSpacing = style.letterSpacing;
   mirror.style.wordSpacing = style.wordSpacing;
   mirror.style.whiteSpace = 'pre-wrap';
@@ -222,6 +227,8 @@ function createEditMirror(textarea: HTMLTextAreaElement): {
   mirror.style.textIndent = style.textIndent;
   mirror.style.textTransform = style.textTransform;
   mirror.style.direction = style.direction;
+  mirror.style.setProperty('-webkit-text-size-adjust', '100%');
+  mirror.style.setProperty('text-size-adjust', '100%');
   document.body.appendChild(mirror);
 
   const sampleNode = document.createTextNode('测A');
@@ -288,7 +295,7 @@ function createTextareaProbe(textarea: HTMLTextAreaElement): {
   probe.style.fontKerning = style.fontKerning;
   probe.style.fontFeatureSettings = style.fontFeatureSettings;
   probe.style.textRendering = style.textRendering;
-  probe.style.lineHeight = style.lineHeight;
+  probe.style.lineHeight = DOC_LINE_HEIGHT;
   probe.style.letterSpacing = style.letterSpacing;
   probe.style.wordSpacing = style.wordSpacing;
   probe.style.whiteSpace = style.whiteSpace;
@@ -298,6 +305,8 @@ function createTextareaProbe(textarea: HTMLTextAreaElement): {
   probe.style.textIndent = style.textIndent;
   probe.style.textTransform = style.textTransform;
   probe.style.direction = style.direction;
+  probe.style.setProperty('-webkit-text-size-adjust', '100%');
+  probe.style.setProperty('text-size-adjust', '100%');
   document.body.appendChild(probe);
 
   probe.value = '测A';
@@ -435,6 +444,27 @@ function findCharOffsetAtYInProbe(
   }
 }
 
+function getSafeCharSpan(text: string, idx: number): [number, number] | null {
+  if (idx < 0 || idx >= text.length) return null;
+  let start = idx;
+  const code = text.charCodeAt(start);
+  if (code >= 0xdc00 && code <= 0xdfff && start > 0) {
+    const prev = text.charCodeAt(start - 1);
+    if (prev >= 0xd800 && prev <= 0xdbff) {
+      start -= 1;
+    }
+  }
+  let end = start + 1;
+  const startCode = text.charCodeAt(start);
+  if (startCode >= 0xd800 && startCode <= 0xdbff && end < text.length) {
+    const next = text.charCodeAt(end);
+    if (next >= 0xdc00 && next <= 0xdfff) {
+      end += 1;
+    }
+  }
+  return [start, end];
+}
+
 /**
  * Measure the exact CSS line-box top Y (relative to the top of <textarea>) for `rawCharIndex`.
  * Uses an unbroken single-TextNode mirror verified against the textarea's live content height,
@@ -468,15 +498,22 @@ function measureCharOffsetY(
     ) {
       diverged = true;
     } else {
+      const heightScale =
+        taTrueContentHeight > 0 &&
+        mirrorRect.height > 0 &&
+        Math.abs(mirrorRect.height - taTrueContentHeight) > 2
+          ? taTrueContentHeight / mirrorRect.height
+          : 1;
       const range = document.createRange();
       const measureIndex = (idx: number): number | null => {
-        if (idx < 0 || idx >= text.length) return null;
-        range.setStart(textNode, idx);
-        range.setEnd(textNode, idx + 1);
+        const span = getSafeCharSpan(text, idx);
+        if (!span) return null;
+        range.setStart(textNode, span[0]);
+        range.setEnd(textNode, span[1]);
         const rects = range.getClientRects();
         const r = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
         if (!r || r.height <= 0) return null;
-        return Math.max(0, r.top - mirrorRect.top - halfLeading);
+        return Math.max(0, (r.top - mirrorRect.top - halfLeading) * heightScale);
       };
 
       // Case 1: Normal character (not a newline)
@@ -500,7 +537,7 @@ function measureCharOffsetY(
       mirror.appendChild(document.createTextNode(`${text.slice(offset)}\u200b`));
       const freshMirrorRect = mirror.getBoundingClientRect();
       const markerRect = marker.getBoundingClientRect();
-      return Math.max(0, markerRect.top - freshMirrorRect.top - halfLeading);
+      return Math.max(0, (markerRect.top - freshMirrorRect.top - halfLeading) * heightScale);
     }
   } finally {
     document.body.removeChild(mirror);
@@ -542,13 +579,22 @@ function findCharOffsetAtY(
     ) {
       diverged = true;
     } else {
-      const minVisibleTop = Math.max(0, targetScrollTop - singleLineHeight * 0.35);
+      const heightScale =
+        taTrueContentHeight > 0 &&
+        mirrorRect.height > 0 &&
+        Math.abs(mirrorRect.height - taTrueContentHeight) > 2
+          ? taTrueContentHeight / mirrorRect.height
+          : 1;
+      const unscaledTarget = targetScrollTop / heightScale;
+      const minVisibleTop = Math.max(0, unscaledTarget - singleLineHeight * 0.35);
       const range = document.createRange();
 
       const getCharLineTop = (idx: number): number | null => {
         if (idx < 0 || idx >= text.length || text[idx] === '\n') return null;
-        range.setStart(textNode, idx);
-        range.setEnd(textNode, idx + 1);
+        const span = getSafeCharSpan(text, idx);
+        if (!span) return null;
+        range.setStart(textNode, span[0]);
+        range.setEnd(textNode, span[1]);
         const rects = range.getClientRects();
         const r = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
         if (!r || r.height <= 0) return null;
@@ -678,6 +724,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const pendingTypographyAnchorRef = useRef<PendingTypographyAnchor | null>(null);
     const typographyLockUntilRef = useRef(0);
     const lastProgrammaticScrollAtRef = useRef(0);
+    const lastProgrammaticScrollTopRef = useRef(0);
     const restoredDocIdRef = useRef<string | null>(null);
     const hadSelectionOnDownRef = useRef(false);
     const lastPointerDownAtRef = useRef(0);
@@ -888,7 +935,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         const scroller = editScrollRef.current;
         const ta = textareaRef.current;
         if (!scroller || !ta || scroller.scrollTop <= 10) return 0;
-        return findCharOffsetAtY(ta, raw, scroller.scrollTop, taContentHeightRef.current);
+        return findCharOffsetAtY(
+          ta,
+          raw,
+          Math.max(0, scroller.scrollTop - EDIT_TOP_PADDING_PX),
+          taContentHeightRef.current
+        );
       }
 
       const el = scrollRef.current;
@@ -902,15 +954,25 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const lines = collectVisualLines(el, articleEl);
       const effectiveViewTop = el.scrollTop + topClipPxRef.current;
-      const firstIdx = lines.findIndex((line) => {
+      let targetIdx = lines.findIndex((line) => {
         if (!line.text.trim()) return false;
         const lineHeight = Math.max(12, line.bottom - line.top);
         const minKeep = Math.min(10, Math.max(4, lineHeight * 0.45));
         return line.bottom > effectiveViewTop + minKeep;
       });
-      if (firstIdx === -1) return 0;
+      if (targetIdx === -1) {
+        // Scrolled near or past the very last line (into the bottom pagination spacer):
+        // anchor to the last non-empty visual line instead of jumping back to offset 0.
+        for (let idx = lines.length - 1; idx >= 0; idx--) {
+          if (lines[idx].text.trim()) {
+            targetIdx = idx;
+            break;
+          }
+        }
+        if (targetIdx === -1) return raw.length;
+      }
 
-      const firstLine = lines[firstIdx];
+      const firstLine = lines[targetIdx];
       const exactText =
         extractExactVisualLineText(el, articleEl, firstLine.top, firstLine.bottom) ||
         firstLine.text;
@@ -1094,6 +1156,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       lastProgrammaticScrollAtRef.current = performance.now();
       el.scrollTop = targetTop;
+      lastProgrammaticScrollTopRef.current = el.scrollTop;
       updateEdgeClips();
       return el.scrollTop;
     };
@@ -1142,6 +1205,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }
       lastProgrammaticScrollAtRef.current = performance.now();
       scroller.scrollTop = targetTop;
+      lastProgrammaticScrollTopRef.current = scroller.scrollTop;
       return scroller.scrollTop;
     };
 
@@ -1699,11 +1763,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (!isEditing) {
         scheduleEdgeClipUpdate();
       }
-      if (
-        performance.now() - lastProgrammaticScrollAtRef.current < 140 ||
-        (pendingTypographyAnchorRef.current && Date.now() <= typographyLockUntilRef.current)
-      ) {
+      const isRecentProgrammatic = performance.now() - lastProgrammaticScrollAtRef.current < 140;
+      if (isRecentProgrammatic) {
         return;
+      }
+      if (pendingTypographyAnchorRef.current) {
+        if (Math.abs(el.scrollTop - lastProgrammaticScrollTopRef.current) > 8) {
+          clearTypographyLock();
+        } else if (Date.now() <= typographyLockUntilRef.current) {
+          return;
+        }
       }
       if (debounceScrollRef.current) window.clearTimeout(debounceScrollRef.current);
       debounceScrollRef.current = window.setTimeout(() => {
@@ -2286,7 +2355,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                   ref={textareaRef}
                   rows={1}
                   value={content}
+                  onPointerDown={clearTypographyLock}
                   onFocus={(e) => {
+                    clearTypographyLock();
                     const currentH = window.visualViewport?.height ?? window.innerHeight;
                     if (baselineViewportHeightRef.current - currentH >= 100) {
                       wasKeyboardOpenRef.current = true;
@@ -2342,8 +2413,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                   style={{
                     fontSize: `${fontSize}px`,
                     fontFamily: docFontFamily || 'var(--font-doc-body)',
+                    lineHeight: DOC_LINE_HEIGHT,
                   }}
-                  className="block w-full min-h-[calc(100vh-140px)] overflow-hidden bg-transparent font-doc-body leading-[1.62] text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none p-0 m-0 border-0"
+                  className="block w-full min-h-[calc(100vh-140px)] overflow-hidden bg-transparent font-doc-body text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] break-words outline-none resize-none p-0 m-0 border-0"
                 />
               </div>
             </div>
@@ -2397,8 +2469,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                       style={{
                         fontSize: `${fontSize}px`,
                         fontFamily: docFontFamily || 'var(--font-doc-body)',
+                        lineHeight: DOC_LINE_HEIGHT,
                       }}
-                      className="leading-[1.62] text-[var(--fei-text-primary)] break-words"
+                      className="text-[var(--fei-text-primary)] break-words"
                     >
                       {blocks.length === 0 ? (
                         <p className="text-[var(--fei-text-muted)]">
