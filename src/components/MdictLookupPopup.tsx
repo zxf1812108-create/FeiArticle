@@ -542,6 +542,27 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       scheduleEdgeClipUpdate();
     }, [queryWord, result, scheduleEdgeClipUpdate]);
 
+    // Immediately clear the document's text selection once the lookup popup opens
+    useEffect(() => {
+      const clearDocSelection = () => {
+        try {
+          const sel = window.getSelection();
+          if (sel && (!sel.isCollapsed || sel.rangeCount > 0)) {
+            sel.removeAllRanges();
+          }
+        } catch {
+          // ignore
+        }
+      };
+      clearDocSelection();
+      const rafId = window.requestAnimationFrame(clearDocSelection);
+      const t1 = window.setTimeout(clearDocSelection, 60);
+      return () => {
+        window.cancelAnimationFrame(rafId);
+        window.clearTimeout(t1);
+      };
+    }, [queryWord]);
+
     useLayoutEffect(() => {
       updatePopupEdgeClips();
     }, [isExpanded, popupFontSize, loading, error, updatePopupEdgeClips]);
@@ -684,9 +705,9 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       }
 
       const rect = scrollEl.getBoundingClientRect();
-      if (rect.height <= 0) return;
-      const yRatio = (e.clientY - rect.top) / rect.height;
-      if (yRatio < 0.5) {
+      if (rect.width <= 0) return;
+      const xRatio = (e.clientX - rect.left) / rect.width;
+      if (xRatio < 0.5) {
         performPopupPageUp();
       } else {
         performPopupPageDown();
@@ -806,7 +827,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
             </div>
           </div>
 
-          {/* Scrollable Definition Body (Top half click => Page Up, Bottom half click => Page Down; partial lines masked) */}
+          {/* Scrollable Definition Body (Left half click => Page Up, Right half click => Page Down; partial lines masked) */}
           <div className="relative flex-1 min-h-0 flex flex-col">
             <div
               ref={bodyScrollRef}

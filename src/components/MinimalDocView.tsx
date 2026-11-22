@@ -539,7 +539,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const lastPointerDownAtRef = useRef(0);
     const lastTouchStartAtRef = useRef(0);
     const isPointerActiveRef = useRef(false);
-    const lastPopupInteractionAtRef = useRef(0);
+    const lastPopupOpenedAtRef = useRef(0);
     const selectionCheckTimerRef = useRef<number | null>(null);
     const lastReportedProgressRef = useRef<number>(-1);
 
@@ -1227,17 +1227,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       scheduleEmitViewState(260);
     };
 
-    const isRecentPopupInteraction = () =>
-      performance.now() - lastPopupInteractionAtRef.current < 900;
-
     const evaluateSelectionForMdict = () => {
       if (!hasActiveMdictRef.current) return;
       const articleEl = articleRef.current;
       const sel = window.getSelection();
       if (!articleEl || !sel || sel.isCollapsed || sel.rangeCount === 0) {
-        if (isMdictPopupOpenRef.current && !isRecentPopupInteraction()) {
-          onClearMdictLookupRef.current?.();
-        }
         return;
       }
 
@@ -1247,9 +1241,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const word = extractEnglishLookupWord(sel.toString());
       if (!word) {
-        if (isMdictPopupOpenRef.current && !isRecentPopupInteraction()) {
-          onClearMdictLookupRef.current?.();
-        }
         return;
       }
 
@@ -1257,7 +1248,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const vh = window.innerHeight || 800;
       const wordMidY = rect.height > 0 ? (rect.top + rect.bottom) / 2 : vh * 0.25;
       const placement: 'top' | 'bottom' = wordMidY >= vh * 0.5 ? 'top' : 'bottom';
+      lastPopupOpenedAtRef.current = performance.now();
       onEnglishWordSelectedRef.current?.({ word, placement });
+      try {
+        sel.removeAllRanges();
+      } catch {
+        // ignore
+      }
     };
 
     const scheduleMdictSelectionCheck = (delayMs: number) => {
@@ -1271,37 +1268,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     useEffect(() => {
-      const isEventInsideMdictPopup = (evt: Event): boolean => {
-        if (typeof evt.composedPath === 'function') {
-          for (const node of evt.composedPath()) {
-            if (node instanceof Element && node.getAttribute('data-mdict-popup') === 'true') {
-              return true;
-            }
-          }
-        }
-        const t = evt.target;
-        return t instanceof Element && Boolean(t.closest('[data-mdict-popup="true"]'));
-      };
-
-      const markPopupStart = (evt: Event) => {
-        if (isEventInsideMdictPopup(evt)) {
-          lastPopupInteractionAtRef.current = performance.now();
-        } else {
-          lastPopupInteractionAtRef.current = 0;
-        }
-      };
-
-      const markPopupEnd = (evt: Event) => {
-        if (isEventInsideMdictPopup(evt)) {
-          lastPopupInteractionAtRef.current = performance.now();
-        }
-      };
-
       const handleSelectionChange = () => {
         if (!hasActiveMdictRef.current) return;
 
         const activeEl = document.activeElement as HTMLElement | null;
-        if (activeEl?.closest('[data-mdict-popup="true"]') || isRecentPopupInteraction()) return;
+        if (activeEl?.closest('[data-mdict-popup="true"]')) return;
 
         const sel = window.getSelection();
         if (!sel || sel.isCollapsed || !sel.toString().trim()) {
@@ -1309,29 +1280,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             window.clearTimeout(selectionCheckTimerRef.current);
             selectionCheckTimerRef.current = null;
           }
-          if (isMdictPopupOpenRef.current) {
-            onClearMdictLookupRef.current?.();
-          }
           return;
         }
 
         scheduleMdictSelectionCheck(isPointerActiveRef.current ? 140 : 90);
       };
 
-      window.addEventListener('pointerdown', markPopupStart, true);
-      window.addEventListener('mousedown', markPopupStart, true);
-      window.addEventListener('touchstart', markPopupStart, true);
-      window.addEventListener('pointerup', markPopupEnd, true);
-      window.addEventListener('touchend', markPopupEnd, true);
-      window.addEventListener('click', markPopupEnd, true);
       document.addEventListener('selectionchange', handleSelectionChange);
       return () => {
-        window.removeEventListener('pointerdown', markPopupStart, true);
-        window.removeEventListener('mousedown', markPopupStart, true);
-        window.removeEventListener('touchstart', markPopupStart, true);
-        window.removeEventListener('pointerup', markPopupEnd, true);
-        window.removeEventListener('touchend', markPopupEnd, true);
-        window.removeEventListener('click', markPopupEnd, true);
         document.removeEventListener('selectionchange', handleSelectionChange);
         if (selectionCheckTimerRef.current) {
           window.clearTimeout(selectionCheckTimerRef.current);
@@ -1541,13 +1497,17 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     // 5-zone tap interaction in Read mode:
     // Top half: Left 1/3 => Page Up, Middle 1/3 => Outline TOC, Right 1/3 => Page Down
-    // Bottom half: Left 1/3 => Page Up, Right 2/3 => Page Down
+    // Bottom half: Left 1/2 => Page Up, Right 1/2 => Page Down
     const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
       const hadSelectionOnDown = hadSelectionOnDownRef.current;
       hadSelectionOnDownRef.current = false;
 
       const target = e.target as HTMLElement | null;
       if (target?.closest('button, a, input, textarea, select, [data-outline-modal="true"]')) return;
+
+      if (performance.now() - lastPopupOpenedAtRef.current < 350) {
+        return;
+      }
 
       if (hadSelectionOnDown || hasActiveSelection() || isMdictPopupOpenRef.current) {
         if (isMdictPopupOpenRef.current) {
@@ -1579,7 +1539,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         return;
       }
 
-      if (xRatio < 1 / 3) {
+      if (xRatio < 0.5) {
         performPageUp();
       } else {
         performPageDown();
