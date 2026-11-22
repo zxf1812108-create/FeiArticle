@@ -289,8 +289,47 @@ function getCharVerticalCenter(range: Range, node: Text, index: number): number 
 }
 
 /**
+ * Binary-search sorted block elements ([data-start-offset][data-end-offset]) to find
+ * only the blocks overlapping the vertical client-Y band [minClientY, maxClientY].
+ */
+export function findBlocksInClientYRange(
+  articleEl: HTMLElement,
+  minClientY: number,
+  maxClientY: number
+): HTMLElement[] {
+  const blockEls = articleEl.querySelectorAll<HTMLElement>('[data-start-offset][data-end-offset]');
+  const len = blockEls.length;
+  if (len === 0) return [];
+
+  let lo = 0;
+  let hi = len - 1;
+  let firstIdx = len;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const rect = blockEls[mid].getBoundingClientRect();
+    if (rect.bottom >= minClientY) {
+      firstIdx = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+
+  const matched: HTMLElement[] = [];
+  for (let i = Math.max(0, firstIdx - 1); i < len; i++) {
+    const el = blockEls[i];
+    const rect = el.getBoundingClientRect();
+    if (rect.top > maxClientY) break;
+    if (rect.bottom >= minClientY) {
+      matched.push(el);
+    }
+  }
+  return matched;
+}
+
+/**
  * Extract the exact characters rendered inside a specific visual line vertical band
- * [bandTopScrollY, bandBottomScrollY] in scroll-content coordinates.
+ * [bandTopScrollY, bandBottomScrollY] in scroll-content coordinates, walking only intersecting blocks.
  */
 export function extractExactVisualLineText(
   scrollEl: HTMLElement,
@@ -303,103 +342,107 @@ export function extractExactVisualLineText(
   const bandTopClient = bandTopScrollY - baseOffset;
   const bandBottomClient = bandBottomScrollY - baseOffset;
 
-  const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
+  const candidateBlocks = findBlocksInClientYRange(rootEl, bandTopClient - 4, bandBottomClient + 4);
+  const roots: HTMLElement[] = candidateBlocks.length > 0 ? candidateBlocks : [rootEl];
   const range = document.createRange();
   const parts: string[] = [];
 
-  let current = walker.nextNode();
-  while (current) {
-    const textNode = current as Text;
-    const val = textNode.nodeValue || '';
-    if (val.trim().length > 0) {
-      range.selectNodeContents(textNode);
-      const nodeBox = range.getBoundingClientRect();
-      if (
-        nodeBox.height > 0 &&
-        nodeBox.bottom >= bandTopClient - 2 &&
-        nodeBox.top <= bandBottomClient + 2
-      ) {
-        const rects = range.getClientRects();
-        if (rects.length <= 1) {
-          const r = rects[0] || nodeBox;
-          const mid = (r.top + r.bottom) / 2;
-          if (mid >= bandTopClient - 2 && mid <= bandBottomClient + 2) {
-            parts.push(val);
-          }
-        } else {
-          const len = val.length;
-          let lo = 0;
-          let hi = len - 1;
-          let startIdx = len;
-
-          while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            let y = getCharVerticalCenter(range, textNode, mid);
-            if (y === null) {
-              let probe = mid + 1;
-              while (probe < len && y === null) {
-                y = getCharVerticalCenter(range, textNode, probe++);
-              }
-              if (y === null) {
-                probe = mid - 1;
-                while (probe >= 0 && y === null) {
-                  y = getCharVerticalCenter(range, textNode, probe--);
-                }
-              }
+  for (const blockRoot of roots) {
+    const walker = document.createTreeWalker(blockRoot, NodeFilter.SHOW_TEXT);
+    let current = walker.nextNode();
+    while (current) {
+      const textNode = current as Text;
+      const val = textNode.nodeValue || '';
+      if (val.trim().length > 0) {
+        range.selectNodeContents(textNode);
+        const nodeBox = range.getBoundingClientRect();
+        if (
+          nodeBox.height > 0 &&
+          nodeBox.bottom >= bandTopClient - 2 &&
+          nodeBox.top <= bandBottomClient + 2
+        ) {
+          const rects = range.getClientRects();
+          if (rects.length <= 1) {
+            const r = rects[0] || nodeBox;
+            const mid = (r.top + r.bottom) / 2;
+            if (mid >= bandTopClient - 2 && mid <= bandBottomClient + 2) {
+              parts.push(val);
             }
-            if (y === null) break;
-            if (y >= bandTopClient - 2) {
-              startIdx = mid;
-              hi = mid - 1;
-            } else {
-              lo = mid + 1;
-            }
-          }
-
-          if (startIdx < len) {
-            lo = startIdx;
-            hi = len - 1;
-            let endIdx = startIdx;
+          } else {
+            const len = val.length;
+            let lo = 0;
+            let hi = len - 1;
+            let startIdx = len;
 
             while (lo <= hi) {
               const mid = (lo + hi) >> 1;
               let y = getCharVerticalCenter(range, textNode, mid);
               if (y === null) {
-                let probe = mid - 1;
-                while (probe >= startIdx && y === null) {
-                  y = getCharVerticalCenter(range, textNode, probe--);
+                let probe = mid + 1;
+                while (probe < len && y === null) {
+                  y = getCharVerticalCenter(range, textNode, probe++);
                 }
                 if (y === null) {
-                  probe = mid + 1;
-                  while (probe < len && y === null) {
-                    y = getCharVerticalCenter(range, textNode, probe++);
+                  probe = mid - 1;
+                  while (probe >= 0 && y === null) {
+                    y = getCharVerticalCenter(range, textNode, probe--);
                   }
                 }
               }
               if (y === null) break;
-              if (y <= bandBottomClient + 2) {
-                endIdx = mid + 1;
-                lo = mid + 1;
-              } else {
+              if (y >= bandTopClient - 2) {
+                startIdx = mid;
                 hi = mid - 1;
+              } else {
+                lo = mid + 1;
               }
             }
 
-            if (endIdx > startIdx) {
-              parts.push(val.slice(startIdx, endIdx));
+            if (startIdx < len) {
+              lo = startIdx;
+              hi = len - 1;
+              let endIdx = startIdx;
+
+              while (lo <= hi) {
+                const mid = (lo + hi) >> 1;
+                let y = getCharVerticalCenter(range, textNode, mid);
+                if (y === null) {
+                  let probe = mid - 1;
+                  while (probe >= startIdx && y === null) {
+                    y = getCharVerticalCenter(range, textNode, probe--);
+                  }
+                  if (y === null) {
+                    probe = mid + 1;
+                    while (probe < len && y === null) {
+                      y = getCharVerticalCenter(range, textNode, probe++);
+                    }
+                  }
+                }
+                if (y === null) break;
+                if (y <= bandBottomClient + 2) {
+                  endIdx = mid + 1;
+                  lo = mid + 1;
+                } else {
+                  hi = mid - 1;
+                }
+              }
+
+              if (endIdx > startIdx) {
+                parts.push(val.slice(startIdx, endIdx));
+              }
             }
           }
         }
       }
+      current = walker.nextNode();
     }
-    current = walker.nextNode();
   }
 
   return parts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
 /**
- * Deterministic Read -> Source mapping: locate the DOM block element at the top of the viewport
+ * Deterministic Read -> Source mapping: binary-search the DOM block element at the top of the viewport
  * via [data-start-offset]/[data-end-offset] and refine to the exact character offset inside that block.
  */
 export function resolveReadViewportCharOffset(
@@ -415,12 +458,14 @@ export function resolveReadViewportCharOffset(
   const containerRect = scrollEl.getBoundingClientRect();
   const baseOffset = scrollEl.scrollTop - containerRect.top;
   const bandMidY = (topBandY + bottomBandY) / 2;
+  const bandTopClient = topBandY - baseOffset;
+  const bandBottomClient = bottomBandY - baseOffset;
 
-  const blockEls = articleEl.querySelectorAll<HTMLElement>('[data-start-offset][data-end-offset]');
+  const nearBlocks = findBlocksInClientYRange(articleEl, bandTopClient - 8, bandBottomClient + 8);
   let targetBlock: { el: HTMLElement; start: number; end: number; top: number; bottom: number } | null = null;
 
-  for (let i = 0; i < blockEls.length; i++) {
-    const el = blockEls[i];
+  for (let i = 0; i < nearBlocks.length; i++) {
+    const el = nearBlocks[i];
     const rect = el.getBoundingClientRect();
     const top = rect.top + baseOffset;
     const bottom = rect.bottom + baseOffset;
@@ -437,7 +482,6 @@ export function resolveReadViewportCharOffset(
     }
   }
 
-  // Strip inline formatting symbols identically to localMap so literal _, ~, |, *, ` never block exact matching
   const targetNorm = normalizeTextForAnchor(lineExactText, false).replace(/[`*_~|]/g, '');
 
   if (targetBlock) {
@@ -446,8 +490,6 @@ export function resolveReadViewportCharOffset(
     const lineHeight = Math.max(12, bottomBandY - topBandY);
     const intraRatio = Math.min(1, Math.max(0, (topBandY - targetBlock.top) / blockHeight));
 
-    // When the first visible line is the very first visual line of this block (regardless of block line count),
-    // anchor cleanly to the exact start of the block in source text.
     if (topBandY - targetBlock.top <= Math.min(14, lineHeight * 0.55)) {
       return targetBlock.start;
     }
@@ -480,13 +522,12 @@ export function resolveReadViewportCharOffset(
   const articleTop = articleRect.top + baseOffset;
   const articleHeight = Math.max(1, articleEl.scrollHeight || articleRect.height);
   const docRatio = Math.min(1, Math.max(0, (topBandY - articleTop) / articleHeight));
-  return findCharIndexForNormalizedAnchor(rawContent, targetNorm, docRatio);
+  return Math.round(docRatio * rawContent.length);
 }
 
 /**
- * Deterministic Source -> Read mapping: given a canonical character offset in `rawContent`,
- * locate the owning [data-start-offset]/[data-end-offset] DOM block and return the exact
- * scroll-content top Y of the rendered character line inside that block.
+ * Deterministic Source -> Read mapping: binary-search the owning [data-start-offset]/[data-end-offset]
+ * DOM block and return the exact scroll-content top Y of the rendered character line inside that block.
  */
 export function findScrollTopForCharOffset(
   scrollEl: HTMLElement,
@@ -501,30 +542,45 @@ export function findScrollTopForCharOffset(
   const baseOffset = scrollEl.scrollTop - containerRect.top;
 
   const blockEls = articleEl.querySelectorAll<HTMLElement>('[data-start-offset][data-end-offset]');
+  const len = blockEls.length;
   let matchedBlock: { el: HTMLElement; start: number; end: number } | null = null;
 
-  for (let i = 0; i < blockEls.length; i++) {
-    const el = blockEls[i];
-    const start = Number(el.getAttribute('data-start-offset'));
-    const end = Number(el.getAttribute('data-end-offset'));
-    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
-
-    if (safeOffset >= start && safeOffset <= end) {
-      matchedBlock = { el, start, end };
-      break;
+  if (len > 0) {
+    let lo = 0;
+    let hi = len - 1;
+    let bestIdx = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const el = blockEls[mid];
+      const start = Number(el.getAttribute('data-start-offset'));
+      const end = Number(el.getAttribute('data-end-offset'));
+      if (!Number.isFinite(start) || !Number.isFinite(end)) break;
+      if (safeOffset >= start && safeOffset <= end) {
+        matchedBlock = { el, start, end };
+        break;
+      }
+      if (start > safeOffset) {
+        bestIdx = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
     }
-    if (start > safeOffset) {
-      matchedBlock = { el, start, end };
-      break;
+    if (!matchedBlock && bestIdx >= 0) {
+      const el = blockEls[bestIdx];
+      const start = Number(el.getAttribute('data-start-offset'));
+      const end = Number(el.getAttribute('data-end-offset'));
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        matchedBlock = { el, start, end };
+      }
     }
-  }
-
-  if (!matchedBlock && blockEls.length > 0) {
-    const last = blockEls[blockEls.length - 1];
-    const start = Number(last.getAttribute('data-start-offset'));
-    const end = Number(last.getAttribute('data-end-offset'));
-    if (Number.isFinite(start) && Number.isFinite(end)) {
-      matchedBlock = { el: last, start, end };
+    if (!matchedBlock) {
+      const last = blockEls[len - 1];
+      const start = Number(last.getAttribute('data-start-offset'));
+      const end = Number(last.getAttribute('data-end-offset'));
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        matchedBlock = { el: last, start, end };
+      }
     }
   }
 
@@ -532,7 +588,6 @@ export function findScrollTopForCharOffset(
     const blockRect = matchedBlock.el.getBoundingClientRect();
     const blockTop = blockRect.top + baseOffset;
 
-    // If charOffset is at or before the start of this block, align directly to its first visual line
     if (safeOffset <= matchedBlock.start + 1) {
       const firstTextTop = findFirstTextTopInElement(scrollEl, matchedBlock.el);
       return firstTextTop !== null ? firstTextTop : blockTop;
@@ -543,7 +598,6 @@ export function findScrollTopForCharOffset(
     const localMap = buildNormalizedTextMap(blockRaw, true, true);
 
     if (localMap.norm && localMap.rawIndices.length > 0) {
-      // Find the first normalized character at or after localOffset
       let normIdx = localMap.rawIndices.findIndex((rawIdx) => rawIdx >= localOffset);
       if (normIdx === -1) {
         normIdx = localMap.rawIndices.length - 1;
@@ -561,7 +615,6 @@ export function findScrollTopForCharOffset(
           )
         );
 
-        // Try exact substring match inside this single block first
         const targetSlice = localMap.norm.slice(normIdx, normIdx + 36);
         const intraRatio = localOffset / Math.max(1, blockRaw.length);
         const exactInBlock = targetSlice
@@ -571,7 +624,6 @@ export function findScrollTopForCharOffset(
           return exactInBlock;
         }
 
-        // Fall back to direct DOM character point measurement
         const pt = domMap.points[mappedDomIdx];
         if (pt && pt.node.nodeValue && pt.offset < pt.node.nodeValue.length) {
           const range = document.createRange();
@@ -590,14 +642,7 @@ export function findScrollTopForCharOffset(
     return blockTop + intraRatio * blockRect.height;
   }
 
-  // Fallback across whole article
-  const atLineStart = safeOffset === 0 || rawContent[safeOffset - 1] === '\n';
-  const targetNorm = buildNormalizedTextMap(rawContent.slice(safeOffset), true, atLineStart).norm.slice(
-    0,
-    48
-  );
-  const ratio = safeOffset / Math.max(1, rawContent.length);
-  return findScrollTopForNormalizedAnchor(scrollEl, articleEl, targetNorm, ratio);
+  return null;
 }
 
 function findFirstTextTopInElement(scrollEl: HTMLElement, el: HTMLElement): number | null {

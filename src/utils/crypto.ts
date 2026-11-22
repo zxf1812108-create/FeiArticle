@@ -82,7 +82,7 @@ export async function encryptText(plaintext: string, password: string): Promise<
 export async function decryptText(payload: string, password: string): Promise<string> {
   if (!isEncryptedPayload(payload)) return payload;
   if (!password) {
-    throw new Error('文档已加密，请长按同步图标填写加密密码');
+    throw new Error('文档已加密，请点击设置图标填写加密密码');
   }
 
   const parts = payload.slice(PAYLOAD_PREFIX.length).split(':');

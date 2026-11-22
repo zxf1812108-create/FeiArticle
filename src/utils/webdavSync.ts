@@ -681,7 +681,7 @@ export async function runIncrementalWebDavSync(
         let uploadBody = doc.content;
         if (doc.encrypted) {
           if (!effectiveEncPassword) {
-            throw new Error(`文档《${doc.title}》已启用加密，请长按同步图标设置加密密码`);
+            throw new Error(`文档《${doc.title}》已启用加密，请点击设置图标设置加密密码`);
           }
           uploadBody = await encryptText(doc.content, effectiveEncPassword);
         }

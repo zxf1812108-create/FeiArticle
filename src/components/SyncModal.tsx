@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Copy, Eye, EyeOff, Folder, X } from 'lucide-react';
 import { WebDavConfig } from '../types';
 import { DEFAULT_JIANGUOYUN_URL, normalizeWebDavBaseUrl } from '../utils/webdavSync';
@@ -40,6 +40,30 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Clear any residual long-press text selection when opening from the Sync toolbar button
+  useEffect(() => {
+    const clearSel = () => {
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        // ignore
+      }
+    };
+    clearSel();
+    const rafId = window.requestAnimationFrame(clearSel);
+    const t1 = window.setTimeout(clearSel, 120);
+    const t2 = window.setTimeout(clearSel, 260);
+    window.addEventListener('pointerup', clearSel, { once: true });
+    window.addEventListener('touchend', clearSel, { once: true });
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.removeEventListener('pointerup', clearSel);
+      window.removeEventListener('touchend', clearSel);
+    };
+  }, []);
+
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -72,13 +96,14 @@ export const SyncModal: React.FC<SyncModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent dark:bg-black/45 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-transparent dark:bg-black/45 p-4 select-none"
       onClick={onClose}
+      onContextMenu={(e) => e.preventDefault()}
     >
       <form
         onSubmit={handleSave}
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[360px] max-h-[88vh] overflow-y-auto bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-none dark:shadow-xl text-[var(--fei-text-primary)]"
+        className="w-full max-w-[360px] max-h-[88vh] overflow-y-auto bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] rounded-2xl shadow-none dark:shadow-xl text-[var(--fei-text-primary)] select-none"
       >
         <div className="p-4 sm:p-5 space-y-4">
           {/* 区域一：同步设置 */}
@@ -302,17 +327,17 @@ export const SyncModal: React.FC<SyncModalProps> = ({
           </section>
 
           {/* Compact Footer Actions */}
-          <div className="pt-1 flex items-center gap-2.5">
+          <div className="pt-1 flex items-center gap-2.5 select-none">
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 h-9 rounded-xl bg-[var(--fei-bg-subtle)] text-[13px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] transition-colors"
+              className="flex-1 h-9 rounded-xl bg-[var(--fei-bg-subtle)] text-[13px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] transition-colors select-none"
             >
               取消
             </button>
             <button
               type="submit"
-              className="flex-1 h-9 rounded-xl bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium hover:opacity-90 transition-opacity"
+              className="flex-1 h-9 rounded-xl bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] font-medium hover:opacity-90 transition-opacity select-none"
             >
               保存
             </button>

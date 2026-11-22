@@ -2,6 +2,8 @@ export interface TocItem {
   id: string;
   text: string;
   level: 1 | 2 | 3;
+  blockIndex?: number;
+  startOffset?: number;
 }
 
 export type TableAlignment = 'left' | 'center' | 'right';
@@ -93,7 +95,9 @@ export function estimateReadingMinutes(wordCount: number): number {
 }
 
 export function extractExcerpt(content: string, maxLen = 96): string {
-  const plain = content
+  // Slice prefix first so importing multi-megabyte files never runs regexes over the whole string
+  const sample = content.length > 2000 ? content.slice(0, 2000) : content;
+  const plain = sample
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/[*_`>~|]/g, ' ')
@@ -159,6 +163,9 @@ const EN_SECTION_RE =
 
 const DECIMAL_SECTION_RE = /^\d+(?:\.\d+)+\.?\s+\S.{1,48}$/;
 
+// Matches "1. 标题", "2.  标题", "3.标题", "1．标题" as level-3 headings (excludes decimals like 3.14)
+const NUM_DOT_HEADING_RE = /^\d+[.．](?:\s+\S|[^\d\s.．]).{0,48}$/;
+
 function isSentenceEnding(line: string): boolean {
   return /[。？！；，,.;?!]$/.test(line);
 }
@@ -190,6 +197,10 @@ function detectPlainTextHeadingLevel(trimmed: string): 1 | 2 | 3 | null {
   if (DECIMAL_SECTION_RE.test(trimmed) && !isSentenceEnding(trimmed)) {
     const dotCount = (trimmed.match(/^\d+(?:\.\d+)+/)?.[0].match(/\./g) || []).length;
     return dotCount >= 2 ? 3 : 2;
+  }
+
+  if (NUM_DOT_HEADING_RE.test(trimmed) && !isSentenceEnding(trimmed)) {
+    return 3;
   }
 
   return null;
@@ -290,6 +301,7 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
         headingCounter++;
         const level: 1 | 2 = underline.startsWith('=') ? 1 : 2;
         const id = `heading-${headingCounter}`;
+        const blockIndex = blocks.length;
         blocks.push({
           type: 'heading',
           level,
@@ -298,7 +310,7 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
           startOffset: blockStart,
           endOffset: spans[i + 1].endOffset,
         });
-        toc.push({ id, text: trimmed, level });
+        toc.push({ id, text: trimmed, level, blockIndex, startOffset: blockStart });
         i += 2;
         continue;
       }
@@ -361,6 +373,7 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
       const level = (rawLevel <= 1 ? 1 : rawLevel === 2 ? 2 : 3) as 1 | 2 | 3;
       const text = mdHeading[2].trim();
       const id = `heading-${headingCounter}`;
+      const blockIndex = blocks.length;
       blocks.push({
         type: 'heading',
         level,
@@ -369,7 +382,7 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
         startOffset: blockStart,
         endOffset: spans[i].endOffset,
       });
-      toc.push({ id, text, level });
+      toc.push({ id, text, level, blockIndex, startOffset: blockStart });
       i++;
       continue;
     }
@@ -379,6 +392,7 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
     if (txtHeadingLevel) {
       headingCounter++;
       const id = `heading-${headingCounter}`;
+      const blockIndex = blocks.length;
       blocks.push({
         type: 'heading',
         level: txtHeadingLevel,
@@ -387,7 +401,7 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
         startOffset: blockStart,
         endOffset: spans[i].endOffset,
       });
-      toc.push({ id, text: trimmed, level: txtHeadingLevel });
+      toc.push({ id, text: trimmed, level: txtHeadingLevel, blockIndex, startOffset: blockStart });
       i++;
       continue;
     }

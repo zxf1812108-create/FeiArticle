@@ -43,6 +43,18 @@
     --fei-btn-primary-text: #1A1A1A;
   }
 
+  *,
+  *::before,
+  *::after {
+    -webkit-touch-callout: none;
+  }
+
+  button {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+
   html,
   body,
   #root {
@@ -52,6 +64,7 @@
     overscroll-behavior-x: none;
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
+    -webkit-touch-callout: none;
     font-family: var(--font-sans);
     background-color: var(--fei-bg);
     color: var(--fei-text-primary);

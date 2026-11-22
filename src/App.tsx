@@ -1,31 +1,25 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ALargeSmall,
+  ArrowLeft,
   BookA,
   ChevronsUp,
   Download,
-  Eye,
-  FolderTree,
-  Heading1,
-  Heading2,
-  List,
   Lock,
   LockOpen,
   Minus,
   Pencil,
   Plus,
-  Redo2,
   RefreshCw,
   Scissors,
+  Settings,
   Trash2,
-  Undo2,
 } from 'lucide-react';
 import { ImportModal } from './components/ImportModal';
 import { MdictDictModal } from './components/MdictDictModal';
-import { MdictLookupPopup } from './components/MdictLookupPopup';
+import { MdictLookupPopup, MdictLookupPopupHandle } from './components/MdictLookupPopup';
 import {
   DocViewStateSnapshot,
-  EditFormatKind,
   MinimalDocView,
   MinimalDocViewHandle,
 } from './components/MinimalDocView';
@@ -78,9 +72,11 @@ import {
 } from './utils/mdictStorage';
 import {
   DEFAULT_READER_SETTINGS,
+  DocToolbarIconId,
   loadActiveMdictId,
   loadDocFontsMap,
   loadDocs,
+  loadDocToolbarOrder,
   loadFolders,
   loadFoldersDirty,
   loadLastOpenedDocId,
@@ -89,6 +85,7 @@ import {
   loadReaderSettings,
   loadStorageDirConfig,
   loadSyncLogs,
+  loadTreeToolbarOrder,
   loadTreeViewState,
   loadWebDavConfig,
   MAX_DOC_FONT_SIZE,
@@ -96,6 +93,7 @@ import {
   saveActiveMdictId,
   saveDocFontsMap,
   saveDocs,
+  saveDocToolbarOrder,
   saveFolders,
   saveFoldersDirty,
   saveLastOpenedDocId,
@@ -104,9 +102,11 @@ import {
   saveReaderSettings,
   saveStorageDirConfig,
   saveSyncLogs,
+  saveTreeToolbarOrder,
   saveTreeViewState,
   saveWebDavConfig,
   StorageDirectoryConfig,
+  TreeToolbarIconId,
 } from './utils/storage';
 import {
   extractExcerpt,
@@ -133,31 +133,6 @@ import {
 } from './utils/lanDirect';
 
 type MainView = 'tree' | 'doc';
-
-// Document mode icon styled after FeiArtical's folded-page + tree-line emblem in toolbar monochrome stroke style
-const ArticleDocIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
-  className = 'w-[22px] h-[22px]',
-  strokeWidth = 1.8,
-}) => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={strokeWidth}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <path d="M6.5 3.5h8L19 8v11.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19.5V5a1.5 1.5 0 0 1 1.5-1.5Z" />
-    <path d="M14.5 3.5V8H19" />
-    <path d="M8.5 11.2h7" />
-    <circle cx="8.8" cy="14.3" r="0.9" fill="currentColor" stroke="none" />
-    <path d="M11.3 14.3h4.2" />
-    <circle cx="8.8" cy="17.3" r="0.9" fill="currentColor" stroke="none" />
-    <path d="M11.3 17.3h3.2" />
-  </svg>
-);
 
 // Insert-below icon depicting placing the cut folder/article beneath the currently selected row
 const InsertBelowIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
@@ -196,12 +171,14 @@ export default function App() {
 
   const [mainView, setMainView] = useState<MainView>('tree');
   const [selectedDocId, setSelectedDocId] = useState<string | null>(() => loadLastOpenedDocId());
-  const [isEditing, setIsEditing] = useState(false);
   const [liveReadProgress, setLiveReadProgress] = useState<number>(0);
-  const [editHistoryState, setEditHistoryState] = useState<{
-    canUndo: boolean;
-    canRedo: boolean;
-  }>({ canUndo: false, canRedo: false });
+  const [treeToolbarOrder, setTreeToolbarOrder] = useState<TreeToolbarIconId[]>(() =>
+    loadTreeToolbarOrder()
+  );
+  const [docToolbarOrder, setDocToolbarOrder] = useState<DocToolbarIconId[]>(() =>
+    loadDocToolbarOrder()
+  );
+  const [draggingToolbarIconId, setDraggingToolbarIconId] = useState<string | null>(null);
 
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<string[]>(
     () => initialTreeState.collapsedIds
@@ -259,8 +236,13 @@ export default function App() {
 
   const docViewRef = useRef<MinimalDocViewHandle>(null);
   const treeViewRef = useRef<MinimalTreeViewHandle>(null);
-  const syncLongPressTimerRef = useRef<number | null>(null);
-  const syncLongPressedRef = useRef(false);
+  const mdictPopupRef = useRef<MdictLookupPopupHandle>(null);
+  const toolbarBtnRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map());
+  const suppressToolbarClickRef = useRef(false);
+  const treeToolbarOrderRef = useRef<TreeToolbarIconId[]>(treeToolbarOrder);
+  treeToolbarOrderRef.current = treeToolbarOrder;
+  const docToolbarOrderRef = useRef<DocToolbarIconId[]>(docToolbarOrder);
+  docToolbarOrderRef.current = docToolbarOrder;
   const mdictLookupReqRef = useRef(0);
   const docsRef = useRef<ArticleDoc[]>(docs);
   docsRef.current = docs;
@@ -268,11 +250,8 @@ export default function App() {
   foldersRef.current = folders;
   const storageDirRef = useRef<StorageDirectoryConfig>(storageDir);
   storageDirRef.current = storageDir;
-  const mainViewRef = useRef<MainView>(mainView);
-  mainViewRef.current = mainView;
-  const selectedDocIdRef = useRef<string | null>(selectedDocId);
-  selectedDocIdRef.current = selectedDocId;
   const localFsTimerRef = useRef<number | null>(null);
+  const saveDocsTimerRef = useRef<number | null>(null);
   const isPullingLocalFsRef = useRef(false);
 
   useEffect(() => {
@@ -314,17 +293,52 @@ export default function App() {
     return () => media.removeEventListener('change', handler);
   }, []);
 
+  // Suppress all browser / WebView context menus triggered by text selection or long-press
   useEffect(() => {
+    const blockContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener('contextmenu', blockContextMenu, { capture: true });
     return () => {
-      if (syncLongPressTimerRef.current) {
-        window.clearTimeout(syncLongPressTimerRef.current);
-      }
+      window.removeEventListener('contextmenu', blockContextMenu, { capture: true });
     };
   }, []);
 
-  // Persist locally
+  // Persist locally (debounce large docs serialization so opening/turning pages never stalls UI)
   useEffect(() => saveFolders(folders), [folders]);
-  useEffect(() => saveDocs(docs), [docs]);
+  useEffect(() => {
+    if (saveDocsTimerRef.current !== null) {
+      window.clearTimeout(saveDocsTimerRef.current);
+    }
+    saveDocsTimerRef.current = window.setTimeout(() => {
+      saveDocsTimerRef.current = null;
+      saveDocs(docsRef.current);
+    }, 500);
+    return () => {
+      if (saveDocsTimerRef.current !== null) {
+        window.clearTimeout(saveDocsTimerRef.current);
+        saveDocsTimerRef.current = null;
+      }
+    };
+  }, [docs]);
+  useEffect(() => {
+    const flushDocsNow = () => {
+      if (saveDocsTimerRef.current !== null) {
+        window.clearTimeout(saveDocsTimerRef.current);
+        saveDocsTimerRef.current = null;
+      }
+      saveDocs(docsRef.current);
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') flushDocsNow();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pagehide', flushDocsNow);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', flushDocsNow);
+    };
+  }, []);
   useEffect(() => saveFoldersDirty(foldersDirty), [foldersDirty]);
   useEffect(() => savePurgedSyncRecords(purgedRecords), [purgedRecords]);
   useEffect(() => saveWebDavConfig(webDavConfig), [webDavConfig]);
@@ -351,19 +365,12 @@ export default function App() {
 
     isPullingLocalFsRef.current = true;
     try {
-      const protectedDocId =
-        mainViewRef.current === 'doc' &&
-        selectedDocIdRef.current &&
-        docViewRef.current?.hasUnsavedDraft()
-          ? selectedDocIdRef.current
-          : null;
-
       const res = await checkAndPullExternalLocalFsChanges(
         foldersRef.current,
         docsRef.current,
         storageDirRef.current,
         {
-          protectedDocId,
+          protectedDocId: null,
           forceScan: options?.forceScan,
         }
       );
@@ -736,6 +743,31 @@ export default function App() {
       prev.map((f) => (f.id === folderId ? { ...f, name: trimmed, updatedAt: Date.now() } : f))
     );
     setFoldersDirty(true);
+  };
+
+  const handleRenameDoc = (docId: string, title: string) => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    setDocs((prev) =>
+      prev.map((d) =>
+        d.id === docId
+          ? { ...d, title: trimmed, updatedAt: Date.now(), syncStatus: 'dirty' }
+          : d
+      )
+    );
+  };
+
+  const handleToolbarEditClick = () => {
+    if (!activeTarget) {
+      showToast('请先点选要重命名的目录或文档');
+      return;
+    }
+    const res = treeViewRef.current?.startRenameTarget(activeTarget);
+    if (res === 'inbox') {
+      showToast('inbox 目录不可重命名');
+    } else if (res === 'missing') {
+      showToast('请先点选要重命名的目录或文档');
+    }
   };
 
   // Trash: Move Doc or Folder (with all docs inside it) to 30-day Trash
@@ -1112,7 +1144,7 @@ export default function App() {
       );
 
       if (nextEncrypted && !hasPassword) {
-        showToast('已标记加密，同步前请长按同步图标设置加密密码');
+        showToast('已标记加密，同步前请点击设置图标设置加密密码');
       }
       return;
     }
@@ -1142,7 +1174,7 @@ export default function App() {
     );
 
     if (nextEncrypted && !hasPassword) {
-      showToast('已加密目录下全部文档，同步前请长按同步图标设置加密密码');
+      showToast('已加密目录下全部文档，同步前请点击设置图标设置加密密码');
     }
   };
 
@@ -1242,7 +1274,7 @@ export default function App() {
       starred: false,
       readProgress: 0,
       lastReadAt: now,
-      lastMode: 'edit',
+      lastMode: 'read',
       lastScrollTop: 0,
       lastCharOffset: 0,
       format: 'txt',
@@ -1267,34 +1299,6 @@ export default function App() {
     setSelectedDocId(newDoc.id);
     setActiveTarget(nextTarget);
     setMainView('doc');
-    setIsEditing(true);
-  };
-
-  const handleSaveDraft = async (
-    docId: string,
-    updates: { title: string; content: string }
-  ) => {
-    const hash = await sha256Hex(updates.content);
-    const byteSize = getByteSize(updates.content);
-    const excerpt = extractExcerpt(updates.content);
-    const now = Date.now();
-
-    setDocs((prev) =>
-      prev.map((d) =>
-        d.id === docId
-          ? {
-              ...d,
-              title: updates.title,
-              content: updates.content,
-              contentHash: hash,
-              byteSize,
-              excerpt,
-              updatedAt: now,
-              syncStatus: 'dirty',
-            }
-          : d
-      )
-    );
   };
 
   const handleUpdateDocViewState = (docId: string, state: DocViewStateSnapshot) => {
@@ -1339,10 +1343,7 @@ export default function App() {
     captureAndSaveTreeState(nextTarget);
     setActiveTarget(nextTarget);
     setSelectedDocId(docId);
-    // Always open documents in Browse mode by default from the directory tree
-    setIsEditing(false);
     setLiveReadProgress(target?.readProgress ?? 0);
-    setEditHistoryState({ canUndo: false, canRedo: false });
     setMainView('doc');
     setDocs((prev) =>
       prev.map((d) => (d.id === docId ? { ...d, lastReadAt: Date.now() } : d))
@@ -1357,41 +1358,6 @@ export default function App() {
     setMdictLookup(null);
     setShowFontSizeBar(false);
     setMainView('tree');
-  };
-
-  const handleToggleTreeDocView = () => {
-    if (mainView === 'doc') {
-      handleExitDocToTree();
-      return;
-    }
-    const liveDocs = docs.filter((d) => !d.deleted);
-    let targetDoc = selectedDocId
-      ? liveDocs.find((d) => d.id === selectedDocId) ?? null
-      : null;
-    if (!targetDoc && activeTarget?.kind === 'doc') {
-      targetDoc = liveDocs.find((d) => d.id === activeTarget.id) ?? null;
-    }
-    if (!targetDoc && liveDocs.length > 0) {
-      targetDoc = [...liveDocs].sort(
-        (a, b) => (b.lastReadAt ?? 0) - (a.lastReadAt ?? 0) || b.updatedAt - a.updatedAt
-      )[0];
-    }
-    if (!targetDoc) {
-      showToast('暂无可打开的文档');
-      return;
-    }
-    setPickCutMode(false);
-    handleOpenDoc(targetDoc.id);
-  };
-
-  const handleToggleEditMode = () => {
-    const nextEditing = !isEditing;
-    if (nextEditing) {
-      setMdictLookup(null);
-      setShowFontSizeBar(false);
-    }
-    docViewRef.current?.prepareModeSwitch(nextEditing);
-    setIsEditing(nextEditing);
   };
 
   const handleChangeFontSize = (nextSize: number) => {
@@ -1770,10 +1736,7 @@ export default function App() {
   };
 
   const handleDirectSyncClick = async () => {
-    if (syncLongPressedRef.current) {
-      syncLongPressedRef.current = false;
-      return;
-    }
+    if (suppressToolbarClickRef.current) return;
     if (webDavConfig.username.trim() && webDavConfig.password.trim()) {
       try {
         await handleRunLiveSync();
@@ -1781,26 +1744,94 @@ export default function App() {
         showToast(err instanceof Error ? err.message : '同步失败');
       }
     } else {
-      showToast('请长按同步图标设置坚果云同步参数');
+      showToast('请先在目录模式点击设置图标配置坚果云同步参数');
     }
   };
 
-  const handleSyncPointerDown = () => {
-    syncLongPressedRef.current = false;
-    if (syncLongPressTimerRef.current) {
-      window.clearTimeout(syncLongPressTimerRef.current);
-    }
-    syncLongPressTimerRef.current = window.setTimeout(() => {
-      syncLongPressedRef.current = true;
-      setShowSyncModal(true);
-    }, 300);
-  };
+  // Drag-to-reorder handler for all movable bottom toolbar icons (both touch & mouse)
+  const handleToolbarIconPointerDown = (
+    e: React.PointerEvent<HTMLButtonElement>,
+    iconId: TreeToolbarIconId | DocToolbarIconId,
+    mode: MainView
+  ) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
 
-  const cancelSyncLongPress = () => {
-    if (syncLongPressTimerRef.current) {
-      window.clearTimeout(syncLongPressTimerRef.current);
-      syncLongPressTimerRef.current = null;
-    }
+    const pointerId = e.pointerId;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+
+      if (!dragging) {
+        if (Math.abs(dx) >= 10 || Math.hypot(dx, dy) >= 14) {
+          dragging = true;
+          suppressToolbarClickRef.current = true;
+          setDraggingToolbarIconId(`${mode}:${iconId}`);
+        } else {
+          return;
+        }
+      }
+
+      if (moveEvent.cancelable) {
+        moveEvent.preventDefault();
+      }
+
+      const currentOrder: string[] =
+        mode === 'tree' ? treeToolbarOrderRef.current : docToolbarOrderRef.current;
+      const fromIdx = currentOrder.indexOf(iconId);
+      if (fromIdx === -1) return;
+
+      let toIdx = 0;
+      for (let i = 0; i < currentOrder.length; i++) {
+        const otherId = currentOrder[i];
+        if (otherId === iconId) continue;
+        const btn = toolbarBtnRefs.current.get(`${mode}:${otherId}`);
+        if (!btn) continue;
+        const rect = btn.getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
+        if (moveEvent.clientX > midX) {
+          toIdx++;
+        }
+      }
+
+      if (toIdx !== fromIdx) {
+        const nextOrder = [...currentOrder];
+        nextOrder.splice(fromIdx, 1);
+        nextOrder.splice(toIdx, 0, iconId);
+        if (mode === 'tree') {
+          const typed = nextOrder as TreeToolbarIconId[];
+          treeToolbarOrderRef.current = typed;
+          setTreeToolbarOrder(typed);
+          saveTreeToolbarOrder(typed);
+        } else {
+          const typed = nextOrder as DocToolbarIconId[];
+          docToolbarOrderRef.current = typed;
+          setDocToolbarOrder(typed);
+          saveDocToolbarOrder(typed);
+        }
+      }
+    };
+
+    const cleanup = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== pointerId) return;
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', cleanup);
+      window.removeEventListener('pointercancel', cleanup);
+      if (dragging) {
+        setDraggingToolbarIconId(null);
+        window.setTimeout(() => {
+          suppressToolbarClickRef.current = false;
+        }, 120);
+      }
+    };
+
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', cleanup);
+    window.addEventListener('pointercancel', cleanup);
   };
 
   const handleFetchRemoteBody = async (docId: string) => {
@@ -1887,9 +1918,9 @@ export default function App() {
       <main className="flex-1 min-h-0 overflow-hidden">
         {mainView === 'doc' && selectedDoc ? (
           <MinimalDocView
+            key={selectedDoc.id}
             ref={docViewRef}
             doc={selectedDoc}
-            isEditing={isEditing}
             fontSize={fontSize}
             docFontFamily={currentDocFontFamily}
             hasActiveMdict={mdictDicts.length > 0}
@@ -1899,10 +1930,15 @@ export default function App() {
               void runMdictLookup(word, placement);
             }}
             onClearMdictLookup={() => setMdictLookup(null)}
-            onSaveDraft={(updates) => handleSaveDraft(selectedDoc.id, updates)}
+            onMdictPopupVolumeKey={(direction) => {
+              if (direction === 'up') {
+                mdictPopupRef.current?.pageUp();
+              } else {
+                mdictPopupRef.current?.pageDown();
+              }
+            }}
             onViewStateChange={(state) => handleUpdateDocViewState(selectedDoc.id, state)}
             onReadProgressChange={setLiveReadProgress}
-            onHistoryChange={setEditHistoryState}
             onFetchRemoteBody={() => handleFetchRemoteBody(selectedDoc.id)}
           />
         ) : (
@@ -1926,6 +1962,7 @@ export default function App() {
             }}
             onCreateFolder={handleCreateFolder}
             onRenameFolder={handleRenameFolder}
+            onRenameDoc={handleRenameDoc}
             onDeleteFolder={handleDeleteFolder}
             onCreateDocInFolder={(folderId) => handleCreateDoc(folderId)}
             onMoveFolderToPosition={handleMoveFolderToPosition}
@@ -1937,122 +1974,171 @@ export default function App() {
         )}
       </main>
 
-      {/* Bottom Toolbar (All icons use FeiNote muted trash-can monochrome tone, ordered left-to-right) */}
+      {/* Bottom Toolbar (All icons use monochrome tone; all non-rightmost icons support drag reordering) */}
       <footer
         aria-label="底部工具栏"
-        className="shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)]"
+        onContextMenu={(e) => e.preventDefault()}
+        className="shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)] select-none"
       >
         <div className="h-[54px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-start gap-0.5 sm:gap-1">
-          {/* 1. 最左侧：目录图标 <-> 文档图标 */}
-          <button
-            type="button"
-            onClick={handleToggleTreeDocView}
-            aria-label={mainView === 'tree' ? '切换到文档模式' : '切换到目录树'}
-            title={mainView === 'tree' ? '切换到文档模式（打开上次文档）' : '返回目录树'}
-            className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0"
-          >
-            {mainView === 'tree' ? (
-              <FolderTree className="w-[22px] h-[22px]" strokeWidth={1.8} />
-            ) : (
-              <ArticleDocIcon className="w-[22px] h-[22px]" strokeWidth={1.8} />
-            )}
-          </button>
-
           {mainView === 'tree' ? (
             <>
-              {/* 2. 目录图标后面：导入图标 */}
-              <button
-                type="button"
-                onClick={() => setShowImportModal(true)}
-                aria-label="导入文本文档"
-                title="导入 .txt / .md 文档或粘贴文本"
-                className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
-              >
-                <Download className="w-[22px] h-[22px]" strokeWidth={1.8} />
-              </button>
+              {treeToolbarOrder.map((iconId) => {
+                const key = `tree:${iconId}`;
+                const isDraggingThis = draggingToolbarIconId === key;
+                const dragCls = isDraggingThis
+                  ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)] scale-105 opacity-90'
+                  : '';
+                const bindRef = (el: HTMLButtonElement | null) => {
+                  toolbarBtnRefs.current.set(key, el);
+                };
 
-              {/* 3. 剪切 / 插入切换图标 */}
-              <button
-                type="button"
-                onClick={handleCutOrInsertClick}
-                aria-label={cutItem ? '插入到当前选中位置的下方' : '剪切目录或文章'}
-                title={
-                  cutItem
-                    ? '插入到当前选中位置的下方'
-                    : pickCutMode
-                      ? '取消选择剪切项'
-                      : '剪切选定的目录或文章'
+                if (iconId === 'edit') {
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'edit', 'tree')}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        handleToolbarEditClick();
+                      }}
+                      aria-label="重命名选中的目录或文档"
+                      title="重命名选中的目录或文档（可拖动调整图标位置）"
+                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                    >
+                      <Pencil className="w-[21px] h-[21px]" strokeWidth={1.8} />
+                    </button>
+                  );
                 }
-                className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] transition-colors ${
-                  cutItem || pickCutMode
-                    ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)]'
-                    : 'hover:bg-[var(--fei-bg-hover)]'
-                }`}
-              >
-                {cutItem ? (
-                  <InsertBelowIcon className="w-[22px] h-[22px]" strokeWidth={1.8} />
-                ) : (
-                  <Scissors className="w-[22px] h-[22px]" strokeWidth={1.8} />
-                )}
-              </button>
 
-              {/* 4. 加密 / 解密切换图标（闭锁代表已加密，开锁代表未加密/已解密） */}
-              <button
-                type="button"
-                onClick={handleEncryptButtonClick}
-                aria-label={isSelectedEncrypted ? '解密选中的文档或目录' : '加密选中的文档或目录'}
-                title={isSelectedEncrypted ? '当前已加密，点击解密' : '当前未加密，点击加密'}
-                className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
-              >
-                {isSelectedEncrypted ? (
-                  <Lock className="w-[21px] h-[21px]" strokeWidth={1.8} />
-                ) : (
-                  <LockOpen className="w-[21px] h-[21px]" strokeWidth={1.8} />
-                )}
-              </button>
-
-              {/* 5. 收起图标：收起所有内容，只显示目录 */}
-              <button
-                type="button"
-                onClick={handleCollapseAllFolders}
-                aria-label="收起所有目录"
-                title="收起所有内容，只显示目录"
-                className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
-              >
-                <ChevronsUp className="w-[22px] h-[22px]" strokeWidth={1.8} />
-              </button>
-
-              {/* 6. 同步图标（点击直接同步，长按打开同步设置；右上角淡化小圆点提示待同步） */}
-              <button
-                type="button"
-                onClick={handleDirectSyncClick}
-                onPointerDown={handleSyncPointerDown}
-                onPointerUp={cancelSyncLongPress}
-                onPointerLeave={cancelSyncLongPress}
-                onPointerCancel={cancelSyncLongPress}
-                onContextMenu={(e) => e.preventDefault()}
-                disabled={isSyncing}
-                aria-label={hasPendingSync ? '点击同步，长按打开同步设置（有未同步变更）' : '点击同步，长按打开同步设置'}
-                title={
-                  hasPendingSync
-                    ? '有内容未同步至坚果云，点击直接同步，长按打开同步设置'
-                    : '点击直接同步，长按打开同步设置'
+                if (iconId === 'import') {
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'import', 'tree')}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        setShowImportModal(true);
+                      }}
+                      aria-label="导入文本文档"
+                      title="导入 .txt / .md 文档或粘贴文本（可拖动调整图标位置）"
+                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                    >
+                      <Download className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                    </button>
+                  );
                 }
-                className="relative w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors disabled:opacity-50 select-none"
-              >
-                <RefreshCw
-                  className={`w-[22px] h-[22px] ${isSyncing ? 'animate-spin' : ''}`}
-                  strokeWidth={1.8}
-                />
-                {hasPendingSync && (
-                  <span
-                    aria-hidden="true"
-                    className="absolute top-[9px] right-[9px] w-[6px] h-[6px] rounded-full bg-[var(--fei-text-muted)]"
-                  />
-                )}
-              </button>
 
-              {/* 7. 最右侧：回收站图标（拖入文档/目录即删除，点击打开回收站） */}
+                if (iconId === 'cut') {
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'cut', 'tree')}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        handleCutOrInsertClick();
+                      }}
+                      aria-label={cutItem ? '插入到当前选中位置的下方' : '剪切目录或文章'}
+                      title={
+                        cutItem
+                          ? '插入到当前选中位置的下方'
+                          : pickCutMode
+                            ? '取消选择剪切项'
+                            : '剪切选定的目录或文章（可拖动调整图标位置）'
+                      }
+                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] transition-all shrink-0 touch-none select-none ${
+                        isDraggingThis
+                          ? dragCls
+                          : cutItem || pickCutMode
+                            ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)]'
+                            : 'hover:bg-[var(--fei-bg-hover)]'
+                      }`}
+                    >
+                      {cutItem ? (
+                        <InsertBelowIcon className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                      ) : (
+                        <Scissors className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                      )}
+                    </button>
+                  );
+                }
+
+                if (iconId === 'encrypt') {
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'encrypt', 'tree')}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        handleEncryptButtonClick();
+                      }}
+                      aria-label={
+                        isSelectedEncrypted ? '解密选中的文档或目录' : '加密选中的文档或目录'
+                      }
+                      title={
+                        isSelectedEncrypted
+                          ? '当前已加密，点击解密（可拖动调整图标位置）'
+                          : '当前未加密，点击加密（可拖动调整图标位置）'
+                      }
+                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                    >
+                      {isSelectedEncrypted ? (
+                        <Lock className="w-[21px] h-[21px]" strokeWidth={1.8} />
+                      ) : (
+                        <LockOpen className="w-[21px] h-[21px]" strokeWidth={1.8} />
+                      )}
+                    </button>
+                  );
+                }
+
+                if (iconId === 'collapse') {
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'collapse', 'tree')}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        handleCollapseAllFolders();
+                      }}
+                      aria-label="收起所有目录"
+                      title="收起所有内容，只显示目录（可拖动调整图标位置）"
+                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                    >
+                      <ChevronsUp className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                    </button>
+                  );
+                }
+
+                return (
+                  <button
+                    key={iconId}
+                    ref={bindRef}
+                    type="button"
+                    onPointerDown={(e) => handleToolbarIconPointerDown(e, 'settings', 'tree')}
+                    onClick={() => {
+                      if (suppressToolbarClickRef.current) return;
+                      setShowSyncModal(true);
+                    }}
+                    aria-label="同步与存储设置"
+                    title="同步与存储设置（可拖动调整图标位置）"
+                    className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                  >
+                    <Settings className="w-[21px] h-[21px]" strokeWidth={1.8} />
+                  </button>
+                );
+              })}
+
+              {/* 最右侧固定：回收站图标（拖入文档/目录即删除，点击打开回收站，不参与拖动排序） */}
               <button
                 type="button"
                 data-trash-dropzone="true"
@@ -2086,7 +2172,7 @@ export default function App() {
                 }}
                 aria-label="回收站（拖入目录或文档可删除，点击查看回收站）"
                 title="回收站（拖入文档或目录可删除，内容保留 30 天）"
-                className={`ml-auto w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all duration-150 shrink-0 ${
+                className={`ml-auto w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all duration-150 shrink-0 ${
                   trashDragOver
                     ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)] scale-105'
                     : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
@@ -2096,114 +2182,127 @@ export default function App() {
               </button>
             </>
           ) : (
-            /* 文档模式：文档图标后面放置 浏览(Eye) <-> 编辑(Pencil) 图标；浏览态最右侧显示阅读进度百分比 */
+            /* 文档浏览模式：默认依次为 返回、词典、字体设置、同步（均可拖动排序），最右侧固定显示阅读进度百分比 */
             <>
-              {/* 2. 文档图标后面：浏览态显示 Eye，点击进入编辑变为 Pencil；再点击回到 Eye 并切回浏览 */}
-              <button
-                type="button"
-                onClick={handleToggleEditMode}
-                aria-label={isEditing ? '当前处于编辑状态，点击切回浏览' : '当前处于浏览状态，点击进入编辑'}
-                title={isEditing ? '编辑状态（点击切回浏览）' : '浏览状态（点击进入编辑）'}
-                className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
-              >
-                {isEditing ? (
-                  <Pencil className="w-[21px] h-[21px]" strokeWidth={1.8} />
-                ) : (
-                  <Eye className="w-[22px] h-[22px]" strokeWidth={1.8} />
-                )}
-              </button>
+              {docToolbarOrder.map((iconId) => {
+                const key = `doc:${iconId}`;
+                const isDraggingThis = draggingToolbarIconId === key;
+                const dragCls = isDraggingThis
+                  ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)] scale-105 opacity-90'
+                  : '';
+                const bindRef = (el: HTMLButtonElement | null) => {
+                  toolbarBtnRefs.current.set(key, el);
+                };
 
-              {/* 浏览状态下，浏览图标后面放置词典图标和调节字体大小图标，最右侧显示数字百分比进度 */}
-              {!isEditing && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowFontSizeBar(false);
-                      setShowMdictModal(true);
-                    }}
-                    aria-label="词典设置与切换"
-                    title="词典（导入与切换 .mdx 词库）"
-                    className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-colors"
-                  >
-                    <BookA className="w-[22px] h-[22px]" strokeWidth={1.8} />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setShowFontSizeBar((prev) => !prev)}
-                    aria-label="调节字体与字号"
-                    title="调节字体与字号"
-                    className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-colors ${
-                      showFontSizeBar
-                        ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)]'
-                        : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
-                    }`}
-                  >
-                    <ALargeSmall className="w-[22px] h-[22px]" strokeWidth={1.8} />
-                  </button>
-
-                  <span
-                    aria-label={`当前阅读进度 ${liveReadProgress}%`}
-                    className="ml-auto pr-1 text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] select-none whitespace-nowrap shrink-0"
-                  >
-                    {liveReadProgress}%
-                  </span>
-                </>
-              )}
-
-              {/* 3–7. 编辑状态下，编辑图标后面依次放置：一级标题、二级标题、无序列表、撤销、恢复 */}
-              {isEditing && (
-                <>
-                  {(
-                    [
-                      { kind: 'h1', label: '一级标题', Icon: Heading1 },
-                      { kind: 'h2', label: '二级标题', Icon: Heading2 },
-                      { kind: 'ul', label: '无序列表', Icon: List },
-                    ] as Array<{
-                      kind: EditFormatKind;
-                      label: string;
-                      Icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
-                    }>
-                  ).map(({ kind, label, Icon }) => (
+                if (iconId === 'back') {
+                  return (
                     <button
-                      key={kind}
+                      key={iconId}
+                      ref={bindRef}
                       type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => docViewRef.current?.applyMarkdownFormat(kind)}
-                      aria-label={label}
-                      title={label}
-                      className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] transition-colors"
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'back', 'doc')}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        handleExitDocToTree();
+                      }}
+                      aria-label="返回目录"
+                      title="返回目录（可拖动调整图标位置）"
+                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
                     >
-                      <Icon className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                      <ArrowLeft className="w-[22px] h-[22px]" strokeWidth={1.8} />
                     </button>
-                  ))}
+                  );
+                }
 
-                  <button
-                    type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => docViewRef.current?.undo()}
-                    disabled={!editHistoryState.canUndo}
-                    aria-label="撤销上一步编辑"
-                    title="撤销"
-                    className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 disabled:pointer-events-none transition-colors"
-                  >
-                    <Undo2 className="w-[22px] h-[22px]" strokeWidth={1.8} />
-                  </button>
+                if (iconId === 'dict') {
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'dict', 'doc')}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        setShowFontSizeBar(false);
+                        setShowMdictModal(true);
+                      }}
+                      aria-label="词典设置与切换"
+                      title="词典（导入与切换 .mdx 词库，可拖动调整图标位置）"
+                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                    >
+                      <BookA className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                    </button>
+                  );
+                }
 
+                if (iconId === 'font') {
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'font', 'doc')}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        setShowFontSizeBar((prev) => !prev);
+                      }}
+                      aria-label="调节字体与字号"
+                      title="调节字体与字号（可拖动调整图标位置）"
+                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
+                        isDraggingThis
+                          ? dragCls
+                          : showFontSizeBar
+                            ? 'bg-[var(--fei-bg-selected)] border border-[var(--fei-border-strong)] dark:border-transparent text-[var(--fei-text-primary)]'
+                            : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
+                      }`}
+                    >
+                      <ALargeSmall className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                    </button>
+                  );
+                }
+
+                return (
                   <button
+                    key={iconId}
+                    ref={bindRef}
                     type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => docViewRef.current?.redo()}
-                    disabled={!editHistoryState.canRedo}
-                    aria-label="恢复上一步编辑"
-                    title="恢复"
-                    className="w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] disabled:opacity-35 disabled:pointer-events-none transition-colors"
+                    onPointerDown={(e) => handleToolbarIconPointerDown(e, 'sync', 'doc')}
+                    onClick={handleDirectSyncClick}
+                    onContextMenu={(e) => e.preventDefault()}
+                    disabled={isSyncing}
+                    aria-label={
+                      hasPendingSync
+                        ? '点击同步（有未同步变更）'
+                        : '点击同步'
+                    }
+                    title={
+                      hasPendingSync
+                        ? '有内容未同步至坚果云，点击直接同步（可拖动调整图标位置）'
+                        : '点击直接同步（可拖动调整图标位置）'
+                    }
+                    className={`relative w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all disabled:opacity-50 shrink-0 touch-none select-none ${dragCls}`}
                   >
-                    <Redo2 className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                    <RefreshCw
+                      className={`w-[22px] h-[22px] ${isSyncing ? 'animate-spin' : ''}`}
+                      strokeWidth={1.8}
+                    />
+                    {hasPendingSync && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute top-[9px] right-[9px] w-[6px] h-[6px] rounded-full bg-[var(--fei-text-muted)]"
+                      />
+                    )}
                   </button>
-                </>
-              )}
+                );
+              })}
+
+              {/* 最右侧固定：阅读进度百分比（不参与拖动排序） */}
+              <span
+                aria-label={`当前阅读进度 ${liveReadProgress}%`}
+                className="ml-auto pr-1 text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] select-none whitespace-nowrap shrink-0"
+              >
+                {liveReadProgress}%
+              </span>
             </>
           )}
         </div>
@@ -2328,8 +2427,8 @@ export default function App() {
         />
       )}
 
-      {/* Font Size & Font Family Adjuster Popover in Browse/Read Mode (Applies to Read & Edit) */}
-      {mainView === 'doc' && !isEditing && showFontSizeBar && (
+      {/* Font Size & Font Family Adjuster Popover in Browse Mode */}
+      {mainView === 'doc' && showFontSizeBar && (
         <>
           <div
             className="fixed inset-0 z-30"
@@ -2339,7 +2438,7 @@ export default function App() {
             role="dialog"
             aria-label="调节字体与字号"
             onClick={(e) => e.stopPropagation()}
-            className="fixed bottom-[64px] left-1/2 -translate-x-1/2 z-40 w-[min(340px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-none dark:shadow-lg flex flex-col gap-2.5"
+            className="fixed bottom-[64px] left-1/2 -translate-x-1/2 z-40 w-[min(340px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-none dark:shadow-lg flex flex-col gap-2.5 select-none"
           >
             <div className="flex items-center gap-2">
               <button
@@ -2407,8 +2506,9 @@ export default function App() {
       )}
 
       {/* Adaptive MDict Lookup Popup in Read Mode */}
-      {mainView === 'doc' && !isEditing && mdictLookup && (
+      {mainView === 'doc' && mdictLookup && (
         <MdictLookupPopup
+          ref={mdictPopupRef}
           queryWord={mdictLookup.queryWord}
           placement={mdictLookup.placement}
           fontSize={fontSize}

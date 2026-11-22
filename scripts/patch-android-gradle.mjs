@@ -1525,8 +1525,12 @@ public class LocalStoragePlugin extends Plugin {
 
 import android.content.res.Configuration;
 import android.os.Bundle;
+import android.view.ActionMode;
 import android.view.KeyEvent;
+import android.view.Menu;
+import android.view.MenuInflater;
 import android.view.View;
+import android.widget.PopupMenu;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -1534,6 +1538,75 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
+    private final class SilentActionMode extends ActionMode {
+        private final ActionMode.Callback callback;
+        private final Menu emptyMenu;
+        private boolean finished = false;
+
+        SilentActionMode(ActionMode.Callback callback) {
+            this.callback = callback;
+            View anchor = getWindow() != null ? getWindow().getDecorView() : new View(MainActivity.this);
+            this.emptyMenu = new PopupMenu(MainActivity.this, anchor).getMenu();
+        }
+
+        @Override
+        public void setTitle(CharSequence title) {}
+
+        @Override
+        public void setTitle(int resId) {}
+
+        @Override
+        public void setSubtitle(CharSequence subtitle) {}
+
+        @Override
+        public void setSubtitle(int resId) {}
+
+        @Override
+        public void setCustomView(View view) {}
+
+        @Override
+        public void invalidate() {
+            emptyMenu.clear();
+        }
+
+        @Override
+        public void finish() {
+            if (finished) return;
+            finished = true;
+            if (callback != null) {
+                try {
+                    callback.onDestroyActionMode(this);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        @Override
+        public Menu getMenu() {
+            return emptyMenu;
+        }
+
+        @Override
+        public CharSequence getTitle() {
+            return "";
+        }
+
+        @Override
+        public CharSequence getSubtitle() {
+            return "";
+        }
+
+        @Override
+        public View getCustomView() {
+            return null;
+        }
+
+        @Override
+        public MenuInflater getMenuInflater() {
+            return MainActivity.this.getMenuInflater();
+        }
+    }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(WebDavPlugin.class);
@@ -1542,6 +1615,38 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(LocalStoragePlugin.class);
         super.onCreate(savedInstanceState);
         applySystemBarAndCutoutInsets();
+    }
+
+    @Override
+    public ActionMode onWindowStartingActionMode(ActionMode.Callback callback) {
+        return createSilentActionMode(callback);
+    }
+
+    @Override
+    public ActionMode onWindowStartingActionMode(ActionMode.Callback callback, int type) {
+        return createSilentActionMode(callback);
+    }
+
+    private ActionMode createSilentActionMode(ActionMode.Callback callback) {
+        if (callback == null) return null;
+        SilentActionMode mode = new SilentActionMode(callback);
+        try {
+            callback.onCreateActionMode(mode, mode.getMenu());
+        } catch (Exception ignored) {
+        }
+        mode.getMenu().clear();
+        return mode;
+    }
+
+    @Override
+    public void onActionModeStarted(ActionMode mode) {
+        super.onActionModeStarted(mode);
+        if (mode != null && !(mode instanceof SilentActionMode)) {
+            try {
+                mode.getMenu().clear();
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     @Override

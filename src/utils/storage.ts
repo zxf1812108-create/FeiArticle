@@ -24,6 +24,8 @@ const KEYS = {
   PURGED_RECORDS: 'feiartical_purged_records_v1',
   ACTIVE_MDICT: 'feiartical_active_mdict_v1',
   DOC_FONTS: 'feiartical_doc_fonts_v1',
+  TREE_TOOLBAR_ORDER: 'feiartical_tree_toolbar_order_v1',
+  DOC_TOOLBAR_ORDER: 'feiartical_doc_toolbar_order_v1',
 };
 
 export type LocalStorageBackendMode = 'saf' | 'path' | 'web-fs' | 'browser-only';
@@ -283,5 +285,82 @@ export function loadDocFontsMap(): Record<string, string> {
 export function saveDocFontsMap(map: Record<string, string>): void {
   localStorage.setItem(KEYS.DOC_FONTS, JSON.stringify(map));
 }
+
+export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'collapse' | 'settings';
+export type DocToolbarIconId = 'back' | 'dict' | 'font' | 'sync';
+
+export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
+  'edit',
+  'import',
+  'cut',
+  'encrypt',
+  'collapse',
+  'settings',
+];
+
+export const DEFAULT_DOC_TOOLBAR_ORDER: DocToolbarIconId[] = [
+  'back',
+  'dict',
+  'font',
+  'sync',
+];
+
+function normalizeToolbarOrder<T extends string>(raw: unknown, defaults: readonly T[]): T[] {
+  const allowed = new Set<string>(defaults);
+  const seen = new Set<T>();
+  const result: T[] = [];
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item === 'string' && allowed.has(item) && !seen.has(item as T)) {
+        seen.add(item as T);
+        result.push(item as T);
+      }
+    }
+  }
+  for (const item of defaults) {
+    if (!seen.has(item)) {
+      result.push(item);
+    }
+  }
+  return result;
+}
+
+export function loadTreeToolbarOrder(): TreeToolbarIconId[] {
+  const parsed = safeParse<unknown>(localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER), null);
+  const hadSettings = Array.isArray(parsed) && parsed.includes('settings');
+  const normalized = normalizeToolbarOrder(parsed, DEFAULT_TREE_TOOLBAR_ORDER);
+  if (!hadSettings) {
+    const settingsIdx = normalized.indexOf('settings');
+    const collapseIdx = normalized.indexOf('collapse');
+    if (settingsIdx !== -1 && collapseIdx !== -1 && settingsIdx !== collapseIdx + 1) {
+      normalized.splice(settingsIdx, 1);
+      const nextCollapseIdx = normalized.indexOf('collapse');
+      normalized.splice(nextCollapseIdx + 1, 0, 'settings');
+    }
+  }
+  return normalized;
+}
+
+export function saveTreeToolbarOrder(order: TreeToolbarIconId[]): void {
+  try {
+    localStorage.setItem(KEYS.TREE_TOOLBAR_ORDER, JSON.stringify(order));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function loadDocToolbarOrder(): DocToolbarIconId[] {
+  const parsed = safeParse<unknown>(localStorage.getItem(KEYS.DOC_TOOLBAR_ORDER), null);
+  return normalizeToolbarOrder(parsed, DEFAULT_DOC_TOOLBAR_ORDER);
+}
+
+export function saveDocToolbarOrder(order: DocToolbarIconId[]): void {
+  try {
+    localStorage.setItem(KEYS.DOC_TOOLBAR_ORDER, JSON.stringify(order));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
 
 

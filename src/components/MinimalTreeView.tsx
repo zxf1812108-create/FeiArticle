@@ -25,6 +25,7 @@ export type TreeSelection =
 
 export interface MinimalTreeViewHandle {
   getScrollTop: () => number;
+  startRenameTarget: (target: TreeSelection) => 'ok' | 'inbox' | 'missing';
 }
 
 interface MinimalTreeViewProps {
@@ -43,6 +44,7 @@ interface MinimalTreeViewProps {
   onCancelCut: () => void;
   onCreateFolder: (name: string) => void;
   onRenameFolder: (folderId: string, name: string) => void;
+  onRenameDoc: (docId: string, title: string) => void;
   onDeleteFolder: (folderId: string) => void;
   onCreateDocInFolder: (folderId: string | null) => void;
   onMoveFolderToPosition: (
@@ -83,6 +85,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
       onCancelCut,
       onCreateFolder,
       onRenameFolder,
+      onRenameDoc,
       onDeleteFolder,
       onCreateDocInFolder,
       onMoveFolderToPosition,
@@ -107,7 +110,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
 
   const [addingFolder, setAddingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
-  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [editingItem, setEditingItem] = useState<TreeSelection | null>(null);
   const [editingName, setEditingName] = useState('');
 
   // Restore saved directory scroll position synchronously on entering tree mode
@@ -131,6 +134,26 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
   useImperativeHandle(ref, () => ({
     getScrollTop() {
       return scrollRef.current?.scrollTop ?? 0;
+    },
+    startRenameTarget(target: TreeSelection) {
+      if (target.kind === 'folder') {
+        if (target.id === INBOX_FOLDER_ID) return 'inbox';
+        const folder = folders.find((f) => !f.deleted && f.id === target.id);
+        if (!folder) return 'missing';
+        setEditingItem(target);
+        setEditingName(folder.name);
+        return 'ok';
+      }
+      const doc = docs.find((d) => !d.deleted && d.id === target.id);
+      if (!doc) return 'missing';
+      if (doc.folderId && collapsedIds.has(doc.folderId)) {
+        onExpandFolder(doc.folderId);
+      } else if (!doc.folderId && collapsedIds.has('__uncategorized__')) {
+        onExpandFolder('__uncategorized__');
+      }
+      setEditingItem(target);
+      setEditingName(doc.title || '');
+      return 'ok';
     },
   }));
 
@@ -246,12 +269,16 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     setAddingFolder(false);
   };
 
-  const commitRename = (folderId: string) => {
+  const commitRename = (target: TreeSelection) => {
     const trimmed = editingName.trim();
     if (trimmed) {
-      onRenameFolder(folderId, trimmed);
+      if (target.kind === 'folder') {
+        onRenameFolder(target.id, trimmed);
+      } else {
+        onRenameDoc(target.id, trimmed);
+      }
     }
-    setEditingFolderId(null);
+    setEditingItem(null);
     setEditingName('');
   };
 
@@ -434,6 +461,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     const isDragging = dragging?.kind === 'doc' && dragging.id === doc.id;
     const isDropBefore = docDrop?.docId === doc.id && docDrop.position === 'before';
     const isDropAfter = docDrop?.docId === doc.id && docDrop.position === 'after';
+    const isEditingThisDoc = editingItem?.kind === 'doc' && editingItem.id === doc.id;
 
     const isTouchDragging =
       touchDrag?.payload.kind === 'doc' && touchDrag.payload.id === doc.id;
@@ -441,18 +469,19 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     return (
       <div
         key={doc.id}
-        draggable
+        draggable={!isEditingThisDoc}
         onDragStart={(e) => handleDocDragStart(e, doc.id)}
         onDragEnd={clearDragState}
         onDragOver={(e) => handleDocDragOver(e, folderId, doc.id)}
         onDrop={(e) => handleDocDrop(e, folderId, doc.id)}
-        onTouchStart={(e) =>
+        onTouchStart={(e) => {
+          if (isEditingThisDoc) return;
           handleRowTouchStart(
             e,
             { kind: 'doc', id: doc.id },
             doc.title || '无标题文档'
-          )
-        }
+          );
+        }}
         onTouchMove={handleRowTouchMove}
         onTouchEnd={cancelTouchHold}
         onTouchCancel={cancelTouchHold}
@@ -473,25 +502,42 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           <div className="pointer-events-none absolute -bottom-[1px] left-9 right-2 h-[2px] bg-[var(--fei-text-primary)] rounded-full z-10" />
         )}
 
-        <button
-          type="button"
-          onClick={() => {
-            if (suppressClickRef.current) return;
-            if (pickCutMode || cutItem) {
-              onSelectTarget({ kind: 'doc', id: doc.id });
-              return;
-            }
-            // First click selects the document; second click on an already-selected document opens it
-            if (isTarget) {
-              onOpenDoc(doc.id);
-            } else {
-              onSelectTarget({ kind: 'doc', id: doc.id });
-            }
-          }}
-          className="flex-1 min-w-0 text-left text-[15px] leading-snug truncate py-2.5 text-[var(--fei-text-primary)]"
-        >
-          {doc.title || '无标题文档'}
-        </button>
+        {isEditingThisDoc ? (
+          <input
+            autoFocus
+            value={editingName}
+            onChange={(e) => setEditingName(e.target.value)}
+            onBlur={() => commitRename({ kind: 'doc', id: doc.id })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitRename({ kind: 'doc', id: doc.id });
+              if (e.key === 'Escape') {
+                setEditingItem(null);
+                setEditingName('');
+              }
+            }}
+            className="flex-1 min-w-0 bg-transparent border-b border-[var(--fei-text-muted)] text-[15px] leading-snug text-[var(--fei-text-primary)] outline-none py-1 select-text"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              if (suppressClickRef.current) return;
+              if (pickCutMode || cutItem) {
+                onSelectTarget({ kind: 'doc', id: doc.id });
+                return;
+              }
+              // First click selects the document; second click on an already-selected document opens it
+              if (isTarget) {
+                onOpenDoc(doc.id);
+              } else {
+                onSelectTarget({ kind: 'doc', id: doc.id });
+              }
+            }}
+            className="flex-1 min-w-0 text-left text-[15px] leading-snug truncate py-2.5 text-[var(--fei-text-primary)]"
+          >
+            {doc.title || '无标题文档'}
+          </button>
+        )}
 
         {doc.encrypted && (
           <span
@@ -599,6 +645,9 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           const isTouchDraggingFolder =
             touchDrag?.payload.kind === 'folder' && touchDrag.payload.id === folder.id;
 
+          const isEditingThisFolder =
+            editingItem?.kind === 'folder' && editingItem.id === folder.id;
+
           return (
             <div key={folder.id} className="relative space-y-0.5">
               {isFolderDropBefore && (
@@ -607,13 +656,13 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
 
               {/* Directory Header (Draggable, no leading dots) */}
               <div
-                draggable={editingFolderId !== folder.id}
+                draggable={!isEditingThisFolder}
                 onDragStart={(e) => handleFolderDragStart(e, folder.id)}
                 onDragEnd={clearDragState}
                 onDragOver={(e) => handleFolderDragOver(e, folder.id)}
                 onDrop={(e) => handleFolderDrop(e, folder.id)}
                 onTouchStart={(e) => {
-                  if (editingFolderId === folder.id) return;
+                  if (isEditingThisFolder) return;
                   handleRowTouchStart(e, { kind: 'folder', id: folder.id }, folder.name);
                 }}
                 onTouchMove={handleRowTouchMove}
@@ -645,34 +694,27 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                   )}
                 </button>
 
-                {editingFolderId === folder.id ? (
+                {isEditingThisFolder ? (
                   <input
                     autoFocus
                     value={editingName}
                     onChange={(e) => setEditingName(e.target.value)}
-                    onBlur={() => commitRename(folder.id)}
+                    onBlur={() => commitRename({ kind: 'folder', id: folder.id })}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') commitRename(folder.id);
-                      if (e.key === 'Escape') setEditingFolderId(null);
+                      if (e.key === 'Enter') commitRename({ kind: 'folder', id: folder.id });
+                      if (e.key === 'Escape') {
+                        setEditingItem(null);
+                        setEditingName('');
+                      }
                     }}
-                    className="flex-1 min-w-0 bg-transparent border-b border-[var(--fei-text-muted)] text-[14.5px] font-medium text-[var(--fei-text-primary)] outline-none py-0.5"
+                    className="flex-1 min-w-0 bg-transparent border-b border-[var(--fei-text-muted)] text-[14.5px] font-medium text-[var(--fei-text-primary)] outline-none py-0.5 select-text"
                   />
                 ) : (
                   <button
                     type="button"
                     onClick={() => {
                       if (suppressClickRef.current) return;
-                      if (pickCutMode || cutItem) {
-                        onSelectTarget({ kind: 'folder', id: folder.id });
-                        return;
-                      }
-                      // First click selects the directory; clicking an already-selected directory enters rename mode
-                      if (isTarget) {
-                        setEditingFolderId(folder.id);
-                        setEditingName(folder.name);
-                      } else {
-                        onSelectTarget({ kind: 'folder', id: folder.id });
-                      }
+                      onSelectTarget({ kind: 'folder', id: folder.id });
                     }}
                     className="flex-1 min-w-0 text-left text-[14.5px] font-medium truncate py-2 text-[var(--fei-text-primary)]"
                   >
@@ -680,8 +722,12 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                   </button>
                 )}
 
-                <span className="mr-1.5 min-w-[16px] text-center text-[12px] font-code tabular-nums text-[var(--fei-text-muted)] group-hover:hidden shrink-0">
-                  {folderDocs.length}
+                <span
+                  className={`mr-1.5 min-w-[16px] text-center text-[12px] text-[var(--fei-text-muted)] group-hover:hidden shrink-0 ${
+                    folderDocs.length === 0 ? '' : 'font-code tabular-nums'
+                  }`}
+                >
+                  {folderDocs.length === 0 ? '空' : folderDocs.length}
                 </span>
 
                 <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
@@ -702,7 +748,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                     title="重命名目录"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setEditingFolderId(folder.id);
+                      setEditingItem({ kind: 'folder', id: folder.id });
                       setEditingName(folder.name);
                     }}
                     className="w-7 h-7 inline-flex items-center justify-center rounded text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] transition-colors"

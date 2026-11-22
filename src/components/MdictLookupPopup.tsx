@@ -1,8 +1,20 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { BookA, X } from 'lucide-react';
 import { MdictDictionarySummary, MdictLookupResult } from '../types';
 import { sanitizeMdictCss } from '../utils/mdict';
 import { stripDictExt } from '../utils/mdictStorage';
+
+export interface MdictLookupPopupHandle {
+  pageUp: () => void;
+  pageDown: () => void;
+}
 
 interface MdictLookupPopupProps {
   queryWord: string;
@@ -53,6 +65,9 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
   });
 
   doc.querySelectorAll('*').forEach((el) => {
+    if (el.tagName === 'FONT') {
+      el.removeAttribute('size');
+    }
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase();
       const val = attr.value.trim();
@@ -66,8 +81,18 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
       ) {
         el.removeAttribute(attr.name);
       }
-      if (name === 'style' && /expression\s*\(|javascript:/i.test(val)) {
-        el.removeAttribute(attr.name);
+      if (name === 'style') {
+        if (/expression\s*\(|javascript:/i.test(val)) {
+          el.removeAttribute(attr.name);
+        } else {
+          // Strip inline font-size declarations so every element uses the unified popup font size
+          const cleanedStyle = val.replace(/(^|;)\s*font-size\s*:[^;]*(;|$)/gi, '$1').trim();
+          if (cleanedStyle) {
+            el.setAttribute('style', cleanedStyle);
+          } else {
+            el.removeAttribute('style');
+          }
+        }
       }
     }
   });
@@ -121,6 +146,9 @@ const MdictShadowDefinition: React.FC<{
     if (!host) return;
     if (!shadowRef.current) {
       shadowRef.current = host.attachShadow({ mode: 'open' });
+      shadowRef.current.addEventListener('contextmenu', (evt) => {
+        evt.preventDefault();
+      });
       shadowRef.current.addEventListener('click', (evt) => {
         const target = evt.target as HTMLElement | null;
         const anchor = target?.closest('a[href]') as HTMLAnchorElement | null;
@@ -145,12 +173,14 @@ const MdictShadowDefinition: React.FC<{
         color: var(--fei-text-primary, #000000);
         font-family: var(--font-doc-body, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif);
         font-size: ${fontSize}px;
-        line-height: 1.58;
+        line-height: 1.56;
         word-break: break-word;
+        -webkit-touch-callout: none;
       }
       *, *::before, *::after {
         box-sizing: border-box;
         max-width: 100%;
+        -webkit-touch-callout: none;
       }
       .mdx-surface, .mdx-entry {
         font-size: ${fontSize}px;
@@ -177,10 +207,14 @@ const MdictShadowDefinition: React.FC<{
       img { max-width: 100%; height: auto; }
     `;
 
-    // Enforce consistent document font size over fixed-px dictionary stylesheets & adapt dark contrast
+    // Enforce one uniform font size across every element in the definition body
     const fontScaleOverride = `
-      .mdx-surface {
+      .mdx-surface,
+      .mdx-surface *,
+      .mdx-surface *::before,
+      .mdx-surface *::after {
         font-size: ${fontSize}px !important;
+        line-height: 1.56 !important;
       }
     `;
 
@@ -218,129 +252,170 @@ const MdictShadowDefinition: React.FC<{
   return <div ref={hostRef} />;
 };
 
-export const MdictLookupPopup: React.FC<MdictLookupPopupProps> = ({
-  queryWord,
-  placement,
-  fontSize = 16,
-  loading,
-  result,
-  matchCount,
-  error,
-  dictionaries,
-  activeDictId,
-  onCycleDict,
-  onLookupWord,
-  onClose,
-}) => {
-  const displayedDict =
-    (result && dictionaries.find((d) => d.id === result.dictId)) ||
-    dictionaries.find((d) => d.id === activeDictId) ||
-    dictionaries[0] ||
-    null;
-  const displayedDictName = displayedDict
-    ? stripDictExt(displayedDict.fileName) || displayedDict.title
-    : result?.dictTitle || '';
-  const showMappedHeadword =
-    result &&
-    result.matchedHeadword &&
-    result.matchedHeadword.toLowerCase() !== queryWord.toLowerCase();
+export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPopupProps>(
+  function MdictLookupPopup(
+    {
+      queryWord,
+      placement,
+      fontSize = 16,
+      loading,
+      result,
+      matchCount,
+      error,
+      dictionaries,
+      activeDictId,
+      onCycleDict,
+      onLookupWord,
+      onClose,
+    },
+    ref
+  ) {
+    const bodyScrollRef = useRef<HTMLDivElement>(null);
+    // Uniform definition text size, slightly smaller than the current document font size
+    const popupFontSize = Math.max(12, Math.round(fontSize - 2));
 
-  return (
-    <div
-      data-mdict-popup="true"
-      onPointerDown={(e) => e.stopPropagation()}
-      onTouchStart={(e) => e.stopPropagation()}
-      onClick={(e) => e.stopPropagation()}
-      className={`fixed left-3 right-3 z-40 flex justify-center pointer-events-none ${
-        placement === 'top'
-          ? 'top-[max(0.75rem,env(safe-area-inset-top))] animate-mdict-down'
-          : 'bottom-[64px] animate-mdict-up'
-      }`}
-    >
-      <div className="pointer-events-auto w-full max-w-[720px] max-h-[min(40vh,340px)] flex flex-col bg-[#FFFFFF] dark:bg-[#242424] border-[1.5px] border-[#262626] dark:border-[#787878] rounded-2xl shadow-none dark:ring-1 dark:ring-white/10 dark:shadow-[0_14px_36px_-4px_rgba(0,0,0,0.75)] overflow-hidden text-[var(--fei-text-primary)]">
-        {/* Subtle handle bar when docked at bottom */}
-        {placement === 'bottom' && (
-          <div className="flex justify-center pt-1.5 pb-0.5 bg-[#FFFFFF] dark:bg-[#2A2A2A] shrink-0">
-            <span className="w-7 h-[3px] rounded-full bg-[#B0B0B0] dark:bg-[#5E5E5E]" />
-          </div>
-        )}
+    useEffect(() => {
+      if (bodyScrollRef.current) {
+        bodyScrollRef.current.scrollTop = 0;
+      }
+    }, [queryWord, result]);
 
-        {/* Header Band */}
-        <div className="px-3.5 py-2 bg-[#FFFFFF] dark:bg-[#2A2A2A] border-b border-[#BDBDBD] dark:border-[#4A4A4A] flex items-center justify-between gap-2 shrink-0">
-          <div className="flex items-baseline gap-1.5 min-w-0">
-            <BookA
-              className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0 self-center"
-              strokeWidth={1.75}
-            />
-            <span className="font-doc-body text-[15px] font-semibold text-[var(--fei-text-primary)] truncate">
-              {queryWord}
-            </span>
-            {showMappedHeadword && (
-              <span className="font-doc-body text-[12px] text-[var(--fei-text-muted)] shrink-0">
-                → {result.matchedHeadword}
+    useImperativeHandle(ref, () => ({
+      pageUp() {
+        const el = bodyScrollRef.current;
+        if (!el) return;
+        const step = Math.max(40, el.clientHeight - Math.round(popupFontSize * 1.6));
+        el.scrollTop = Math.max(0, el.scrollTop - step);
+      },
+      pageDown() {
+        const el = bodyScrollRef.current;
+        if (!el) return;
+        const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+        const step = Math.max(40, el.clientHeight - Math.round(popupFontSize * 1.6));
+        el.scrollTop = Math.min(maxScroll, el.scrollTop + step);
+      },
+    }));
+
+    const displayedDict =
+      (result && dictionaries.find((d) => d.id === result.dictId)) ||
+      dictionaries.find((d) => d.id === activeDictId) ||
+      dictionaries[0] ||
+      null;
+    const displayedDictName = displayedDict
+      ? stripDictExt(displayedDict.fileName) || displayedDict.title
+      : result?.dictTitle || '';
+    const showMappedHeadword =
+      result &&
+      result.matchedHeadword &&
+      result.matchedHeadword.toLowerCase() !== queryWord.toLowerCase();
+
+    return (
+      <div
+        data-mdict-popup="true"
+        onPointerDown={(e) => e.stopPropagation()}
+        onTouchStart={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.preventDefault()}
+        className={`fixed left-3 right-3 z-40 flex justify-center pointer-events-none ${
+          placement === 'top'
+            ? 'top-[max(0.75rem,env(safe-area-inset-top))] animate-mdict-down'
+            : 'bottom-[64px] animate-mdict-up'
+        }`}
+      >
+        <div className="pointer-events-auto w-full max-w-[720px] max-h-[min(40vh,340px)] flex flex-col bg-[#FFFFFF] dark:bg-[#242424] border-[1.5px] border-[#262626] dark:border-[#787878] rounded-2xl shadow-none dark:ring-1 dark:ring-white/10 dark:shadow-[0_14px_36px_-4px_rgba(0,0,0,0.75)] overflow-hidden text-[var(--fei-text-primary)]">
+          {/* Subtle handle bar when docked at bottom */}
+          {placement === 'bottom' && (
+            <div className="flex justify-center pt-1.5 pb-0.5 bg-[#FFFFFF] dark:bg-[#2A2A2A] shrink-0">
+              <span className="w-7 h-[3px] rounded-full bg-[#B0B0B0] dark:bg-[#5E5E5E]" />
+            </div>
+          )}
+
+          {/* Header Band */}
+          <div className="px-3.5 py-2 bg-[#FFFFFF] dark:bg-[#2A2A2A] border-b border-[#BDBDBD] dark:border-[#4A4A4A] flex items-center justify-between gap-2 shrink-0 select-none">
+            <div className="flex items-baseline gap-1.5 min-w-0">
+              <BookA
+                className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0 self-center"
+                strokeWidth={1.75}
+              />
+              <span className="font-doc-body text-[15px] font-semibold text-[var(--fei-text-primary)] truncate">
+                {queryWord}
               </span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-1.5 shrink-0">
-            {displayedDictName ? (
-              matchCount > 1 ? (
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={onCycleDict}
-                  title="点击切换下一个包含该词的词典"
-                  aria-label={`当前词典 ${displayedDictName}，点击切换词典`}
-                  className="text-[12px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate max-w-[160px] hover:opacity-75 transition-opacity cursor-pointer"
-                >
-                  {displayedDictName}
-                </button>
-              ) : (
-                <span className="text-[12px] text-[var(--fei-text-muted)] truncate max-w-[160px]">
-                  {displayedDictName}
+              {showMappedHeadword && (
+                <span className="font-doc-body text-[12px] text-[var(--fei-text-muted)] shrink-0">
+                  → {result.matchedHeadword}
                 </span>
-              )
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {displayedDictName ? (
+                matchCount > 1 ? (
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={onCycleDict}
+                    title="点击切换下一个包含该词的词典"
+                    aria-label={`当前词典 ${displayedDictName}，点击切换词典`}
+                    className="text-[12px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate max-w-[160px] hover:opacity-75 transition-opacity cursor-pointer"
+                  >
+                    {displayedDictName}
+                  </button>
+                ) : (
+                  <span className="text-[12px] text-[var(--fei-text-muted)] truncate max-w-[160px]">
+                    {displayedDictName}
+                  </span>
+                )
+              ) : null}
+
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onClose}
+                aria-label="关闭释义"
+                className="w-7 h-7 -mr-1 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Scrollable Definition Body */}
+          <div
+            ref={bodyScrollRef}
+            className="flex-1 overflow-y-auto px-3.5 py-2.5 bg-[#FFFFFF] dark:bg-[#242424]"
+          >
+            {loading ? (
+              <div
+                style={{ fontSize: `${popupFontSize}px` }}
+                className="py-3 text-[var(--fei-text-muted)]"
+              >
+                正在查词…
+              </div>
+            ) : error ? (
+              <div
+                style={{ fontSize: `${popupFontSize}px` }}
+                className="py-3 text-[var(--fei-text-muted)]"
+              >
+                {error}
+              </div>
+            ) : result && result.htmlDefinitions.length > 0 ? (
+              <MdictShadowDefinition
+                htmlDefinitions={result.htmlDefinitions}
+                dictCssText={result.dictCssText}
+                fontSize={popupFontSize}
+                onLookupWord={onLookupWord}
+              />
             ) : null}
-
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={onClose}
-              aria-label="关闭释义"
-              className="w-7 h-7 -mr-1 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
           </div>
-        </div>
 
-        {/* Scrollable Definition Body */}
-        <div className="flex-1 overflow-y-auto px-3.5 py-2.5 bg-[#FFFFFF] dark:bg-[#242424]">
-          {loading ? (
-            <div style={{ fontSize: `${fontSize}px` }} className="py-3 text-[var(--fei-text-muted)]">
-              正在查词…
+          {/* Subtle handle bar when docked at top */}
+          {placement === 'top' && (
+            <div className="flex justify-center pt-0.5 pb-1.5 bg-[#FFFFFF] dark:bg-[#242424] shrink-0">
+              <span className="w-7 h-[3px] rounded-full bg-[#B0B0B0] dark:bg-[#5E5E5E]" />
             </div>
-          ) : error ? (
-            <div style={{ fontSize: `${fontSize}px` }} className="py-3 text-[var(--fei-text-muted)]">
-              {error}
-            </div>
-          ) : result && result.htmlDefinitions.length > 0 ? (
-            <MdictShadowDefinition
-              htmlDefinitions={result.htmlDefinitions}
-              dictCssText={result.dictCssText}
-              fontSize={fontSize}
-              onLookupWord={onLookupWord}
-            />
-          ) : null}
+          )}
         </div>
-
-        {/* Subtle handle bar when docked at top */}
-        {placement === 'top' && (
-          <div className="flex justify-center pt-0.5 pb-1.5 bg-[#FFFFFF] dark:bg-[#242424] shrink-0">
-            <span className="w-7 h-[3px] rounded-full bg-[#B0B0B0] dark:bg-[#5E5E5E]" />
-          </div>
-        )}
       </div>
-    </div>
-  );
-};
+    );
+  }
+);
