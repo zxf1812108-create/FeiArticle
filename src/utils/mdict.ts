@@ -133,6 +133,7 @@ function fastDecryptInPlace(buf: Uint8Array, key: Uint8Array): void {
 // ---------------------------------------------------------------------------
 
 export function lzo1xDecompress(input: Uint8Array, expectedSize = 0): Uint8Array {
+  if (input.length === 0) return new Uint8Array(0);
   let out = new Uint8Array(Math.max(expectedSize, input.length * 4, 1024));
   let ip = 0;
   let op = 0;
@@ -147,72 +148,75 @@ export function lzo1xDecompress(input: Uint8Array, expectedSize = 0): Uint8Array
   };
 
   const copyLiterals = (count: number) => {
-    ensureCapacity(count);
-    for (let i = 0; i < count; i++) {
+    const safeCount = Math.min(count, input.length - ip);
+    if (safeCount <= 0) return;
+    ensureCapacity(safeCount);
+    for (let i = 0; i < safeCount; i++) {
       out[op++] = input[ip++];
     }
   };
 
   const copyMatch = (mPos: number, mLen: number) => {
+    if (mPos < 0 || mLen <= 0) {
+      throw new Error('词库 LZO1X 解压偏移无效');
+    }
     ensureCapacity(mLen);
+    let src = mPos;
     for (let i = 0; i < mLen; i++) {
-      out[op++] = out[mPos++];
+      out[op++] = out[src++];
     }
   };
 
-  let t = input[ip++];
-  let skipFirstMatchCheck = false;
+  type LzoState = 'top' | 'first_literal_run' | 'match' | 'match_done' | 'match_next';
+  let state: LzoState = 'top';
+  let t = 0;
 
-  if (t > 17) {
-    t -= 17;
+  if (input[ip] > 17) {
+    t = input[ip++] - 17;
     if (t < 4) {
-      copyLiterals(t);
-      t = input[ip++];
+      state = 'match_next';
     } else {
       copyLiterals(t);
-      skipFirstMatchCheck = true;
+      state = 'first_literal_run';
     }
   }
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    if (!skipFirstMatchCheck) {
-      if (t < 16) {
-        if (t === 0) {
-          while (input[ip] === 0) {
-            t += 255;
-            ip++;
-          }
-          t += 15 + input[ip++];
-        }
-        copyLiterals(t + 3);
-        if (ip >= input.length) break;
-      }
-    }
-    skipFirstMatchCheck = false;
-
-    if (ip >= input.length) break;
-    if (t < 16) {
+    if (state === 'top') {
+      if (ip >= input.length) break;
       t = input[ip++];
-      if (t < 16) {
-        const mPos = op - 0x0801 - (t >> 2) - (input[ip++] << 2);
-        copyMatch(mPos, 3);
-        t = input[ip - 2] & 3;
-        if (t !== 0) {
-          copyLiterals(t);
-          if (ip >= input.length) break;
-          t = input[ip++];
-          continue;
-        }
-        if (ip >= input.length) break;
-        t = input[ip++];
+      if (t >= 16) {
+        state = 'match';
         continue;
       }
+      if (t === 0) {
+        while (ip < input.length && input[ip] === 0) {
+          t += 255;
+          ip++;
+        }
+        if (ip >= input.length) break;
+        t += 15 + input[ip++];
+      }
+      copyLiterals(t + 3);
+      state = 'first_literal_run';
+      continue;
     }
 
-    // Match loop
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    if (state === 'first_literal_run') {
+      if (ip >= input.length) break;
+      t = input[ip++];
+      if (t >= 16) {
+        state = 'match';
+        continue;
+      }
+      const mPos = op - 0x0801 - (t >> 2) - (input[ip++] << 2);
+      copyMatch(mPos, 3);
+      state = 'match_done';
+      continue;
+    }
+
+    if (state === 'match') {
       let mPos: number;
       let mLen: number;
       if (t >= 64) {
@@ -221,7 +225,7 @@ export function lzo1xDecompress(input: Uint8Array, expectedSize = 0): Uint8Array
       } else if (t >= 32) {
         t &= 31;
         if (t === 0) {
-          while (input[ip] === 0) {
+          while (ip < input.length && input[ip] === 0) {
             t += 255;
             ip++;
           }
@@ -234,7 +238,7 @@ export function lzo1xDecompress(input: Uint8Array, expectedSize = 0): Uint8Array
         mPos = op - ((t & 8) << 11);
         t &= 7;
         if (t === 0) {
-          while (input[ip] === 0) {
+          while (ip < input.length && input[ip] === 0) {
             t += 255;
             ip++;
           }
@@ -253,16 +257,25 @@ export function lzo1xDecompress(input: Uint8Array, expectedSize = 0): Uint8Array
       }
 
       copyMatch(mPos, mLen);
-
-      t = input[ip - 2] & 3;
-      if (t === 0) break;
-      copyLiterals(t);
-      if (ip >= input.length) return out.subarray(0, op);
-      t = input[ip++];
+      state = 'match_done';
+      continue;
     }
 
+    if (state === 'match_done') {
+      t = input[ip - 2] & 3;
+      if (t === 0) {
+        state = 'top';
+      } else {
+        state = 'match_next';
+      }
+      continue;
+    }
+
+    // state === 'match_next'
+    copyLiterals(t);
     if (ip >= input.length) break;
     t = input[ip++];
+    state = 'match';
   }
 
   return out.subarray(0, op);
@@ -318,6 +331,69 @@ function normalizeEncoding(raw?: string): MdictEncoding {
 function decodeText(bytes: Uint8Array, encoding: MdictEncoding): string {
   const decoder = new TextDecoder(encoding);
   return decoder.decode(bytes).replace(/\0+$/, '');
+}
+
+function trimTrailingNullBytes(bytes: Uint8Array, isUtf16: boolean): Uint8Array {
+  let end = bytes.length;
+  if (isUtf16) {
+    while (end >= 2 && bytes[end - 1] === 0 && bytes[end - 2] === 0) {
+      end -= 2;
+    }
+    if ((end & 1) === 1 && bytes[end - 1] === 0) {
+      end -= 1;
+    }
+  } else {
+    while (end > 0 && bytes[end - 1] === 0) {
+      end -= 1;
+    }
+  }
+  return end === bytes.length ? bytes : bytes.subarray(0, end);
+}
+
+function decodeRecordText(bytes: Uint8Array, encoding: MdictEncoding): string {
+  if (bytes.length === 0) return '';
+
+  // Respect explicit BOM if present in record payload
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    const clean = trimTrailingNullBytes(bytes.subarray(3), false);
+    return new TextDecoder('utf-8').decode(clean).replace(/\0+$/, '');
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    const clean = trimTrailingNullBytes(bytes.subarray(2), true);
+    return new TextDecoder('utf-16le').decode(clean).replace(/\0+$/, '');
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    const clean = trimTrailingNullBytes(bytes.subarray(2), true);
+    return new TextDecoder('utf-16be').decode(clean).replace(/\0+$/, '');
+  }
+
+  const isUtf16 = encoding === 'utf-16le';
+  const clean = trimTrailingNullBytes(bytes, isUtf16);
+  if (clean.length === 0) return '';
+
+  if (encoding === 'utf-8') {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(clean).replace(/\0+$/, '');
+    } catch {
+      // Some legacy Chinese .mdx files declare UTF-8 (or omit Encoding) while storing GBK/GB18030 records
+      return new TextDecoder('gb18030').decode(clean).replace(/\0+$/, '');
+    }
+  }
+
+  if (encoding === 'gb18030' || encoding === 'big5') {
+    const primary = new TextDecoder(encoding).decode(clean).replace(/\0+$/, '');
+    if (primary.includes('\uFFFD')) {
+      try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(clean).replace(/\0+$/, '');
+      } catch {
+        return primary;
+      }
+    }
+    return primary;
+  }
+
+  const evenSlice = (clean.length & 1) === 1 ? clean.subarray(0, clean.length - 1) : clean;
+  return new TextDecoder(encoding).decode(evenSlice).replace(/\0+$/, '');
 }
 
 function unescapeXmlEntities(s: string): string {
@@ -1208,7 +1284,7 @@ async function readRecordRangeText(
     pos += c.length;
   }
 
-  return decodeText(combined, meta.encoding).trim();
+  return decodeRecordText(combined, meta.encoding).trim();
 }
 
 async function lookupExactWord(
