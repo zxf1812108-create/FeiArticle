@@ -8,7 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { CloudDownload } from 'lucide-react';
+import { CloudDownload, Copy } from 'lucide-react';
 import { ArticleDoc } from '../types';
 import { extractEnglishLookupWord } from '../utils/mdict';
 import { DocOutlineModal } from './DocOutlineModal';
@@ -21,6 +21,7 @@ import {
 } from '../utils/docAnchor';
 import {
   setNativeVolumeKeyIntercept,
+  subscribeNativeTouchState,
   subscribeNativeVolumeKeys,
   VolumeKeyDirection,
 } from '../utils/readerNative';
@@ -51,13 +52,22 @@ interface MinimalDocViewProps {
   autoHyphenate?: boolean;
   hasActiveMdict?: boolean;
   isMdictPopupOpen?: boolean;
+  isMdictLookupPending?: boolean;
   onEnglishWordSelected?: (payload: { word: string; placement: 'top' | 'bottom' }) => void;
   onClearMdictLookup?: () => void;
+  onCopyFeedback?: (copied: boolean) => void;
   onMdictPopupVolumeKey?: (direction: VolumeKeyDirection) => void;
   onViewStateChange: (state: DocViewStateSnapshot) => void;
   onReadProgressChange?: (progress: number) => void;
   onReadMetricsChange?: (metrics: DocReadMetrics) => void;
   onFetchRemoteBody: () => Promise<void>;
+}
+
+interface CopyPopoverState {
+  left: number;
+  top: number;
+  placement: 'above' | 'below';
+  text: string;
 }
 
 interface VisualLine {
@@ -505,8 +515,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       autoHyphenate = false,
       hasActiveMdict = false,
       isMdictPopupOpen = false,
+      isMdictLookupPending = false,
       onEnglishWordSelected,
       onClearMdictLookup,
+      onCopyFeedback,
       onMdictPopupVolumeKey,
       onViewStateChange,
       onReadProgressChange,
@@ -525,6 +537,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const articleOverflowRef = useRef(false);
     articleOverflowRef.current = articleOverflow;
     const [showOutline, setShowOutline] = useState(false);
+    const showOutlineRef = useRef(false);
+    showOutlineRef.current = showOutline;
+    const [copyPopover, setCopyPopover] = useState<CopyPopoverState | null>(null);
+    const copyPopoverRef = useRef<CopyPopoverState | null>(null);
+    copyPopoverRef.current = copyPopover;
     const [topClipPx, setTopClipPx] = useState(0);
     const [bottomClipPx, setBottomClipPx] = useState(0);
     const topClipPxRef = useRef(0);
@@ -546,9 +563,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const hadSelectionOnDownRef = useRef(false);
     const lastPointerDownAtRef = useRef(0);
     const lastTouchStartAtRef = useRef(0);
-    const isPointerActiveRef = useRef(false);
+    const nativeTouchActiveRef = useRef(false);
+    const domTouchActiveRef = useRef(false);
+    const domMouseActiveRef = useRef(false);
     const lastPopupOpenedAtRef = useRef(0);
-    const popupJustRequestedRef = useRef(false);
+    const lastSelectionClearedOnReleaseAtRef = useRef(0);
     const selectionCheckTimerRef = useRef<number | null>(null);
     const clearSelectionTimerRef = useRef<number | null>(null);
     const lastReportedProgressRef = useRef<number>(-1);
@@ -558,17 +577,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     hasActiveMdictRef.current = hasActiveMdict;
     const isMdictPopupOpenRef = useRef(isMdictPopupOpen);
     isMdictPopupOpenRef.current = isMdictPopupOpen;
-    const prevMdictOpenRef = useRef(isMdictPopupOpen);
-    if (prevMdictOpenRef.current !== isMdictPopupOpen) {
-      prevMdictOpenRef.current = isMdictPopupOpen;
-      if (!isMdictPopupOpen) {
-        popupJustRequestedRef.current = false;
-      }
-    }
+    const isMdictLookupPendingRef = useRef(isMdictLookupPending);
+    isMdictLookupPendingRef.current = isMdictLookupPending;
     const onEnglishWordSelectedRef = useRef(onEnglishWordSelected);
     onEnglishWordSelectedRef.current = onEnglishWordSelected;
     const onClearMdictLookupRef = useRef(onClearMdictLookup);
     onClearMdictLookupRef.current = onClearMdictLookup;
+    const onCopyFeedbackRef = useRef(onCopyFeedback);
+    onCopyFeedbackRef.current = onCopyFeedback;
     const onMdictPopupVolumeKeyRef = useRef(onMdictPopupVolumeKey);
     onMdictPopupVolumeKeyRef.current = onMdictPopupVolumeKey;
     const onViewStateChangeRef = useRef(onViewStateChange);
@@ -853,6 +869,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       setFetchError(null);
       setArticleOverflow(false);
       setShowOutline(false);
+      setCopyPopover(null);
       topClipPxRef.current = 0;
       bottomClipPxRef.current = 0;
       setTopClipPx(0);
@@ -1267,6 +1284,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         syncMountedWindowToScroll(el.scrollTop, el.clientHeight);
       }
       scheduleEdgeClipUpdate();
+      if (copyPopoverRef.current) {
+        syncCopyPopover();
+      }
       const isRecentProgrammatic = performance.now() - lastProgrammaticScrollAtRef.current < 140;
       if (isRecentProgrammatic) {
         return;
@@ -1281,25 +1301,209 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       scheduleEmitViewState(260);
     };
 
-    const isPopupActive = () =>
-      isMdictPopupOpenRef.current || popupJustRequestedRef.current;
+    const isUserPressing = () =>
+      nativeTouchActiveRef.current || domTouchActiveRef.current || domMouseActiveRef.current;
 
-    const scheduleClearSelectionIfPopupOpen = (delayMs = 80) => {
+    const computeSelectionCopyPopover = (): CopyPopoverState | null => {
+      const articleEl = articleRef.current;
+      const scrollEl = scrollRef.current;
+      const sel = window.getSelection();
+      if (!articleEl || !scrollEl || !sel || sel.isCollapsed || sel.rangeCount === 0) {
+        return null;
+      }
+
+      const cleanText = sel.toString().replace(/\u00AD/g, '');
+      if (!cleanText.trim()) return null;
+
+      const range = sel.getRangeAt(0);
+      if (!articleEl.contains(range.commonAncestorContainer)) {
+        return null;
+      }
+
+      const clientRects = Array.from(range.getClientRects()).filter(
+        (r) => r.width > 0.5 && r.height > 0.5
+      );
+      const boundingRect = range.getBoundingClientRect();
+      const rects =
+        clientRects.length > 0 ? clientRects : boundingRect.height > 0 ? [boundingRect] : [];
+      if (rects.length === 0) return null;
+
+      const containerRect = scrollEl.getBoundingClientRect();
+      let minTop = Infinity;
+      let maxBottom = -Infinity;
+      for (const r of rects) {
+        if (r.top < minTop) minTop = r.top;
+        if (r.bottom > maxBottom) maxBottom = r.bottom;
+      }
+
+      if (maxBottom < containerRect.top || minTop > containerRect.bottom) {
+        return null;
+      }
+
+      let firstLineLeft = Infinity;
+      let firstLineRight = -Infinity;
+      for (const r of rects) {
+        if (r.top <= minTop + 6) {
+          if (r.left < firstLineLeft) firstLineLeft = r.left;
+          if (r.right > firstLineRight) firstLineRight = r.right;
+        }
+      }
+
+      const rawCenterX =
+        firstLineLeft < firstLineRight
+          ? (firstLineLeft + firstLineRight) / 2
+          : (boundingRect.left + boundingRect.right) / 2;
+      const vw = window.innerWidth || 360;
+      const halfPopupWidth = 46;
+      const left = Math.min(
+        vw - halfPopupWidth - 12,
+        Math.max(halfPopupWidth + 12, Math.round(rawCenterX))
+      );
+
+      const visibleTopAnchor = Math.max(minTop, containerRect.top);
+      const minClearTop = Math.max(12, containerRect.top - 12) + 46;
+      if (visibleTopAnchor >= minClearTop) {
+        return {
+          left,
+          top: Math.round(visibleTopAnchor - 10),
+          placement: 'above',
+          text: cleanText,
+        };
+      }
+
+      const vh = window.innerHeight || 800;
+      const belowTop = Math.min(
+        vh - 110,
+        Math.round(Math.min(maxBottom, containerRect.bottom) + 10)
+      );
+      return {
+        left,
+        top: belowTop,
+        placement: 'below',
+        text: cleanText,
+      };
+    };
+
+    const syncCopyPopover = () => {
+      if (
+        isUserPressing() ||
+        isMdictPopupOpenRef.current ||
+        isMdictLookupPendingRef.current ||
+        showOutlineRef.current
+      ) {
+        setCopyPopover((prev) => (prev === null ? prev : null));
+        return;
+      }
+      const next = computeSelectionCopyPopover();
+      setCopyPopover((prev) => {
+        if (prev === null && next === null) return prev;
+        if (
+          prev &&
+          next &&
+          prev.left === next.left &&
+          prev.top === next.top &&
+          prev.placement === next.placement &&
+          prev.text === next.text
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    };
+
+    const handleCopyPopoverClick = async (e: React.MouseEvent<HTMLButtonElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const liveSel = window.getSelection()?.toString() || '';
+      const textToCopy = (liveSel || copyPopoverRef.current?.text || '').replace(/\u00AD/g, '');
+      setCopyPopover(null);
+
+      let copied = false;
+      if (textToCopy.trim()) {
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(textToCopy);
+            copied = true;
+          }
+        } catch {
+          copied = false;
+        }
+
+        if (!copied) {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = textToCopy;
+            ta.setAttribute('readonly', 'true');
+            ta.style.position = 'fixed';
+            ta.style.top = '-9999px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            ta.setSelectionRange(0, textToCopy.length);
+            copied = document.execCommand('copy');
+            document.body.removeChild(ta);
+          } catch {
+            copied = false;
+          }
+        }
+      }
+
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        // ignore
+      }
+      lastSelectionClearedOnReleaseAtRef.current = performance.now();
+      onCopyFeedbackRef.current?.(copied);
+    };
+
+    const cancelPendingSelectionClear = () => {
       if (clearSelectionTimerRef.current) {
         window.clearTimeout(clearSelectionTimerRef.current);
+        clearSelectionTimerRef.current = null;
+      }
+    };
+
+    const clearDocumentSelectionIfEligible = () => {
+      if (isUserPressing() || !isMdictPopupOpenRef.current) return;
+      const articleEl = articleRef.current;
+      const sel = window.getSelection();
+      if (!sel || (sel.isCollapsed && sel.rangeCount === 0)) return;
+      if (articleEl && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0);
+        if (!articleEl.contains(range.commonAncestorContainer)) {
+          return;
+        }
+        // If selection expanded beyond a single lookup word before release, keep it and close popup
+        const word = extractEnglishLookupWord(sel.toString());
+        if (!word) {
+          onClearMdictLookupRef.current?.();
+          return;
+        }
+      }
+      try {
+        sel.removeAllRanges();
+        lastSelectionClearedOnReleaseAtRef.current = performance.now();
+      } catch {
+        // ignore
+      }
+    };
+
+    const scheduleClearSelectionIfPopupOpen = (delayMs = 0) => {
+      cancelPendingSelectionClear();
+      if (delayMs <= 0) {
+        clearDocumentSelectionIfEligible();
+        // Follow-up pass in case WebView finishes touch-up selection finalization 1–2 frames later
+        clearSelectionTimerRef.current = window.setTimeout(() => {
+          clearSelectionTimerRef.current = null;
+          clearDocumentSelectionIfEligible();
+        }, 60);
+        return;
       }
       clearSelectionTimerRef.current = window.setTimeout(() => {
         clearSelectionTimerRef.current = null;
-        if (!isPointerActiveRef.current && isPopupActive()) {
-          try {
-            const sel = window.getSelection();
-            if (sel && (!sel.isCollapsed || sel.rangeCount > 0)) {
-              sel.removeAllRanges();
-            }
-          } catch {
-            // ignore
-          }
-        }
+        clearDocumentSelectionIfEligible();
       }, delayMs);
     };
 
@@ -1318,8 +1522,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const word = extractEnglishLookupWord(sel.toString());
       if (!word) {
         // User expanded selection into a sentence / non-lookup text (e.g., to copy); dismiss lookup popup and keep selection
-        if (isPopupActive()) {
-          popupJustRequestedRef.current = false;
+        if (isMdictPopupOpenRef.current) {
           onClearMdictLookupRef.current?.();
         }
         return;
@@ -1330,13 +1533,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const wordMidY = rect.height > 0 ? (rect.top + rect.bottom) / 2 : vh * 0.25;
       const placement: 'top' | 'bottom' = wordMidY >= vh * 0.5 ? 'top' : 'bottom';
       lastPopupOpenedAtRef.current = performance.now();
-      popupJustRequestedRef.current = true;
       onEnglishWordSelectedRef.current?.({ word, placement });
 
-      // Do NOT clear selection while finger/pointer is still pressing the screen;
-      // only clear once released and the lookup popup is still open.
-      if (!isPointerActiveRef.current) {
-        scheduleClearSelectionIfPopupOpen(50);
+      // Never clear selection while finger/mouse is still pressing the screen;
+      // if already released and popup is open, clear on release/popup-open.
+      if (!isUserPressing() && isMdictPopupOpenRef.current) {
+        scheduleClearSelectionIfPopupOpen(40);
       }
     };
 
@@ -1350,42 +1552,129 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }, delayMs);
     };
 
+    // Sync selection clearing / floating Copy popover whenever lookup popup or pending lookup state settles
     useEffect(() => {
-      const onTouchStartGlobal = (e: TouchEvent) => {
-        isPointerActiveRef.current = e.touches.length > 0;
-        if (clearSelectionTimerRef.current) {
-          window.clearTimeout(clearSelectionTimerRef.current);
-          clearSelectionTimerRef.current = null;
+      if (isMdictPopupOpen) {
+        setCopyPopover(null);
+        if (!isUserPressing()) {
+          scheduleClearSelectionIfPopupOpen(30);
+        }
+        return;
+      }
+      if (isMdictLookupPending) {
+        setCopyPopover(null);
+        return;
+      }
+      if (!isUserPressing()) {
+        syncCopyPopover();
+      }
+    }, [isMdictPopupOpen, isMdictLookupPending, showOutline]);
+
+    useEffect(() => {
+      const handleUserReleased = () => {
+        if (isUserPressing()) return;
+
+        // Immediately inspect current selection in case user expanded into a multi-word phrase right before lifting
+        const articleEl = articleRef.current;
+        const sel = window.getSelection();
+        if (articleEl && sel && !sel.isCollapsed && sel.rangeCount > 0) {
+          const range = sel.getRangeAt(0);
+          if (articleEl.contains(range.commonAncestorContainer)) {
+            const word = extractEnglishLookupWord(sel.toString());
+            if (!word) {
+              if (selectionCheckTimerRef.current) {
+                window.clearTimeout(selectionCheckTimerRef.current);
+                selectionCheckTimerRef.current = null;
+              }
+              if (isMdictPopupOpenRef.current || isMdictLookupPendingRef.current) {
+                onClearMdictLookupRef.current?.();
+              }
+              syncCopyPopover();
+              // Follow-up pass in case WebView snaps selection rect 1–2 frames after finger lift
+              cancelPendingSelectionClear();
+              clearSelectionTimerRef.current = window.setTimeout(() => {
+                clearSelectionTimerRef.current = null;
+                syncCopyPopover();
+              }, 60);
+              return;
+            }
+          }
+        }
+
+        if (isMdictPopupOpenRef.current) {
+          setCopyPopover(null);
+          scheduleClearSelectionIfPopupOpen(0);
+        } else if (hasActiveMdictRef.current) {
+          if (selectionCheckTimerRef.current) {
+            window.clearTimeout(selectionCheckTimerRef.current);
+            selectionCheckTimerRef.current = null;
+            evaluateSelectionForMdict();
+          } else if (!isMdictLookupPendingRef.current) {
+            syncCopyPopover();
+            cancelPendingSelectionClear();
+            clearSelectionTimerRef.current = window.setTimeout(() => {
+              clearSelectionTimerRef.current = null;
+              syncCopyPopover();
+            }, 60);
+          }
+        } else {
+          syncCopyPopover();
+          cancelPendingSelectionClear();
+          clearSelectionTimerRef.current = window.setTimeout(() => {
+            clearSelectionTimerRef.current = null;
+            syncCopyPopover();
+          }, 60);
         }
       };
 
+      const unsubscribeNativeTouch = subscribeNativeTouchState((pressed) => {
+        nativeTouchActiveRef.current = pressed;
+        if (pressed) {
+          cancelPendingSelectionClear();
+        } else {
+          // Physical finger lifted (ACTION_UP/ACTION_CANCEL); also clear any stale DOM touch flag left by WebView touchcancel
+          domTouchActiveRef.current = false;
+          handleUserReleased();
+        }
+      });
+
+      const onTouchStartGlobal = (e: TouchEvent) => {
+        domTouchActiveRef.current = e.touches.length > 0;
+        if (domTouchActiveRef.current) {
+          cancelPendingSelectionClear();
+        }
+      };
+
+      // IMPORTANT: Do NOT listen to touchcancel/pointercancel as "finger lifted".
+      // On Android WebView & mobile Chrome, long-press text selection fires touchcancel/pointercancel
+      // WHILE the user's finger is still physically pressing the screen.
       const onTouchEndGlobal = (e: TouchEvent) => {
-        isPointerActiveRef.current = e.touches.length > 0;
-        if (!isPointerActiveRef.current && isPopupActive()) {
-          scheduleClearSelectionIfPopupOpen(90);
+        domTouchActiveRef.current = e.touches.length > 0;
+        if (!domTouchActiveRef.current) {
+          nativeTouchActiveRef.current = false;
+          handleUserReleased();
         }
       };
 
       const onPointerDownGlobal = (e: PointerEvent) => {
         if (e.pointerType === 'touch') return;
-        isPointerActiveRef.current = true;
-        if (clearSelectionTimerRef.current) {
-          window.clearTimeout(clearSelectionTimerRef.current);
-          clearSelectionTimerRef.current = null;
-        }
+        domMouseActiveRef.current = true;
+        cancelPendingSelectionClear();
       };
 
-      const onPointerEndGlobal = (e: PointerEvent) => {
+      const onPointerUpGlobal = (e: PointerEvent) => {
         if (e.pointerType === 'touch') return;
-        isPointerActiveRef.current = false;
-        if (isPopupActive()) {
-          scheduleClearSelectionIfPopupOpen(90);
-        }
+        domMouseActiveRef.current = false;
+        handleUserReleased();
+      };
+
+      const onWindowBlur = () => {
+        nativeTouchActiveRef.current = false;
+        domTouchActiveRef.current = false;
+        domMouseActiveRef.current = false;
       };
 
       const handleSelectionChange = () => {
-        if (!hasActiveMdictRef.current) return;
-
         const activeEl = document.activeElement as HTMLElement | null;
         if (activeEl?.closest('[data-mdict-popup="true"]')) return;
 
@@ -1395,35 +1684,62 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             window.clearTimeout(selectionCheckTimerRef.current);
             selectionCheckTimerRef.current = null;
           }
+          setCopyPopover((prev) => (prev === null ? prev : null));
           return;
         }
 
-        scheduleMdictSelectionCheck(isPointerActiveRef.current ? 140 : 90);
+        // Hide floating Copy popover while actively dragging/adjusting selection handles
+        if (isUserPressing()) {
+          setCopyPopover((prev) => (prev === null ? prev : null));
+        }
+
+        if (!hasActiveMdictRef.current) {
+          if (!isUserPressing()) {
+            syncCopyPopover();
+          }
+          return;
+        }
+
+        // If user dragged selection into multiple words / non-English text, immediately close popup and keep selection
+        const articleEl = articleRef.current;
+        if (articleEl && sel.rangeCount > 0 && articleEl.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+          if (!extractEnglishLookupWord(sel.toString())) {
+            if (selectionCheckTimerRef.current) {
+              window.clearTimeout(selectionCheckTimerRef.current);
+              selectionCheckTimerRef.current = null;
+            }
+            if (isMdictPopupOpenRef.current || isMdictLookupPendingRef.current) {
+              onClearMdictLookupRef.current?.();
+            }
+            if (!isUserPressing()) {
+              syncCopyPopover();
+            }
+            return;
+          }
+        }
+
+        scheduleMdictSelectionCheck(isUserPressing() ? 110 : 80);
       };
 
       window.addEventListener('touchstart', onTouchStartGlobal, { capture: true, passive: true });
       window.addEventListener('touchend', onTouchEndGlobal, { capture: true, passive: true });
-      window.addEventListener('touchcancel', onTouchEndGlobal, { capture: true, passive: true });
       window.addEventListener('pointerdown', onPointerDownGlobal, true);
-      window.addEventListener('pointerup', onPointerEndGlobal, true);
-      window.addEventListener('pointercancel', onPointerEndGlobal, true);
+      window.addEventListener('pointerup', onPointerUpGlobal, true);
+      window.addEventListener('blur', onWindowBlur);
       document.addEventListener('selectionchange', handleSelectionChange);
       return () => {
+        unsubscribeNativeTouch();
         window.removeEventListener('touchstart', onTouchStartGlobal, true);
         window.removeEventListener('touchend', onTouchEndGlobal, true);
-        window.removeEventListener('touchcancel', onTouchEndGlobal, true);
         window.removeEventListener('pointerdown', onPointerDownGlobal, true);
-        window.removeEventListener('pointerup', onPointerEndGlobal, true);
-        window.removeEventListener('pointercancel', onPointerEndGlobal, true);
+        window.removeEventListener('pointerup', onPointerUpGlobal, true);
+        window.removeEventListener('blur', onWindowBlur);
         document.removeEventListener('selectionchange', handleSelectionChange);
         if (selectionCheckTimerRef.current) {
           window.clearTimeout(selectionCheckTimerRef.current);
           selectionCheckTimerRef.current = null;
         }
-        if (clearSelectionTimerRef.current) {
-          window.clearTimeout(clearSelectionTimerRef.current);
-          clearSelectionTimerRef.current = null;
-        }
+        cancelPendingSelectionClear();
       };
     }, []);
 
@@ -1432,8 +1748,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return Boolean(sel && !sel.isCollapsed && sel.toString().length > 0);
     };
 
-    const handleReadPointerDownCapture = () => {
-      isPointerActiveRef.current = true;
+    const handleReadPointerDownCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.pointerType !== 'touch') {
+        domMouseActiveRef.current = true;
+      }
       const now = performance.now();
       const active = hasActiveSelection() || isMdictPopupOpenRef.current;
       if (now - lastTouchStartAtRef.current < 40) {
@@ -1445,7 +1763,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     const handleReadTouchStartCapture = () => {
-      isPointerActiveRef.current = true;
+      domTouchActiveRef.current = true;
       const now = performance.now();
       const active = hasActiveSelection() || isMdictPopupOpenRef.current;
       if (now - lastPointerDownAtRef.current < 40) {
@@ -1454,13 +1772,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         hadSelectionOnDownRef.current = active;
       }
       lastTouchStartAtRef.current = now;
-    };
-
-    const handleReadPointerEnd = () => {
-      isPointerActiveRef.current = false;
-      if (hasActiveMdictRef.current) {
-        scheduleMdictSelectionCheck(60);
-      }
     };
 
     const performPageUp = () => {
@@ -1634,9 +1945,23 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       hadSelectionOnDownRef.current = false;
 
       const target = e.target as HTMLElement | null;
-      if (target?.closest('button, a, input, textarea, select, [data-outline-modal="true"]')) return;
+      if (
+        target?.closest(
+          'button, a, input, textarea, select, [data-outline-modal="true"], [data-copy-popover="true"]'
+        )
+      ) {
+        return;
+      }
 
       if (performance.now() - lastPopupOpenedAtRef.current < 350) {
+        return;
+      }
+
+      const lastDownAt = Math.max(lastPointerDownAtRef.current, lastTouchStartAtRef.current);
+      if (
+        lastDownAt < lastSelectionClearedOnReleaseAtRef.current &&
+        performance.now() - lastSelectionClearedOnReleaseAtRef.current < 300
+      ) {
         return;
       }
 
@@ -1644,6 +1969,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         if (isMdictPopupOpenRef.current) {
           onClearMdictLookupRef.current?.();
         }
+        if (hasActiveSelection()) {
+          try {
+            window.getSelection()?.removeAllRanges();
+          } catch {
+            // ignore
+          }
+        }
+        setCopyPopover(null);
         return;
       }
 
@@ -1779,14 +2112,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             onTouchStartCapture={handleReadTouchStartCapture}
             onTouchMove={clearTypographyLock}
             onWheel={clearTypographyLock}
-            onPointerUp={handleReadPointerEnd}
-            onTouchEnd={handleReadPointerEnd}
-            onPointerCancel={() => {
-              isPointerActiveRef.current = false;
-            }}
-            onTouchCancel={() => {
-              isPointerActiveRef.current = false;
-            }}
             onClick={handleContainerClick}
             onScroll={handleScroll}
             className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-x-none"
@@ -1888,6 +2213,42 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             />
           )}
         </div>
+
+        {copyPopover && !isMdictPopupOpen && !showOutline && (
+          <div
+            data-copy-popover="true"
+            style={{
+              left: `${copyPopover.left}px`,
+              top: `${copyPopover.top}px`,
+              transform:
+                copyPopover.placement === 'above'
+                  ? 'translate(-50%, -100%)'
+                  : 'translate(-50%, 0)',
+            }}
+            onContextMenu={(e) => e.preventDefault()}
+            className="fixed z-40 select-none"
+          >
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+              }}
+              onTouchStart={(e) => {
+                e.stopPropagation();
+              }}
+              onClick={handleCopyPopoverClick}
+              aria-label="复制选中内容"
+              className="h-9 px-3.5 rounded-xl inline-flex items-center gap-1.5 bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] text-[13px] font-medium text-[var(--fei-text-primary)] shadow-md dark:shadow-xl hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] transition-colors whitespace-nowrap select-none cursor-pointer"
+            >
+              <Copy className="w-3.5 h-3.5 text-[var(--fei-text-muted)]" strokeWidth={1.9} />
+              <span>复制</span>
+            </button>
+          </div>
+        )}
 
         {showOutline && (
           <DocOutlineModal

@@ -522,6 +522,8 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 public class ReaderNativePlugin extends Plugin {
     private static volatile ReaderNativePlugin activeInstance;
     public static volatile boolean volumeKeyInterceptEnabled = false;
+    public static volatile boolean touchStateTrackingEnabled = false;
+    public static volatile boolean isScreenTouched = false;
 
     @Override
     public void load() {
@@ -535,6 +537,8 @@ public class ReaderNativePlugin extends Plugin {
             activeInstance = null;
         }
         volumeKeyInterceptEnabled = false;
+        touchStateTrackingEnabled = false;
+        isScreenTouched = false;
         super.handleOnDestroy();
     }
 
@@ -544,12 +548,31 @@ public class ReaderNativePlugin extends Plugin {
         call.resolve();
     }
 
+    @PluginMethod
+    public void setTouchStateTracking(PluginCall call) {
+        touchStateTrackingEnabled = Boolean.TRUE.equals(call.getBoolean("enabled", false));
+        JSObject res = new JSObject();
+        res.put("pressed", isScreenTouched);
+        call.resolve(res);
+    }
+
     public static void dispatchVolumeKey(String direction) {
         ReaderNativePlugin instance = activeInstance;
         if (instance == null) return;
         JSObject payload = new JSObject();
         payload.put("direction", direction);
         instance.notifyListeners("volumeKey", payload);
+    }
+
+    public static void dispatchTouchState(boolean pressed) {
+        if (isScreenTouched == pressed) return;
+        isScreenTouched = pressed;
+        if (!touchStateTrackingEnabled) return;
+        ReaderNativePlugin instance = activeInstance;
+        if (instance == null) return;
+        JSObject payload = new JSObject();
+        payload.put("pressed", pressed);
+        instance.notifyListeners("touchState", payload);
     }
 }
 `;
@@ -1529,6 +1552,7 @@ import android.view.ActionMode;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.PopupMenu;
 import androidx.core.graphics.Insets;
@@ -1647,6 +1671,25 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception ignored) {
             }
         }
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (ev != null) {
+            int action = ev.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                ReaderNativePlugin.dispatchTouchState(true);
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                ReaderNativePlugin.dispatchTouchState(false);
+            }
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    @Override
+    public void onPause() {
+        ReaderNativePlugin.dispatchTouchState(false);
+        super.onPause();
     }
 
     @Override

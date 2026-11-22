@@ -2,9 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ALargeSmall,
   ArrowLeft,
-  BookA,
   ChevronsUp,
-  Copy,
   Download,
   Lock,
   LockOpen,
@@ -17,7 +15,6 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ImportModal } from './components/ImportModal';
-import { MdictDictModal } from './components/MdictDictModal';
 import { MdictLookupPopup, MdictLookupPopupHandle } from './components/MdictLookupPopup';
 import {
   DocReadMetrics,
@@ -204,7 +201,6 @@ export default function App() {
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTrashModal, setShowTrashModal] = useState(false);
-  const [showMdictModal, setShowMdictModal] = useState(false);
   const [showFontSizeBar, setShowFontSizeBar] = useState(false);
   const [fontSize, setFontSize] = useState<number>(() => {
     const raw = loadReaderSettings().fontSize;
@@ -237,6 +233,7 @@ export default function App() {
     currentIndex: number;
     error: string | null;
   } | null>(null);
+  const [mdictLookupPending, setMdictLookupPending] = useState(false);
   const [activeDragPayload, setActiveDragPayload] = useState<DragPayload | null>(null);
   const [trashDragOver, setTrashDragOver] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -251,7 +248,6 @@ export default function App() {
   const mdictPopupRef = useRef<MdictLookupPopupHandle>(null);
   const toolbarBtnRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map());
   const suppressToolbarClickRef = useRef(false);
-  const pendingCopyTextRef = useRef('');
   const treeToolbarOrderRef = useRef<TreeToolbarIconId[]>(treeToolbarOrder);
   treeToolbarOrderRef.current = treeToolbarOrder;
   const docToolbarOrderRef = useRef<DocToolbarIconId[]>(docToolbarOrder);
@@ -1368,6 +1364,8 @@ export default function App() {
       const captured = docViewRef.current.flushAndCaptureViewState();
       handleUpdateDocViewState(selectedDoc.id, captured);
     }
+    mdictLookupReqRef.current++;
+    setMdictLookupPending(false);
     setMdictLookup(null);
     setShowFontSizeBar(false);
     setMainView('tree');
@@ -1454,12 +1452,13 @@ export default function App() {
     ];
 
     const reqId = ++mdictLookupReqRef.current;
+    setMdictLookupPending(true);
 
     try {
       const results = await lookupMdictWordAcrossAll(orderedIds, word);
       if (mdictLookupReqRef.current !== reqId) return;
       if (results.length === 0) {
-        // Close dictionary popup when selected text has no match so native Copy/Paste restores immediately
+        // Close dictionary popup when selected text has no match so floating Copy popover can appear
         setMdictLookup(null);
         return;
       }
@@ -1474,6 +1473,10 @@ export default function App() {
     } catch {
       if (mdictLookupReqRef.current !== reqId) return;
       setMdictLookup(null);
+    } finally {
+      if (mdictLookupReqRef.current === reqId) {
+        setMdictLookupPending(false);
+      }
     }
   };
 
@@ -1710,53 +1713,6 @@ export default function App() {
     } catch {
       showToast('请长按地址手动复制');
     }
-  };
-
-  const handleCopySelectedText = async () => {
-    const liveSel = window.getSelection()?.toString() || '';
-    const textToCopy = (liveSel || pendingCopyTextRef.current).replace(/\u00AD/g, '');
-    pendingCopyTextRef.current = '';
-
-    if (!textToCopy.trim()) {
-      showToast('请先选中要复制的文档内容');
-      return;
-    }
-
-    let copied = false;
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(textToCopy);
-        copied = true;
-      }
-    } catch {
-      copied = false;
-    }
-
-    if (!copied) {
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = textToCopy;
-        ta.setAttribute('readonly', 'true');
-        ta.style.position = 'fixed';
-        ta.style.top = '-9999px';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        ta.setSelectionRange(0, textToCopy.length);
-        copied = document.execCommand('copy');
-        document.body.removeChild(ta);
-      } catch {
-        copied = false;
-      }
-    }
-
-    try {
-      window.getSelection()?.removeAllRanges();
-    } catch {
-      // ignore
-    }
-
-    showToast(copied ? '已复制选中内容' : '复制失败，请重试');
   };
 
   const handleRunLiveSync = async () => {
@@ -2005,11 +1961,19 @@ export default function App() {
             autoHyphenate={autoHyphenate}
             hasActiveMdict={mdictDicts.length > 0}
             isMdictPopupOpen={mdictLookup !== null}
+            isMdictLookupPending={mdictLookupPending}
             onEnglishWordSelected={({ word, placement }) => {
               setShowFontSizeBar(false);
               void runMdictLookup(word, placement);
             }}
-            onClearMdictLookup={() => setMdictLookup(null)}
+            onClearMdictLookup={() => {
+              mdictLookupReqRef.current++;
+              setMdictLookupPending(false);
+              setMdictLookup(null);
+            }}
+            onCopyFeedback={(copied) =>
+              showToast(copied ? '已复制选中内容' : '复制失败，请重试')
+            }
             onMdictPopupVolumeKey={(direction) => {
               if (direction === 'up') {
                 mdictPopupRef.current?.pageUp();
@@ -2227,8 +2191,8 @@ export default function App() {
                       if (suppressToolbarClickRef.current) return;
                       setShowSyncModal(true);
                     }}
-                    aria-label="同步与存储设置"
-                    title="同步与存储设置（可拖动调整图标位置）"
+                    aria-label="设置（同步、存储与词典）"
+                    title="设置（同步、存储与词典，可拖动调整图标位置）"
                     className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
                   >
                     <Settings className="w-[21px] h-[21px]" strokeWidth={1.8} />
@@ -2280,7 +2244,7 @@ export default function App() {
               </button>
             </>
           ) : (
-            /* 文档浏览模式：默认依次为 返回、词典、字体设置、同步（均可拖动排序），最右侧固定显示阅读进度百分比 */
+            /* 文档浏览模式：默认依次为 返回、字体设置、同步（均可拖动排序），最右侧固定显示阅读进度 */
             <>
               {docToolbarOrder.map((iconId) => {
                 const key = `doc:${iconId}`;
@@ -2312,27 +2276,6 @@ export default function App() {
                   );
                 }
 
-                if (iconId === 'dict') {
-                  return (
-                    <button
-                      key={iconId}
-                      ref={bindRef}
-                      type="button"
-                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'dict', 'doc')}
-                      onClick={() => {
-                        if (suppressToolbarClickRef.current) return;
-                        setShowFontSizeBar(false);
-                        setShowMdictModal(true);
-                      }}
-                      aria-label="词典设置与切换"
-                      title="词典（导入与切换 .mdx 词库，可拖动调整图标位置）"
-                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
-                    >
-                      <BookA className="w-[22px] h-[22px]" strokeWidth={1.8} />
-                    </button>
-                  );
-                }
-
                 if (iconId === 'font') {
                   return (
                     <button
@@ -2355,45 +2298,6 @@ export default function App() {
                       }`}
                     >
                       <ALargeSmall className="w-[22px] h-[22px]" strokeWidth={1.8} />
-                    </button>
-                  );
-                }
-
-                if (iconId === 'copy') {
-                  return (
-                    <button
-                      key={iconId}
-                      ref={bindRef}
-                      type="button"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        const selText = window.getSelection()?.toString() || '';
-                        if (selText) {
-                          pendingCopyTextRef.current = selText;
-                        }
-                      }}
-                      onTouchStart={() => {
-                        const selText = window.getSelection()?.toString() || '';
-                        if (selText) {
-                          pendingCopyTextRef.current = selText;
-                        }
-                      }}
-                      onPointerDown={(e) => {
-                        const selText = window.getSelection()?.toString() || '';
-                        if (selText) {
-                          pendingCopyTextRef.current = selText;
-                        }
-                        handleToolbarIconPointerDown(e, 'copy', 'doc');
-                      }}
-                      onClick={() => {
-                        if (suppressToolbarClickRef.current) return;
-                        void handleCopySelectedText();
-                      }}
-                      aria-label="复制选中内容"
-                      title="复制文档中被选中的内容（可拖动调整图标位置）"
-                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
-                    >
-                      <Copy className="w-[20px] h-[20px]" strokeWidth={1.8} />
                     </button>
                   );
                 }
@@ -2516,7 +2420,7 @@ export default function App() {
         />
       )}
 
-      {/* Sync Settings, PC Direct Connect & Encryption Modal */}
+      {/* Settings Modal: Sync, Encryption, PC Direct Connect, Local Folder & Dictionary */}
       {showSyncModal && (
         <SyncModal
           config={webDavConfig}
@@ -2531,6 +2435,17 @@ export default function App() {
           lanLoading={lanLoading}
           onToggleLan={handleToggleLanDirect}
           onCopyLanUrl={handleCopyLanUrl}
+          dictionaries={mdictDicts}
+          activeDictId={activeMdictId}
+          onImportDictFiles={handleImportMdictFiles}
+          onAttachDictCss={handleAttachMdictCss}
+          onSelectDict={(id) => {
+            handleSelectActiveMdict(id);
+            if (mdictLookup) {
+              void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, id);
+            }
+          }}
+          onDeleteDict={handleDeleteMdictDict}
           onSaveConfig={handleSaveSyncConfig}
           onClose={() => setShowSyncModal(false)}
         />
@@ -2556,24 +2471,6 @@ export default function App() {
           onRestoreDoc={handleRestoreDocFromTrash}
           onEmptyTrash={handleEmptyTrash}
           onClose={() => setShowTrashModal(false)}
-        />
-      )}
-
-      {/* MDict Dictionary Import & Switch Modal */}
-      {showMdictModal && (
-        <MdictDictModal
-          dictionaries={mdictDicts}
-          activeDictId={activeMdictId}
-          onImportFiles={handleImportMdictFiles}
-          onAttachCss={handleAttachMdictCss}
-          onSelectDict={(id) => {
-            handleSelectActiveMdict(id);
-            if (mdictLookup) {
-              void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, id);
-            }
-          }}
-          onDeleteDict={handleDeleteMdictDict}
-          onClose={() => setShowMdictModal(false)}
         />
       )}
 

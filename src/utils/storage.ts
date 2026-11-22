@@ -290,7 +290,7 @@ export function saveDocFontsMap(map: Record<string, string>): void {
 }
 
 export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'collapse' | 'settings';
-export type DocToolbarIconId = 'back' | 'dict' | 'font' | 'copy' | 'sync';
+export type DocToolbarIconId = 'back' | 'font' | 'sync';
 
 export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
   'import',
@@ -303,9 +303,7 @@ export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
 
 export const DEFAULT_DOC_TOOLBAR_ORDER: DocToolbarIconId[] = [
   'back',
-  'dict',
   'font',
-  'copy',
   'sync',
 ];
 
@@ -370,18 +368,7 @@ export function saveTreeToolbarOrder(order: TreeToolbarIconId[]): void {
 
 export function loadDocToolbarOrder(): DocToolbarIconId[] {
   const parsed = safeParse<unknown>(localStorage.getItem(KEYS.DOC_TOOLBAR_ORDER), null);
-  const hadCopy = Array.isArray(parsed) && parsed.includes('copy');
-  const normalized = normalizeToolbarOrder(parsed, DEFAULT_DOC_TOOLBAR_ORDER);
-  if (!hadCopy) {
-    const copyIdx = normalized.indexOf('copy');
-    const fontIdx = normalized.indexOf('font');
-    if (copyIdx !== -1 && fontIdx !== -1 && copyIdx !== fontIdx + 1) {
-      normalized.splice(copyIdx, 1);
-      const nextFontIdx = normalized.indexOf('font');
-      normalized.splice(nextFontIdx + 1, 0, 'copy');
-    }
-  }
-  return normalized;
+  return normalizeToolbarOrder(parsed, DEFAULT_DOC_TOOLBAR_ORDER);
 }
 
 export function saveDocToolbarOrder(order: DocToolbarIconId[]): void {

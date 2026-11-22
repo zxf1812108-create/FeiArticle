@@ -1,6 +1,18 @@
-import React, { useEffect, useState } from 'react';
-import { Copy, Eye, EyeOff, Folder, X } from 'lucide-react';
-import { WebDavConfig } from '../types';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  BookA,
+  Check,
+  Copy,
+  Eye,
+  EyeOff,
+  FileCode2,
+  Folder,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
+import { MdictDictionarySummary, WebDavConfig } from '../types';
+import { stripDictExt } from '../utils/mdictStorage';
 import { DEFAULT_JIANGUOYUN_URL, normalizeWebDavBaseUrl } from '../utils/webdavSync';
 
 interface SyncModalProps {
@@ -12,6 +24,12 @@ interface SyncModalProps {
   lanLoading: boolean;
   onToggleLan: (next: boolean) => void;
   onCopyLanUrl: (url: string) => void;
+  dictionaries: MdictDictionarySummary[];
+  activeDictId: string | null;
+  onImportDictFiles: (files: FileList) => Promise<void>;
+  onAttachDictCss: (dictId: string, file: File) => Promise<void>;
+  onSelectDict: (id: string) => void;
+  onDeleteDict: (id: string) => Promise<void>;
   onSaveConfig: (next: WebDavConfig) => void;
   onClose: () => void;
 }
@@ -25,6 +43,12 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   lanLoading,
   onToggleLan,
   onCopyLanUrl,
+  dictionaries,
+  activeDictId,
+  onImportDictFiles,
+  onAttachDictCss,
+  onSelectDict,
+  onDeleteDict,
   onSaveConfig,
   onClose,
 }) => {
@@ -39,6 +63,46 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const [showEncPassword, setShowEncPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const dictFileInputRef = useRef<HTMLInputElement>(null);
+  const dictCssInputRef = useRef<HTMLInputElement>(null);
+  const pendingCssDictIdRef = useRef<string | null>(null);
+  const [dictImporting, setDictImporting] = useState(false);
+  const [busyDictId, setBusyDictId] = useState<string | null>(null);
+  const [dictErrorMsg, setDictErrorMsg] = useState<string | null>(null);
+
+  const handleDictFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    setDictErrorMsg(null);
+    setDictImporting(true);
+    try {
+      await onImportDictFiles(files);
+    } catch (err) {
+      setDictErrorMsg(err instanceof Error ? err.message : '导入词典失败');
+    } finally {
+      setDictImporting(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleDictCssFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const targetId = pendingCssDictIdRef.current;
+    pendingCssDictIdRef.current = null;
+    e.target.value = '';
+    if (!file || !targetId) return;
+
+    setDictErrorMsg(null);
+    setBusyDictId(targetId);
+    try {
+      await onAttachDictCss(targetId, file);
+    } catch (err) {
+      setDictErrorMsg(err instanceof Error ? err.message : '导入样式文件失败');
+    } finally {
+      setBusyDictId(null);
+    }
+  };
 
   // Clear any residual long-press text selection when opening from the Sync toolbar button
   useEffect(() => {
@@ -323,6 +387,129 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               >
                 更改
               </button>
+            </div>
+          </section>
+
+          {/* 区域五：离线词典（导入与切换 .mdx 词库及配套 .css 样式） */}
+          <section className="space-y-2">
+            <div className="flex items-center justify-between gap-2 px-0.5">
+              <h3 className="text-[13.5px] font-medium text-[var(--fei-text-primary)]">
+                词典
+              </h3>
+              <input
+                ref={dictFileInputRef}
+                type="file"
+                multiple
+                onChange={handleDictFileChange}
+                className="hidden"
+              />
+              <input
+                ref={dictCssInputRef}
+                type="file"
+                onChange={handleDictCssFileChange}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => dictFileInputRef.current?.click()}
+                disabled={dictImporting}
+                className="h-7 px-2.5 rounded-lg inline-flex items-center gap-1 text-[12px] font-medium border border-[var(--fei-border)] bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] disabled:opacity-60 transition-colors whitespace-nowrap"
+              >
+                <Upload className="w-3.5 h-3.5" strokeWidth={1.75} />
+                <span>{dictImporting ? '解析中…' : '导入词库'}</span>
+              </button>
+            </div>
+
+            {dictErrorMsg && (
+              <div className="px-3 py-2 rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[12px] text-[var(--fei-text-primary)] leading-relaxed">
+                {dictErrorMsg}
+              </div>
+            )}
+
+            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] overflow-hidden">
+              {dictionaries.length === 0 ? (
+                <div className="px-3.5 py-3 text-[12px] leading-relaxed text-[var(--fei-text-muted)]">
+                  暂未导入词典，支持导入 .mdx 词库及配套 .css 样式文件
+                </div>
+              ) : (
+                <div className="max-h-[200px] overflow-y-auto divide-y divide-[var(--fei-border)]">
+                  {dictionaries.map((dict) => {
+                    const isActive = dict.id === activeDictId;
+                    const isBusy = busyDictId === dict.id;
+                    const displayName = stripDictExt(dict.fileName) || dict.title;
+                    return (
+                      <div
+                        key={dict.id}
+                        onClick={() => onSelectDict(dict.id)}
+                        className={`flex items-center gap-2 px-3 py-2 min-h-[42px] cursor-pointer transition-colors ${
+                          isActive
+                            ? 'bg-[var(--fei-bg-selected)]'
+                            : 'hover:bg-[var(--fei-bg-hover)]'
+                        }`}
+                      >
+                        <div className="w-4 h-4 flex items-center justify-center shrink-0 text-[var(--fei-text-primary)]">
+                          {isActive ? (
+                            <Check className="w-3.5 h-3.5" strokeWidth={2} />
+                          ) : (
+                            <BookA
+                              className="w-3.5 h-3.5 text-[var(--fei-text-muted)]"
+                              strokeWidth={1.65}
+                            />
+                          )}
+                        </div>
+
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[13px] font-medium text-[var(--fei-text-primary)] truncate">
+                            {displayName}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-0.5 shrink-0">
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              pendingCssDictIdRef.current = dict.id;
+                              dictCssInputRef.current?.click();
+                            }}
+                            title={dict.cssFileName ? '替换配套 .css 样式' : '导入配套 .css 样式'}
+                            aria-label={`为 ${displayName} 导入样式`}
+                            className="h-7 px-1.5 inline-flex items-center gap-1 rounded-lg text-[11.5px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors disabled:opacity-50"
+                          >
+                            <FileCode2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                            <span>{dict.cssFileName ? '换样式' : '样式'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              setBusyDictId(dict.id);
+                              setDictErrorMsg(null);
+                              try {
+                                await onDeleteDict(dict.id);
+                              } catch (err) {
+                                setDictErrorMsg(
+                                  err instanceof Error ? err.message : '删除词典失败'
+                                );
+                              } finally {
+                                setBusyDictId(null);
+                              }
+                            }}
+                            title="移除词库"
+                            aria-label={`移除词库 ${displayName}`}
+                            className="w-7 h-7 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0 disabled:opacity-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </section>
 
