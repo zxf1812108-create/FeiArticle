@@ -2,9 +2,16 @@ import { Capacitor, PluginListenerHandle, registerPlugin } from '@capacitor/core
 
 export type VolumeKeyDirection = 'up' | 'down';
 
+export interface NativeInputLongPressEvent {
+  source: 'actionMode' | 'touch';
+  x?: number;
+  y?: number;
+}
+
 interface ReaderNativePlugin {
   setVolumeKeyIntercept(options: { enabled: boolean }): Promise<void>;
   setTouchStateTracking(options: { enabled: boolean }): Promise<{ pressed: boolean }>;
+  setInputPasteTracking(options: { enabled: boolean }): Promise<void>;
   readClipboardText(): Promise<{ text: string }>;
   addListener(
     eventName: 'volumeKey',
@@ -13,6 +20,10 @@ interface ReaderNativePlugin {
   addListener(
     eventName: 'touchState',
     listenerFunc: (event: { pressed: boolean }) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'inputLongPress',
+    listenerFunc: (event: NativeInputLongPressEvent) => void
   ): Promise<PluginListenerHandle>;
 }
 
@@ -44,6 +55,40 @@ export async function readSystemClipboardText(): Promise<{ ok: boolean; text: st
     return { ok: false, text: '' };
   }
   return { ok: false, text: '' };
+}
+
+export function subscribeNativeInputLongPress(
+  onLongPress: (event: NativeInputLongPressEvent) => void
+): () => void {
+  if (!hasReaderNative()) return () => {};
+  let disposed = false;
+  let handle: PluginListenerHandle | null = null;
+
+  ReaderNative.setInputPasteTracking({ enabled: true }).catch(() => {});
+
+  ReaderNative.addListener('inputLongPress', (event) => {
+    if (disposed || !event) return;
+    if (event.source === 'actionMode' || event.source === 'touch') {
+      onLongPress(event);
+    }
+  })
+    .then((h) => {
+      if (disposed) {
+        h.remove().catch(() => {});
+      } else {
+        handle = h;
+      }
+    })
+    .catch(() => {});
+
+  return () => {
+    disposed = true;
+    if (handle) {
+      handle.remove().catch(() => {});
+      handle = null;
+    }
+    ReaderNative.setInputPasteTracking({ enabled: false }).catch(() => {});
+  };
 }
 
 export function setNativeVolumeKeyIntercept(enabled: boolean): void {

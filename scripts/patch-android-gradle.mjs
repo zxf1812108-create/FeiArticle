@@ -527,6 +527,7 @@ public class ReaderNativePlugin extends Plugin {
     private static volatile ReaderNativePlugin activeInstance;
     public static volatile boolean volumeKeyInterceptEnabled = false;
     public static volatile boolean touchStateTrackingEnabled = false;
+    public static volatile boolean inputPasteTrackingEnabled = false;
     public static volatile boolean isScreenTouched = false;
 
     @Override
@@ -542,6 +543,7 @@ public class ReaderNativePlugin extends Plugin {
         }
         volumeKeyInterceptEnabled = false;
         touchStateTrackingEnabled = false;
+        inputPasteTrackingEnabled = false;
         isScreenTouched = false;
         super.handleOnDestroy();
     }
@@ -558,6 +560,12 @@ public class ReaderNativePlugin extends Plugin {
         JSObject res = new JSObject();
         res.put("pressed", isScreenTouched);
         call.resolve(res);
+    }
+
+    @PluginMethod
+    public void setInputPasteTracking(PluginCall call) {
+        inputPasteTrackingEnabled = Boolean.TRUE.equals(call.getBoolean("enabled", false));
+        call.resolve();
     }
 
     @PluginMethod
@@ -609,6 +617,26 @@ public class ReaderNativePlugin extends Plugin {
         JSObject payload = new JSObject();
         payload.put("pressed", pressed);
         instance.notifyListeners("touchState", payload);
+    }
+
+    public static void dispatchInputActionMode() {
+        if (!inputPasteTrackingEnabled) return;
+        ReaderNativePlugin instance = activeInstance;
+        if (instance == null) return;
+        JSObject payload = new JSObject();
+        payload.put("source", "actionMode");
+        instance.notifyListeners("inputLongPress", payload);
+    }
+
+    public static void dispatchNativeLongPress(float cssX, float cssY) {
+        if (!inputPasteTrackingEnabled) return;
+        ReaderNativePlugin instance = activeInstance;
+        if (instance == null) return;
+        JSObject payload = new JSObject();
+        payload.put("source", "touch");
+        payload.put("x", cssX);
+        payload.put("y", cssY);
+        instance.notifyListeners("inputLongPress", payload);
     }
 }
 `;
@@ -1584,12 +1612,15 @@ public class LocalStoragePlugin extends Plugin {
 
 import android.content.res.Configuration;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.ActionMode;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.webkit.WebView;
 import android.widget.PopupMenu;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -1598,6 +1629,35 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private boolean nativePressActive = false;
+    private float nativePressRawX = 0f;
+    private float nativePressRawY = 0f;
+    private final Runnable nativeLongPressRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!nativePressActive) return;
+            nativePressActive = false;
+            if (!ReaderNativePlugin.inputPasteTrackingEnabled) return;
+            float density = getResources().getDisplayMetrics().density;
+            if (density <= 0f) density = 1f;
+            float cssX = nativePressRawX / density;
+            float cssY = nativePressRawY / density;
+            if (getBridge() != null && getBridge().getWebView() != null) {
+                WebView webView = getBridge().getWebView();
+                int[] loc = new int[2];
+                webView.getLocationOnScreen(loc);
+                cssX = (nativePressRawX - loc[0]) / density;
+                cssY = (nativePressRawY - loc[1]) / density;
+            }
+            ReaderNativePlugin.dispatchNativeLongPress(cssX, cssY);
+        }
+    };
+
+    private void cancelNativeLongPress() {
+        nativePressActive = false;
+        mainHandler.removeCallbacks(nativeLongPressRunnable);
+    }
     private final class SilentActionMode extends ActionMode {
         private final ActionMode.Callback callback;
         private final Menu emptyMenu;
@@ -1695,6 +1755,7 @@ public class MainActivity extends BridgeActivity {
         } catch (Exception ignored) {
         }
         mode.getMenu().clear();
+        ReaderNativePlugin.dispatchInputActionMode();
         return mode;
     }
 
@@ -1706,6 +1767,7 @@ public class MainActivity extends BridgeActivity {
                 mode.getMenu().clear();
             } catch (Exception ignored) {
             }
+            ReaderNativePlugin.dispatchInputActionMode();
         }
     }
 
@@ -1715,7 +1777,27 @@ public class MainActivity extends BridgeActivity {
             int action = ev.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
                 ReaderNativePlugin.dispatchTouchState(true);
+                cancelNativeLongPress();
+                if (ReaderNativePlugin.inputPasteTrackingEnabled) {
+                    nativePressActive = true;
+                    nativePressRawX = ev.getRawX();
+                    nativePressRawY = ev.getRawY();
+                    mainHandler.postDelayed(nativeLongPressRunnable, 380L);
+                }
+            } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
+                cancelNativeLongPress();
+            } else if (action == MotionEvent.ACTION_MOVE) {
+                if (nativePressActive) {
+                    float density = getResources().getDisplayMetrics().density;
+                    float slopPx = Math.max(24f * (density > 0f ? density : 1f), 24f);
+                    float dx = ev.getRawX() - nativePressRawX;
+                    float dy = ev.getRawY() - nativePressRawY;
+                    if (dx * dx + dy * dy > slopPx * slopPx) {
+                        cancelNativeLongPress();
+                    }
+                }
             } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                cancelNativeLongPress();
                 ReaderNativePlugin.dispatchTouchState(false);
             }
         }
@@ -1724,6 +1806,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onPause() {
+        cancelNativeLongPress();
         ReaderNativePlugin.dispatchTouchState(false);
         super.onPause();
     }

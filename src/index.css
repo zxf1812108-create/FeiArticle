@@ -55,6 +55,12 @@
     -webkit-touch-callout: none;
   }
 
+  input,
+  textarea {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
   html,
   body,
   #root {
