@@ -680,6 +680,7 @@ export function extractEnglishLookupWord(rawSelection: string): string | null {
     return null;
   }
   const cleaned = rawSelection
+    .replace(/\u00AD/g, '')
     .trim()
     .replace(/^[\s"'“”‘’.,;:!?()[\]{}<>《》「」『』—–·•/\\]+/, '')
     .replace(/[\s"'“”‘’.,;:!?()[\]{}<>《》「」『』—–·•/\\]+$/, '');

@@ -9,7 +9,7 @@ export interface DomNormalizedMap {
 }
 
 function isIgnorableWs(ch: string): boolean {
-  return /\s/.test(ch);
+  return ch === '\u00AD' || /\s/.test(ch);
 }
 
 /**
@@ -438,7 +438,7 @@ export function extractExactVisualLineText(
     }
   }
 
-  return parts.join(' ').replace(/\s+/g, ' ').trim();
+  return parts.join(' ').replace(/\u00AD/g, '').replace(/\s+/g, ' ').trim();
 }
 
 /**

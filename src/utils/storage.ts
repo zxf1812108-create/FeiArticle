@@ -24,7 +24,8 @@ const KEYS = {
   PURGED_RECORDS: 'feiartical_purged_records_v1',
   ACTIVE_MDICT: 'feiartical_active_mdict_v1',
   DOC_FONTS: 'feiartical_doc_fonts_v1',
-  TREE_TOOLBAR_ORDER: 'feiartical_tree_toolbar_order_v1',
+  TREE_TOOLBAR_ORDER_LEGACY: 'feiartical_tree_toolbar_order_v1',
+  TREE_TOOLBAR_ORDER: 'feiartical_tree_toolbar_order_v2',
   DOC_TOOLBAR_ORDER: 'feiartical_doc_toolbar_order_v1',
 };
 
@@ -56,6 +57,7 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   paper: 'white',
   indentFirstLine: false,
   defaultDocFont: 'system',
+  autoHyphenate: false,
 };
 
 export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {
@@ -290,8 +292,8 @@ export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'collaps
 export type DocToolbarIconId = 'back' | 'dict' | 'font' | 'sync';
 
 export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
-  'edit',
   'import',
+  'edit',
   'cut',
   'encrypt',
   'collapse',
@@ -326,19 +328,34 @@ function normalizeToolbarOrder<T extends string>(raw: unknown, defaults: readonl
 }
 
 export function loadTreeToolbarOrder(): TreeToolbarIconId[] {
-  const parsed = safeParse<unknown>(localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER), null);
-  const hadSettings = Array.isArray(parsed) && parsed.includes('settings');
-  const normalized = normalizeToolbarOrder(parsed, DEFAULT_TREE_TOOLBAR_ORDER);
-  if (!hadSettings) {
-    const settingsIdx = normalized.indexOf('settings');
-    const collapseIdx = normalized.indexOf('collapse');
-    if (settingsIdx !== -1 && collapseIdx !== -1 && settingsIdx !== collapseIdx + 1) {
-      normalized.splice(settingsIdx, 1);
-      const nextCollapseIdx = normalized.indexOf('collapse');
-      normalized.splice(nextCollapseIdx + 1, 0, 'settings');
-    }
+  const rawV2 = localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER);
+  if (rawV2) {
+    return normalizeToolbarOrder(safeParse<unknown>(rawV2, null), DEFAULT_TREE_TOOLBAR_ORDER);
   }
-  return normalized;
+  const rawLegacy = localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER_LEGACY);
+  if (rawLegacy) {
+    const parsed = safeParse<unknown>(rawLegacy, null);
+    const hadSettings = Array.isArray(parsed) && parsed.includes('settings');
+    const normalized = normalizeToolbarOrder(parsed, DEFAULT_TREE_TOOLBAR_ORDER);
+    if (!hadSettings) {
+      const settingsIdx = normalized.indexOf('settings');
+      const collapseIdx = normalized.indexOf('collapse');
+      if (settingsIdx !== -1 && collapseIdx !== -1 && settingsIdx !== collapseIdx + 1) {
+        normalized.splice(settingsIdx, 1);
+        const nextCollapseIdx = normalized.indexOf('collapse');
+        normalized.splice(nextCollapseIdx + 1, 0, 'settings');
+      }
+    }
+    const editIdx = normalized.indexOf('edit');
+    const importIdx = normalized.indexOf('import');
+    if (editIdx !== -1 && importIdx !== -1 && editIdx + 1 === importIdx) {
+      normalized[editIdx] = 'import';
+      normalized[importIdx] = 'edit';
+    }
+    saveTreeToolbarOrder(normalized);
+    return normalized;
+  }
+  return [...DEFAULT_TREE_TOOLBAR_ORDER];
 }
 
 export function saveTreeToolbarOrder(order: TreeToolbarIconId[]): void {

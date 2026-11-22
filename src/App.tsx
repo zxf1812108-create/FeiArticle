@@ -212,6 +212,9 @@ export default function App() {
   const [defaultDocFont, setDefaultDocFont] = useState<DocFontId>(() =>
     resolveDefaultDocFont(loadReaderSettings().defaultDocFont)
   );
+  const [autoHyphenate, setAutoHyphenate] = useState<boolean>(() =>
+    Boolean(loadReaderSettings().autoHyphenate)
+  );
   const [docFontsMap, setDocFontsMap] = useState<Record<string, string>>(() =>
     loadDocFontsMap()
   );
@@ -1368,6 +1371,16 @@ export default function App() {
     saveReaderSettings({ ...prev, fontSize: clamped });
   };
 
+  const handleToggleAutoHyphenate = () => {
+    docViewRef.current?.captureTypographyAnchor();
+    setAutoHyphenate((prev) => {
+      const next = !prev;
+      const current = loadReaderSettings();
+      saveReaderSettings({ ...current, autoHyphenate: next });
+      return next;
+    });
+  };
+
   const currentDocFont = useMemo<DocFontId>(() => {
     if (!selectedDocId) return defaultDocFont;
     return resolveDocFont(docFontsMap[selectedDocId], defaultDocFont);
@@ -1923,6 +1936,7 @@ export default function App() {
             doc={selectedDoc}
             fontSize={fontSize}
             docFontFamily={currentDocFontFamily}
+            autoHyphenate={autoHyphenate}
             hasActiveMdict={mdictDicts.length > 0}
             isMdictPopupOpen={mdictLookup !== null}
             onEnglishWordSelected={({ word, placement }) => {
@@ -2499,6 +2513,36 @@ export default function App() {
                 className="h-9 px-2 inline-flex items-center justify-center rounded-lg text-[12px] font-medium whitespace-nowrap shrink-0 text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] transition-colors cursor-pointer"
               >
                 设为默认
+              </button>
+            </div>
+
+            <div className="pt-2 border-t border-[var(--fei-border)] flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[12.5px] text-[var(--fei-text-primary)]">自动断字</div>
+                <div className="text-[11px] text-[var(--fei-text-muted)] leading-tight">
+                  行末英文长词自动按音节连字符断行
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoHyphenate}
+                aria-label="自动断字"
+                onClick={handleToggleAutoHyphenate}
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                  autoHyphenate
+                    ? 'bg-[var(--fei-btn-primary-bg)] border-[var(--fei-btn-primary-bg)]'
+                    : 'bg-[var(--fei-bg-subtle)] border-[var(--fei-border-strong)]'
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`inline-block h-4 w-4 rounded-full transition-transform ${
+                    autoHyphenate
+                      ? 'translate-x-[22px] bg-[var(--fei-btn-primary-text)]'
+                      : 'translate-x-[3px] bg-[var(--fei-text-muted)]'
+                  }`}
+                />
               </button>
             </div>
           </div>

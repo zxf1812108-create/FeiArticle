@@ -24,6 +24,7 @@ import {
   subscribeNativeVolumeKeys,
   VolumeKeyDirection,
 } from '../utils/readerNative';
+import { hyphenateEnglishWords } from '../utils/hyphenate';
 
 export interface DocViewStateSnapshot {
   mode: 'read';
@@ -41,6 +42,7 @@ interface MinimalDocViewProps {
   doc: ArticleDoc;
   fontSize?: number;
   docFontFamily?: string;
+  autoHyphenate?: boolean;
   hasActiveMdict?: boolean;
   isMdictPopupOpen?: boolean;
   onEnglishWordSelected?: (payload: { word: string; placement: 'top' | 'bottom' }) => void;
@@ -245,10 +247,11 @@ function collectVisualLinesInBand(
   return merged;
 }
 
-function renderInline(raw: string) {
+function renderInline(raw: string, autoHyphenate = false) {
+  const maybeHyphenate = (s: string) => (autoHyphenate ? hyphenateEnglishWords(s) : s);
   // Fast path: plain text without markdown inline markers skips regex loop entirely
   if (!raw.includes('`') && !raw.includes('*')) {
-    return raw;
+    return maybeHyphenate(raw);
   }
   const tokens: Array<{ type: 'text' | 'code' | 'bold' | 'italic'; value: string }> = [];
   const regex = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
@@ -273,7 +276,7 @@ function renderInline(raw: string) {
       return (
         <code
           key={idx}
-          className="font-code text-[0.88em] px-1.5 py-0.5 rounded bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent text-[var(--fei-text-primary)]"
+          className="font-code text-[0.88em] px-1.5 py-0.5 rounded bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent text-[var(--fei-text-primary)] hyphens-none"
         >
           {token.value}
         </code>
@@ -282,24 +285,26 @@ function renderInline(raw: string) {
     if (token.type === 'bold') {
       return (
         <strong key={idx} className="font-semibold text-[var(--fei-text-primary)]">
-          {token.value}
+          {maybeHyphenate(token.value)}
         </strong>
       );
     }
     if (token.type === 'italic') {
-      return <em key={idx}>{token.value}</em>;
+      return <em key={idx}>{maybeHyphenate(token.value)}</em>;
     }
-    return <React.Fragment key={idx}>{token.value}</React.Fragment>;
+    return <React.Fragment key={idx}>{maybeHyphenate(token.value)}</React.Fragment>;
   });
 }
 
-function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
+function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean, autoHyphenate = false) {
   const offsetAttrs = {
     'data-block-idx': idx,
     'data-start-offset': block.startOffset,
     'data-end-offset': block.endOffset,
   };
   const topZero = isFirstOverall ? 'mt-0' : '';
+  const justifyCls = autoHyphenate ? 'text-justify' : '';
+  const maybeHyphenate = (s: string) => (autoHyphenate ? hyphenateEnglishWords(s) : s);
 
   switch (block.type) {
     case 'heading': {
@@ -311,7 +316,7 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
             {...offsetAttrs}
             className={`text-[1.15em] font-semibold leading-snug ${topZero || 'mt-5'} mb-2 text-[var(--fei-text-primary)] text-balance`}
           >
-            {block.text}
+            {maybeHyphenate(block.text)}
           </h1>
         );
       }
@@ -323,7 +328,7 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
             {...offsetAttrs}
             className={`text-[1.03em] font-semibold leading-snug ${topZero || 'mt-4'} mb-1.5 text-[var(--fei-text-primary)]`}
           >
-            {block.text}
+            {maybeHyphenate(block.text)}
           </h2>
         );
       }
@@ -334,14 +339,18 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
           {...offsetAttrs}
           className={`text-[1em] font-semibold leading-snug ${topZero || 'mt-3.5'} mb-1.5 text-[var(--fei-text-primary)]`}
         >
-          {block.text}
+          {maybeHyphenate(block.text)}
         </h3>
       );
     }
     case 'paragraph':
       return (
-        <p key={idx} {...offsetAttrs} className={`${topZero || 'mt-3'} mb-3 whitespace-pre-line`}>
-          {renderInline(block.text)}
+        <p
+          key={idx}
+          {...offsetAttrs}
+          className={`${topZero || 'mt-3'} mb-3 whitespace-pre-line ${justifyCls}`}
+        >
+          {renderInline(block.text, autoHyphenate)}
         </p>
       );
     case 'blockquote':
@@ -349,9 +358,9 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
         <blockquote
           key={idx}
           {...offsetAttrs}
-          className={`${topZero || 'mt-4'} mb-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent text-[var(--fei-text-primary)] text-[0.94em]`}
+          className={`${topZero || 'mt-4'} mb-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent text-[var(--fei-text-primary)] text-[0.94em] ${justifyCls}`}
         >
-          <span className="whitespace-pre-line">{renderInline(block.text)}</span>
+          <span className="whitespace-pre-line">{renderInline(block.text, autoHyphenate)}</span>
         </blockquote>
       );
     case 'code':
@@ -359,7 +368,7 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
         <pre
           key={idx}
           {...offsetAttrs}
-          className={`${topZero || 'mt-4'} mb-4 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent overflow-x-auto text-[0.8125em] leading-relaxed font-code text-[var(--fei-text-primary)]`}
+          className={`${topZero || 'mt-4'} mb-4 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] dark:border-transparent overflow-x-auto text-[0.8125em] leading-relaxed font-code text-[var(--fei-text-primary)] hyphens-none text-left`}
         >
           <code>{block.code}</code>
         </pre>
@@ -370,10 +379,10 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
           <ol
             key={idx}
             {...offsetAttrs}
-            className={`${topZero || 'mt-3'} mb-3 pl-5 list-decimal space-y-1.5 marker:text-[var(--fei-text-muted)]`}
+            className={`${topZero || 'mt-3'} mb-3 pl-5 list-decimal space-y-1.5 marker:text-[var(--fei-text-muted)] ${justifyCls}`}
           >
             {block.items.map((item, i) => (
-              <li key={i}>{renderInline(item)}</li>
+              <li key={i}>{renderInline(item, autoHyphenate)}</li>
             ))}
           </ol>
         );
@@ -382,10 +391,10 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
         <ul
           key={idx}
           {...offsetAttrs}
-          className={`${topZero || 'mt-3'} mb-3 pl-5 list-disc space-y-1.5 marker:text-[var(--fei-text-muted)]`}
+          className={`${topZero || 'mt-3'} mb-3 pl-5 list-disc space-y-1.5 marker:text-[var(--fei-text-muted)] ${justifyCls}`}
         >
           {block.items.map((item, i) => (
-            <li key={i}>{renderInline(item)}</li>
+            <li key={i}>{renderInline(item, autoHyphenate)}</li>
           ))}
         </ul>
       );
@@ -412,7 +421,7 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
                       key={colIdx}
                       className={`px-3 py-2 font-semibold border-r last:border-r-0 border-[var(--fei-border)] ${alignCls}`}
                     >
-                      {renderInline(header)}
+                      {renderInline(header, autoHyphenate)}
                     </th>
                   );
                 })}
@@ -434,7 +443,7 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean) {
                         key={colIdx}
                         className={`px-3 py-2 border-r last:border-r-0 border-[var(--fei-border)] align-middle ${alignCls}`}
                       >
-                        {renderInline(cell)}
+                        {renderInline(cell, autoHyphenate)}
                       </td>
                     );
                   })}
@@ -460,14 +469,16 @@ const DocBlockChunk = memo(function DocBlockChunk({
   blocks,
   startIdx,
   endIdx,
+  autoHyphenate,
 }: {
   blocks: BlockNode[];
   startIdx: number;
   endIdx: number;
+  autoHyphenate: boolean;
 }) {
   const nodes: React.ReactNode[] = [];
   for (let i = startIdx; i < endIdx; i++) {
-    nodes.push(renderBlock(blocks[i], i, i === 0));
+    nodes.push(renderBlock(blocks[i], i, i === 0, autoHyphenate));
   }
   return <>{nodes}</>;
 });
@@ -484,6 +495,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       doc,
       fontSize = 16,
       docFontFamily,
+      autoHyphenate = false,
       hasActiveMdict = false,
       isMdictPopupOpen = false,
       onEnglishWordSelected,
@@ -527,6 +539,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const lastPointerDownAtRef = useRef(0);
     const lastTouchStartAtRef = useRef(0);
     const isPointerActiveRef = useRef(false);
+    const lastPopupInteractionAtRef = useRef(0);
     const selectionCheckTimerRef = useRef<number | null>(null);
     const lastReportedProgressRef = useRef<number>(-1);
 
@@ -570,7 +583,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const pendingJumpRef = useRef<PendingJumpTarget | null>(null);
 
     // Reset measured heights when document/typography/width changes
-    const layoutKey = `${doc.id}|${content.length}|${fontSize}|${docFontFamily || ''}|${Math.round(contentWidth)}`;
+    const layoutKey = `${doc.id}|${content.length}|${fontSize}|${docFontFamily || ''}|${autoHyphenate ? '1' : '0'}|${Math.round(contentWidth)}`;
     const prevLayoutKeyRef = useRef(layoutKey);
     if (prevLayoutKeyRef.current !== layoutKey) {
       prevLayoutKeyRef.current = layoutKey;
@@ -1032,7 +1045,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         updateEdgeClips();
         reportReadProgress();
       }
-    }, [isVirtualized, mountedRange, fontSize, docFontFamily, contentWidth, doc.id, content]);
+    }, [isVirtualized, mountedRange, fontSize, docFontFamily, autoHyphenate, contentWidth, doc.id, content]);
 
     useLayoutEffect(() => {
       measureReadOverflow();
@@ -1040,7 +1053,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         updateEdgeClips();
         reportReadProgress();
       }
-    }, [content, doc.id, fontSize, docFontFamily, articleOverflow]);
+    }, [content, doc.id, fontSize, docFontFamily, autoHyphenate, articleOverflow]);
 
     useEffect(() => {
       if (typeof ResizeObserver === 'undefined') return;
@@ -1214,12 +1227,15 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       scheduleEmitViewState(260);
     };
 
+    const isRecentPopupInteraction = () =>
+      performance.now() - lastPopupInteractionAtRef.current < 900;
+
     const evaluateSelectionForMdict = () => {
       if (!hasActiveMdictRef.current) return;
       const articleEl = articleRef.current;
       const sel = window.getSelection();
       if (!articleEl || !sel || sel.isCollapsed || sel.rangeCount === 0) {
-        if (isMdictPopupOpenRef.current) {
+        if (isMdictPopupOpenRef.current && !isRecentPopupInteraction()) {
           onClearMdictLookupRef.current?.();
         }
         return;
@@ -1231,7 +1247,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const word = extractEnglishLookupWord(sel.toString());
       if (!word) {
-        if (isMdictPopupOpenRef.current) {
+        if (isMdictPopupOpenRef.current && !isRecentPopupInteraction()) {
           onClearMdictLookupRef.current?.();
         }
         return;
@@ -1255,11 +1271,37 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     useEffect(() => {
+      const isEventInsideMdictPopup = (evt: Event): boolean => {
+        if (typeof evt.composedPath === 'function') {
+          for (const node of evt.composedPath()) {
+            if (node instanceof Element && node.getAttribute('data-mdict-popup') === 'true') {
+              return true;
+            }
+          }
+        }
+        const t = evt.target;
+        return t instanceof Element && Boolean(t.closest('[data-mdict-popup="true"]'));
+      };
+
+      const markPopupStart = (evt: Event) => {
+        if (isEventInsideMdictPopup(evt)) {
+          lastPopupInteractionAtRef.current = performance.now();
+        } else {
+          lastPopupInteractionAtRef.current = 0;
+        }
+      };
+
+      const markPopupEnd = (evt: Event) => {
+        if (isEventInsideMdictPopup(evt)) {
+          lastPopupInteractionAtRef.current = performance.now();
+        }
+      };
+
       const handleSelectionChange = () => {
         if (!hasActiveMdictRef.current) return;
 
         const activeEl = document.activeElement as HTMLElement | null;
-        if (activeEl?.closest('[data-mdict-popup="true"]')) return;
+        if (activeEl?.closest('[data-mdict-popup="true"]') || isRecentPopupInteraction()) return;
 
         const sel = window.getSelection();
         if (!sel || sel.isCollapsed || !sel.toString().trim()) {
@@ -1276,8 +1318,20 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         scheduleMdictSelectionCheck(isPointerActiveRef.current ? 140 : 90);
       };
 
+      window.addEventListener('pointerdown', markPopupStart, true);
+      window.addEventListener('mousedown', markPopupStart, true);
+      window.addEventListener('touchstart', markPopupStart, true);
+      window.addEventListener('pointerup', markPopupEnd, true);
+      window.addEventListener('touchend', markPopupEnd, true);
+      window.addEventListener('click', markPopupEnd, true);
       document.addEventListener('selectionchange', handleSelectionChange);
       return () => {
+        window.removeEventListener('pointerdown', markPopupStart, true);
+        window.removeEventListener('mousedown', markPopupStart, true);
+        window.removeEventListener('touchstart', markPopupStart, true);
+        window.removeEventListener('pointerup', markPopupEnd, true);
+        window.removeEventListener('touchend', markPopupEnd, true);
+        window.removeEventListener('click', markPopupEnd, true);
         document.removeEventListener('selectionchange', handleSelectionChange);
         if (selectionCheckTimerRef.current) {
           window.clearTimeout(selectionCheckTimerRef.current);
@@ -1672,10 +1726,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                   </div>
                 ) : (
                   <div
+                    lang={autoHyphenate ? 'en' : undefined}
                     style={{
                       fontSize: `${fontSize}px`,
                       fontFamily: docFontFamily || 'var(--font-doc-body)',
                       lineHeight: DOC_LINE_HEIGHT,
+                      hyphens: autoHyphenate ? 'auto' : 'none',
+                      WebkitHyphens: autoHyphenate ? 'auto' : 'none',
                     }}
                     className="text-[var(--fei-text-primary)] break-words"
                   >
@@ -1706,6 +1763,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                                 blocks={blocks}
                                 startIdx={startIdx}
                                 endIdx={endIdx}
+                                autoHyphenate={autoHyphenate}
                               />
                             </div>
                           );
@@ -1715,7 +1773,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                         )}
                       </>
                     ) : (
-                      blocks.map((b, i) => renderBlock(b, i, i === 0))
+                      blocks.map((b, i) => renderBlock(b, i, i === 0, autoHyphenate))
                     )}
                   </div>
                 )}

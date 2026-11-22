@@ -148,6 +148,7 @@ export interface ReaderSettings {
   paper: ReaderPaper;
   indentFirstLine: boolean;
   defaultDocFont?: DocFontId;
+  autoHyphenate?: boolean;
 }
 
 export type SmartView = 'all' | 'recent' | 'starred' | 'dirty' | 'highlights' | 'trash';
