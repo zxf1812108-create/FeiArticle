@@ -512,6 +512,10 @@ public class LanServerPlugin extends Plugin {
 
   const readerNativePluginJava = `package com.feiartical.app;
 
+import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -554,6 +558,38 @@ public class ReaderNativePlugin extends Plugin {
         JSObject res = new JSObject();
         res.put("pressed", isScreenTouched);
         call.resolve(res);
+    }
+
+    @PluginMethod
+    public void readClipboardText(PluginCall call) {
+        Activity activity = getActivity();
+        if (activity == null) {
+            JSObject res = new JSObject();
+            res.put("text", "");
+            call.resolve(res);
+            return;
+        }
+        activity.runOnUiThread(() -> {
+            String text = "";
+            try {
+                ClipboardManager clipboard =
+                    (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+                if (clipboard != null && clipboard.hasPrimaryClip()) {
+                    ClipData clip = clipboard.getPrimaryClip();
+                    if (clip != null && clip.getItemCount() > 0) {
+                        CharSequence cs = clip.getItemAt(0).coerceToText(activity);
+                        if (cs != null) {
+                            text = cs.toString();
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                text = "";
+            }
+            JSObject res = new JSObject();
+            res.put("text", text);
+            call.resolve(res);
+        });
     }
 
     public static void dispatchVolumeKey(String direction) {

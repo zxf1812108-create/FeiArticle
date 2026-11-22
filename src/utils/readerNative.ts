@@ -5,6 +5,7 @@ export type VolumeKeyDirection = 'up' | 'down';
 interface ReaderNativePlugin {
   setVolumeKeyIntercept(options: { enabled: boolean }): Promise<void>;
   setTouchStateTracking(options: { enabled: boolean }): Promise<{ pressed: boolean }>;
+  readClipboardText(): Promise<{ text: string }>;
   addListener(
     eventName: 'volumeKey',
     listenerFunc: (event: { direction: VolumeKeyDirection }) => void
@@ -23,6 +24,26 @@ function hasReaderNative(): boolean {
 
 export function hasNativeTouchTracking(): boolean {
   return hasReaderNative();
+}
+
+export async function readSystemClipboardText(): Promise<{ ok: boolean; text: string }> {
+  if (hasReaderNative()) {
+    try {
+      const res = await ReaderNative.readClipboardText();
+      return { ok: true, text: typeof res?.text === 'string' ? res.text : '' };
+    } catch {
+      // Fall through to web clipboard API if native call unexpectedly fails
+    }
+  }
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+      const text = await navigator.clipboard.readText();
+      return { ok: true, text: typeof text === 'string' ? text : '' };
+    }
+  } catch {
+    return { ok: false, text: '' };
+  }
+  return { ok: false, text: '' };
 }
 
 export function setNativeVolumeKeyIntercept(enabled: boolean): void {

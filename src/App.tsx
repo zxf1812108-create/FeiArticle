@@ -15,6 +15,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ImportModal } from './components/ImportModal';
+import { InputPastePopover } from './components/InputPastePopover';
 import { MdictLookupPopup, MdictLookupPopupHandle } from './components/MdictLookupPopup';
 import {
   DocReadMetrics,
@@ -2613,6 +2614,9 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Global Input Long-Press Paste Popover */}
+      <InputPastePopover onFeedback={showToast} />
 
       {/* Toast */}
       {toast && (
