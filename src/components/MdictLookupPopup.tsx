@@ -16,6 +16,7 @@ import { stripDictExt } from '../utils/mdictStorage';
 export interface MdictLookupPopupHandle {
   pageUp: () => void;
   pageDown: () => void;
+  autoExpandIfOverflowing: () => void;
 }
 
 interface MdictLookupPopupProps {
@@ -380,8 +381,15 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const dictNameRef = useRef<HTMLElement | null>(null);
     const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
     const clipRafRef = useRef<number | null>(null);
+    const autoExpandRafRef = useRef<number | null>(null);
 
     const [isExpanded, setIsExpanded] = useState(false);
+    const isExpandedRef = useRef(false);
+    isExpandedRef.current = isExpanded;
+    const loadingRef = useRef(loading);
+    loadingRef.current = loading;
+    const manualExpandToggledRef = useRef(false);
+    const pendingAutoExpandCheckRef = useRef(false);
     const [hasToggledExpand, setHasToggledExpand] = useState(false);
     const [shiftExpandLeft, setShiftExpandLeft] = useState(false);
     const [topClipPx, setTopClipPx] = useState(0);
@@ -527,10 +535,67 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       });
     }, [updatePopupEdgeClips]);
 
+    const runOverflowAutoExpandCheck = useCallback(() => {
+      if (isExpandedRef.current || manualExpandToggledRef.current || loadingRef.current) {
+        pendingAutoExpandCheckRef.current = false;
+        return;
+      }
+      const el = bodyScrollRef.current;
+      const contentEl = bodyContentRef.current;
+      if (!el || !contentEl) return;
+
+      const viewHeight = el.clientHeight;
+      if (viewHeight <= 0) return;
+
+      const lines = collectPopupVisualLines(el, contentEl, shadowRootRef.current);
+      const style = window.getComputedStyle(el);
+      const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+      const contentNaturalHeight = contentEl.getBoundingClientRect().height + padY;
+
+      // Shadow DOM content not painted yet — keep pending so onContentRendered triggers the check
+      if (lines.length === 0 && contentNaturalHeight <= padY + 1) {
+        return;
+      }
+
+      pendingAutoExpandCheckRef.current = false;
+      const overflowsByLines = lines.length > 0 && lines[lines.length - 1].bottom > viewHeight - 1;
+      const overflowsByHeight = contentNaturalHeight > viewHeight + 2;
+      if (overflowsByLines || overflowsByHeight) {
+        setHasToggledExpand(true);
+        setIsExpanded(true);
+      }
+    }, []);
+
+    const scheduleAutoExpandCheck = useCallback(() => {
+      if (autoExpandRafRef.current !== null) {
+        window.cancelAnimationFrame(autoExpandRafRef.current);
+      }
+      autoExpandRafRef.current = window.requestAnimationFrame(() => {
+        autoExpandRafRef.current = null;
+        runOverflowAutoExpandCheck();
+      });
+    }, [runOverflowAutoExpandCheck]);
+
+    const autoExpandIfOverflowing = useCallback(() => {
+      if (isExpandedRef.current || manualExpandToggledRef.current) return;
+      pendingAutoExpandCheckRef.current = true;
+      scheduleAutoExpandCheck();
+    }, [scheduleAutoExpandCheck]);
+
+    const handleShadowContentRendered = useCallback(() => {
+      scheduleEdgeClipUpdate();
+      if (pendingAutoExpandCheckRef.current) {
+        scheduleAutoExpandCheck();
+      }
+    }, [scheduleEdgeClipUpdate, scheduleAutoExpandCheck]);
+
     useEffect(() => {
       return () => {
         if (clipRafRef.current !== null) {
           window.cancelAnimationFrame(clipRafRef.current);
+        }
+        if (autoExpandRafRef.current !== null) {
+          window.cancelAnimationFrame(autoExpandRafRef.current);
         }
       };
     }, []);
@@ -637,8 +702,9 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       () => ({
         pageUp: performPopupPageUp,
         pageDown: performPopupPageDown,
+        autoExpandIfOverflowing,
       }),
-      [performPopupPageUp, performPopupPageDown]
+      [performPopupPageUp, performPopupPageDown, autoExpandIfOverflowing]
     );
 
     const handleBodyPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -698,6 +764,8 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         type="button"
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => {
+          manualExpandToggledRef.current = true;
+          pendingAutoExpandCheckRef.current = false;
           setHasToggledExpand(true);
           setIsExpanded((prev) => !prev);
         }}
@@ -847,7 +915,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                     onShadowReady={(shadow) => {
                       shadowRootRef.current = shadow;
                     }}
-                    onContentRendered={scheduleEdgeClipUpdate}
+                    onContentRendered={handleShadowContentRendered}
                   />
                 ) : null}
               </div>

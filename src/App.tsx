@@ -255,6 +255,7 @@ export default function App() {
   const docToolbarOrderRef = useRef<DocToolbarIconId[]>(docToolbarOrder);
   docToolbarOrderRef.current = docToolbarOrder;
   const mdictLookupReqRef = useRef(0);
+  const pendingMdictAutoExpandRef = useRef(false);
   const docsRef = useRef<ArticleDoc[]>(docs);
   docsRef.current = docs;
   const foldersRef = useRef<FolderNode[]>(folders);
@@ -264,6 +265,15 @@ export default function App() {
   const localFsTimerRef = useRef<number | null>(null);
   const saveDocsTimerRef = useRef<number | null>(null);
   const isPullingLocalFsRef = useRef(false);
+
+  useEffect(() => {
+    if (mainView === 'doc' && mdictLookup && pendingMdictAutoExpandRef.current) {
+      pendingMdictAutoExpandRef.current = false;
+      mdictPopupRef.current?.autoExpandIfOverflowing();
+    } else if (!mdictLookup && !mdictLookupPending) {
+      pendingMdictAutoExpandRef.current = false;
+    }
+  }, [mainView, mdictLookup, mdictLookupPending]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1669,7 +1679,6 @@ export default function App() {
         )
       );
     }
-    showToast('同步设置已保存');
   };
 
   const handleToggleLanDirect = async (next: boolean) => {
@@ -1993,12 +2002,21 @@ export default function App() {
             isMdictLookupPending={mdictLookupPending}
             onEnglishWordSelected={({ word, placement }) => {
               setShowFontSizeBar(false);
+              pendingMdictAutoExpandRef.current = false;
               void runMdictLookup(word, placement);
             }}
             onClearMdictLookup={() => {
               mdictLookupReqRef.current++;
+              pendingMdictAutoExpandRef.current = false;
               setMdictLookupPending(false);
               setMdictLookup(null);
+            }}
+            onMdictPopupReleased={() => {
+              if (mdictPopupRef.current) {
+                mdictPopupRef.current.autoExpandIfOverflowing();
+              } else {
+                pendingMdictAutoExpandRef.current = true;
+              }
             }}
             onCopyFeedback={(copied) =>
               showToast(copied ? '已复制选中内容' : '复制失败，请重试')

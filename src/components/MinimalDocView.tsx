@@ -55,6 +55,7 @@ interface MinimalDocViewProps {
   isMdictLookupPending?: boolean;
   onEnglishWordSelected?: (payload: { word: string; placement: 'top' | 'bottom' }) => void;
   onClearMdictLookup?: () => void;
+  onMdictPopupReleased?: () => void;
   onCopyFeedback?: (copied: boolean) => void;
   onMdictPopupVolumeKey?: (direction: VolumeKeyDirection) => void;
   onViewStateChange: (state: DocViewStateSnapshot) => void;
@@ -518,6 +519,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       isMdictLookupPending = false,
       onEnglishWordSelected,
       onClearMdictLookup,
+      onMdictPopupReleased,
       onCopyFeedback,
       onMdictPopupVolumeKey,
       onViewStateChange,
@@ -566,6 +568,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const nativeTouchActiveRef = useRef(false);
     const domTouchActiveRef = useRef(false);
     const domMouseActiveRef = useRef(false);
+    const pressStartedInsidePopupRef = useRef(false);
     const lastPopupOpenedAtRef = useRef(0);
     const lastSelectionClearedOnReleaseAtRef = useRef(0);
     const selectionCheckTimerRef = useRef<number | null>(null);
@@ -583,6 +586,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     onEnglishWordSelectedRef.current = onEnglishWordSelected;
     const onClearMdictLookupRef = useRef(onClearMdictLookup);
     onClearMdictLookupRef.current = onClearMdictLookup;
+    const onMdictPopupReleasedRef = useRef(onMdictPopupReleased);
+    onMdictPopupReleasedRef.current = onMdictPopupReleased;
     const onCopyFeedbackRef = useRef(onCopyFeedback);
     onCopyFeedbackRef.current = onCopyFeedback;
     const onMdictPopupVolumeKeyRef = useRef(onMdictPopupVolumeKey);
@@ -1601,15 +1606,28 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           }
         }
 
+        const startedInsidePopup = pressStartedInsidePopupRef.current;
+        pressStartedInsidePopupRef.current = false;
+
         if (isMdictPopupOpenRef.current) {
           setCopyPopover(null);
           scheduleClearSelectionIfPopupOpen(0);
+          if (!startedInsidePopup) {
+            onMdictPopupReleasedRef.current?.();
+          }
         } else if (hasActiveMdictRef.current) {
           if (selectionCheckTimerRef.current) {
             window.clearTimeout(selectionCheckTimerRef.current);
             selectionCheckTimerRef.current = null;
             evaluateSelectionForMdict();
-          } else if (!isMdictLookupPendingRef.current) {
+            if (!startedInsidePopup) {
+              onMdictPopupReleasedRef.current?.();
+            }
+          } else if (isMdictLookupPendingRef.current) {
+            if (!startedInsidePopup) {
+              onMdictPopupReleasedRef.current?.();
+            }
+          } else {
             syncCopyPopover();
             cancelPendingSelectionClear();
             clearSelectionTimerRef.current = window.setTimeout(() => {
@@ -1639,6 +1657,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       });
 
       const onTouchStartGlobal = (e: TouchEvent) => {
+        pressStartedInsidePopupRef.current =
+          e.target instanceof Element && Boolean(e.target.closest('[data-mdict-popup="true"]'));
         domTouchActiveRef.current = e.touches.length > 0;
         if (domTouchActiveRef.current) {
           cancelPendingSelectionClear();
@@ -1658,6 +1678,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const onPointerDownGlobal = (e: PointerEvent) => {
         if (e.pointerType === 'touch') return;
+        pressStartedInsidePopupRef.current =
+          e.target instanceof Element && Boolean(e.target.closest('[data-mdict-popup="true"]'));
         domMouseActiveRef.current = true;
         cancelPendingSelectionClear();
       };
@@ -1672,6 +1694,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         nativeTouchActiveRef.current = false;
         domTouchActiveRef.current = false;
         domMouseActiveRef.current = false;
+        pressStartedInsidePopupRef.current = false;
       };
 
       const handleSelectionChange = () => {
