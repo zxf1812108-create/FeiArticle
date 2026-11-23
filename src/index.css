@@ -4,10 +4,10 @@
 
 @layer base {
   :root {
-    --font-sans: "Plus Jakarta Sans", "Noto Sans SC", system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
-    --font-serif: "Noto Serif SC", "Songti SC", "STSong", Georgia, serif;
-    --font-doc-body: system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Roboto", sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --font-sans: "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN", sans-serif;
+    --font-serif: var(--font-sans);
+    --font-doc-body: var(--font-sans);
+    --font-mono: var(--font-sans);
 
     /* FeiNote LCD Eye-Comfort Minimalist Light Palette (Matte Paper & Soft Charcoal, ~11:1 contrast mirroring Dark Mode) */
     color-scheme: light;
@@ -122,9 +122,15 @@
     color: var(--fei-text-primary);
   }
 
+  button,
+  input,
+  textarea,
+  select {
+    font-family: inherit;
+  }
+
   .font-editorial {
-    font-family: var(--font-serif);
-    font-optical-sizing: auto;
+    font-family: var(--font-sans);
   }
 
   .font-doc-body {

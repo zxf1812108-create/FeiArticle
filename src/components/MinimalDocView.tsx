@@ -49,7 +49,6 @@ export interface MinimalDocViewHandle {
 interface MinimalDocViewProps {
   doc: ArticleDoc;
   fontSize?: number;
-  docFontFamily?: string;
   autoHyphenate?: boolean;
   hasActiveMdict?: boolean;
   isMdictPopupOpen?: boolean;
@@ -513,7 +512,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     {
       doc,
       fontSize = 16,
-      docFontFamily,
       autoHyphenate = false,
       hasActiveMdict = false,
       isMdictPopupOpen = false,
@@ -625,7 +623,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const pendingJumpRef = useRef<PendingJumpTarget | null>(null);
 
     // Reset measured heights when document/typography/width changes
-    const layoutKey = `${doc.id}|${content.length}|${fontSize}|${docFontFamily || ''}|${autoHyphenate ? '1' : '0'}|${Math.round(contentWidth)}`;
+    const layoutKey = `${doc.id}|${content.length}|${fontSize}|${autoHyphenate ? '1' : '0'}|${Math.round(contentWidth)}`;
     const prevLayoutKeyRef = useRef(layoutKey);
     if (prevLayoutKeyRef.current !== layoutKey) {
       prevLayoutKeyRef.current = layoutKey;
@@ -1122,7 +1120,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         updateEdgeClips();
         reportReadProgress();
       }
-    }, [isVirtualized, mountedRange, fontSize, docFontFamily, autoHyphenate, contentWidth, doc.id, content]);
+    }, [isVirtualized, mountedRange, fontSize, autoHyphenate, contentWidth, doc.id, content]);
 
     useLayoutEffect(() => {
       measureReadOverflow();
@@ -1130,7 +1128,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         updateEdgeClips();
         reportReadProgress();
       }
-    }, [content, doc.id, fontSize, docFontFamily, autoHyphenate, articleOverflow]);
+    }, [content, doc.id, fontSize, autoHyphenate, articleOverflow]);
 
     useEffect(() => {
       if (typeof ResizeObserver === 'undefined') return;
@@ -1153,7 +1151,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       ro.observe(el);
       ro.observe(articleEl);
       return () => ro.disconnect();
-    }, [doc.id, fontSize, docFontFamily, isVirtualized]);
+    }, [doc.id, fontSize, isVirtualized]);
 
     // Re-anchor & refresh edge clips when bundled @fontsource woff2 unicode-range subsets finish swapping in
     useEffect(() => {
@@ -1184,7 +1182,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         fontSet.removeEventListener('loadingdone', onFontSwap);
         if (rafId !== null) window.cancelAnimationFrame(rafId);
       };
-    }, [docFontFamily, fontSize, doc.id]);
+    }, [fontSize, doc.id]);
 
     // Restore saved reading progress (preferring canonical synced charOffset over raw scrollTop)
     useLayoutEffect(() => {
@@ -2183,7 +2181,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                     lang={autoHyphenate ? 'en' : undefined}
                     style={{
                       fontSize: `${fontSize}px`,
-                      fontFamily: docFontFamily || 'var(--font-doc-body)',
                       lineHeight: DOC_LINE_HEIGHT,
                       hyphens: autoHyphenate ? 'auto' : 'none',
                       WebkitHyphens: autoHyphenate ? 'auto' : 'none',

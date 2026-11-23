@@ -135,20 +135,16 @@ export interface SyncLogEntry {
   status: 'success' | 'noop' | 'error';
 }
 
-export type ReaderFont = 'serif' | 'sans' | 'mono';
 export type ReaderPaper = 'white' | 'paper' | 'dark';
 export type ReaderWidth = 'narrow' | 'medium' | 'wide';
-export type DocFontId = 'system' | 'noto-sans-sc' | 'noto-serif-sc' | 'inter';
 export type WhistleSensitivity = 'low' | 'medium' | 'high';
 
 export interface ReaderSettings {
-  fontFamily: ReaderFont;
-  fontSize: number; // 14 - 22
+  fontSize: number; // 13 - 24
   lineHeight: number; // 1.6 - 2.2
   width: ReaderWidth;
   paper: ReaderPaper;
   indentFirstLine: boolean;
-  defaultDocFont?: DocFontId;
   autoHyphenate?: boolean;
   progressDisplayMode?: 'percent' | 'pages';
   whistleSensitivity?: WhistleSensitivity;

@@ -46,7 +46,6 @@ import {
 } from './utils/localFs';
 import {
   ArticleDoc,
-  DocFontId,
   FolderNode,
   MdictDictionarySummary,
   MdictLookupResult,
@@ -57,12 +56,6 @@ import {
   WebDavConfig,
   WhistleSensitivity,
 } from './types';
-import {
-  buildDocFontFamily,
-  DOC_FONT_OPTIONS,
-  resolveDefaultDocFont,
-  resolveDocFont,
-} from './utils/fonts';
 import {
   attachMdictCss,
   deleteMdictDictionary,
@@ -77,7 +70,6 @@ import {
   DEFAULT_READER_SETTINGS,
   DocToolbarIconId,
   loadActiveMdictId,
-  loadDocFontsMap,
   loadDocs,
   loadDocToolbarOrder,
   loadFolders,
@@ -95,7 +87,6 @@ import {
   MAX_DOC_FONT_SIZE,
   MIN_DOC_FONT_SIZE,
   saveActiveMdictId,
-  saveDocFontsMap,
   saveDocs,
   saveDocToolbarOrder,
   saveFolders,
@@ -219,9 +210,6 @@ export default function App() {
     if (!Number.isFinite(raw)) return DEFAULT_READER_SETTINGS.fontSize;
     return Math.min(MAX_DOC_FONT_SIZE, Math.max(MIN_DOC_FONT_SIZE, Math.round(raw)));
   });
-  const [defaultDocFont, setDefaultDocFont] = useState<DocFontId>(() =>
-    resolveDefaultDocFont(loadReaderSettings().defaultDocFont)
-  );
   const [autoHyphenate, setAutoHyphenate] = useState<boolean>(() =>
     Boolean(loadReaderSettings().autoHyphenate)
   );
@@ -240,9 +228,6 @@ export default function App() {
     currentPage: 1,
     totalPages: 1,
   });
-  const [docFontsMap, setDocFontsMap] = useState<Record<string, string>>(() =>
-    loadDocFontsMap()
-  );
   const [mdictDicts, setMdictDicts] = useState<MdictDictionarySummary[]>([]);
   const [activeMdictId, setActiveMdictId] = useState<string | null>(() => loadActiveMdictId());
   const [mdictLookup, setMdictLookup] = useState<{
@@ -1538,39 +1523,6 @@ export default function App() {
     };
   }, []);
 
-  const currentDocFont = useMemo<DocFontId>(() => {
-    if (!selectedDocId) return defaultDocFont;
-    return resolveDocFont(docFontsMap[selectedDocId], defaultDocFont);
-  }, [selectedDocId, docFontsMap, defaultDocFont]);
-
-  const currentDocFontFamily = useMemo(
-    () => buildDocFontFamily(currentDocFont, defaultDocFont),
-    [currentDocFont, defaultDocFont]
-  );
-
-  const handleChangeDocFont = (nextFontId: DocFontId) => {
-    if (!selectedDocId) return;
-    docViewRef.current?.captureTypographyAnchor();
-    setDocFontsMap((prev) => {
-      const nextMap = {
-        ...prev,
-        [selectedDocId]: nextFontId,
-      };
-      saveDocFontsMap(nextMap);
-      return nextMap;
-    });
-  };
-
-  const handleSetDefaultDocFont = () => {
-    setDefaultDocFont(currentDocFont);
-    const prev = loadReaderSettings();
-    saveReaderSettings({
-      ...prev,
-      defaultDocFont: currentDocFont,
-    });
-    showToast('已设为默认字体');
-  };
-
   const runMdictLookup = async (
     word: string,
     placement: 'top' | 'bottom',
@@ -2119,7 +2071,6 @@ export default function App() {
             ref={docViewRef}
             doc={selectedDoc}
             fontSize={fontSize}
-            docFontFamily={currentDocFontFamily}
             autoHyphenate={autoHyphenate}
             hasActiveMdict={mdictDicts.length > 0}
             isMdictPopupOpen={mdictLookup !== null}
@@ -2505,8 +2456,8 @@ export default function App() {
                       if (suppressToolbarClickRef.current) return;
                       setShowFontSizeBar((prev) => !prev);
                     }}
-                    aria-label="调节字体与字号"
-                    title="调节字体与字号（可拖动调整图标位置）"
+                    aria-label="字号与断字设置"
+                    title="字号与断字设置（可拖动调整图标位置）"
                     className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
                       isDraggingThis
                         ? dragCls
@@ -2661,7 +2612,7 @@ export default function App() {
         />
       )}
 
-      {/* Font Size & Font Family Adjuster Popover in Browse Mode */}
+      {/* Font Size & Hyphenation Adjuster Popover in Browse Mode */}
       {mainView === 'doc' && showFontSizeBar && (
         <>
           <div
@@ -2670,7 +2621,7 @@ export default function App() {
           />
           <div
             role="dialog"
-            aria-label="调节字体与字号"
+            aria-label="字号与断字设置"
             onClick={(e) => e.stopPropagation()}
             className="fixed bottom-[64px] left-1/2 -translate-x-1/2 z-40 w-[min(340px,calc(100vw-24px))] px-3.5 py-2.5 rounded-2xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-lg eink:shadow-none flex flex-col gap-2.5 select-none"
           >
@@ -2709,31 +2660,6 @@ export default function App() {
               <span className="text-[12px] font-code tabular-nums text-[var(--fei-text-muted)] w-8 text-right shrink-0">
                 {fontSize}
               </span>
-            </div>
-
-            <div className="pt-2 border-t border-[var(--fei-border)] flex items-center gap-2.5">
-              <span className="text-[12px] text-[var(--fei-text-muted)] shrink-0">
-                字体
-              </span>
-              <select
-                value={currentDocFont}
-                onChange={(e) => handleChangeDocFont(e.target.value as DocFontId)}
-                aria-label="文档字体"
-                className="flex-1 min-w-0 h-9 px-2.5 rounded-lg bg-[var(--fei-bg)] border border-[var(--fei-border)] text-[12.5px] text-[var(--fei-text-primary)] outline-none focus:border-[var(--fei-border-strong)] cursor-pointer"
-              >
-                {DOC_FONT_OPTIONS.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={handleSetDefaultDocFont}
-                className="h-9 px-2 inline-flex items-center justify-center rounded-lg text-[12px] font-medium whitespace-nowrap shrink-0 text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] active:bg-[var(--fei-bg-selected)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] transition-colors cursor-pointer"
-              >
-                设为默认
-              </button>
             </div>
 
             <div className="pt-2 border-t border-[var(--fei-border)] flex items-center justify-between gap-3">

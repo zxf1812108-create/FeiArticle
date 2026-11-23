@@ -23,7 +23,6 @@ const KEYS = {
   LAST_DOC_ID: 'feiartical_last_doc_id_v1',
   PURGED_RECORDS: 'feiartical_purged_records_v1',
   ACTIVE_MDICT: 'feiartical_active_mdict_v1',
-  DOC_FONTS: 'feiartical_doc_fonts_v1',
   TREE_TOOLBAR_ORDER_LEGACY: 'feiartical_tree_toolbar_order_v1',
   TREE_TOOLBAR_ORDER: 'feiartical_tree_toolbar_order_v2',
   DOC_TOOLBAR_ORDER: 'feiartical_doc_toolbar_order_v1',
@@ -50,13 +49,11 @@ export const MIN_DOC_FONT_SIZE = 13;
 export const MAX_DOC_FONT_SIZE = 24;
 
 export const DEFAULT_READER_SETTINGS: ReaderSettings = {
-  fontFamily: 'serif',
   fontSize: 16,
   lineHeight: 1.62,
   width: 'medium',
   paper: 'white',
   indentFirstLine: false,
-  defaultDocFont: 'system',
   autoHyphenate: false,
   progressDisplayMode: 'percent',
   whistleSensitivity: 'medium',
@@ -280,27 +277,6 @@ export function saveActiveMdictId(dictId: string | null): void {
   } else {
     localStorage.removeItem(KEYS.ACTIVE_MDICT);
   }
-}
-
-export function loadDocFontsMap(): Record<string, string> {
-  const parsed = safeParse<Record<string, unknown>>(
-    localStorage.getItem(KEYS.DOC_FONTS),
-    {}
-  );
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return {};
-  }
-  const result: Record<string, string> = {};
-  for (const [docId, val] of Object.entries(parsed)) {
-    if (typeof val === 'string' && val.trim()) {
-      result[docId] = val;
-    }
-  }
-  return result;
-}
-
-export function saveDocFontsMap(map: Record<string, string>): void {
-  localStorage.setItem(KEYS.DOC_FONTS, JSON.stringify(map));
 }
 
 export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'sync' | 'settings';
