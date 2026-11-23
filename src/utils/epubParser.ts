@@ -101,7 +101,7 @@ function buildEntryLookup(entries: Record<string, Uint8Array>): {
   };
 }
 
-function decodeBytesSmart(bytes: Uint8Array): string {
+export function decodeBytesSmart(bytes: Uint8Array): string {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '');
   } catch {
@@ -885,7 +885,11 @@ function convertSpineDocumentToMarkdown(
   return blocks.join('\n\n').trim();
 }
 
-function unzipFiltered(bytes: Uint8Array): Promise<Record<string, Uint8Array>> {
+export function convertHtmlToMarkdown(htmlText: string): string {
+  return convertSpineDocumentToMarkdown(htmlText, []);
+}
+
+export function unzipFiltered(bytes: Uint8Array): Promise<Record<string, Uint8Array>> {
   return new Promise((resolve, reject) => {
     unzip(
       bytes,

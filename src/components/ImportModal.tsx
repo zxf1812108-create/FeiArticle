@@ -1,7 +1,11 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Check, Download, FileText, Folder, Plus, X } from 'lucide-react';
 import { FolderNode } from '../types';
-import { parseEpubFile } from '../utils/epubParser';
+import {
+  isEbookFile,
+  isSupportedImportFile,
+  parseEbookFile,
+} from '../utils/ebookParser';
 import { INBOX_FOLDER_ID, isReservedInboxName } from '../utils/inbox';
 import { readTextFileSmart } from '../utils/textParser';
 
@@ -53,14 +57,6 @@ export const ImportModal: React.FC<ImportModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const isEpubFile = (file: File) =>
-    /\.epub$/i.test(file.name) || file.type === 'application/epub+zip';
-
-  const isSupportedImportFile = (file: File) =>
-    isEpubFile(file) ||
-    /\.(txt|md|markdown|text)$/i.test(file.name) ||
-    file.type.startsWith('text/');
-
   const processFiles = async (fileList: FileList | File[]) => {
     if (importing) return;
     setError(null);
@@ -70,7 +66,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
     }
     const files = Array.from(fileList).filter(isSupportedImportFile);
     if (files.length === 0) {
-      setError('请选择 .txt、.md 或 .epub 文档（支持多选）。');
+      setError('请选择 .txt、.md、.epub、.mobi、.azw3、.fb2 或 .html 文档（支持多选）。');
       return;
     }
 
@@ -85,12 +81,12 @@ export const ImportModal: React.FC<ImportModalProps> = ({
       const failedMessages: string[] = [];
 
       for (const file of files) {
-        if (isEpubFile(file)) {
+        if (isEbookFile(file)) {
           try {
-            const epubDoc = await parseEpubFile(file);
+            const ebookDoc = await parseEbookFile(file);
             parsed.push({
-              title: epubDoc.title,
-              content: epubDoc.content,
+              title: ebookDoc.title,
+              content: ebookDoc.content,
               folderId: effectiveFolderId,
               format: 'txt',
             });
@@ -336,17 +332,16 @@ export const ImportModal: React.FC<ImportModalProps> = ({
           >
             <Download className="w-5 h-5 mx-auto text-[var(--fei-text-muted)]" />
             <div className="text-[14px] font-medium text-[var(--fei-text-primary)]">
-              {importing ? '正在解析并转换文档…' : '选择 .txt / .md / .epub 文件（可多选）'}
+              {importing ? '正在解析并转换文档…' : '选择 .txt / .md / .epub / .mobi 等文档（可多选）'}
             </div>
             <p className="text-[12px] text-[var(--fei-text-muted)]">
-              默认以 UTF-8 编码存放为 .txt 文本，EPUB 文档结构自动转为 Markdown 保留
+              支持 EPUB、MOBI、AZW3、AZW、PRC、FB2、HTML，结构自动转为 Markdown 并以 UTF-8 存为 .txt
             </p>
             <input
               ref={fileInputRef}
               type="file"
               multiple
               disabled={importing}
-              accept=".txt,.md,.markdown,.epub,text/plain,text/markdown,application/epub+zip"
               className="hidden"
               onChange={(e) => {
                 if (e.target.files && e.target.files.length > 0) {

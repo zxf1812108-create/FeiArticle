@@ -113,7 +113,11 @@ import {
   StorageDirectoryConfig,
   TreeToolbarIconId,
 } from './utils/storage';
-import { parseEpubFile } from './utils/epubParser';
+import {
+  isEbookFile,
+  isSupportedImportFile,
+  parseEbookFile,
+} from './utils/ebookParser';
 import {
   extractExcerpt,
   getByteSize,
@@ -1451,7 +1455,7 @@ export default function App() {
     if (whistleEnabled) {
       stopWhistleDetector();
       setWhistleEnabled(false);
-      showToast('吹口哨翻页已关闭', 1200);
+      showToast('已关闭', 1200);
       return;
     }
 
@@ -2057,11 +2061,7 @@ export default function App() {
     if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
     e.preventDefault();
     setWindowDragging(false);
-    const files = Array.from(e.dataTransfer.files).filter(
-      (f) =>
-        /\.(txt|md|markdown|text|epub)$/i.test(f.name) ||
-        f.type === 'application/epub+zip'
-    );
+    const files = Array.from(e.dataTransfer.files).filter(isSupportedImportFile);
     if (files.length === 0) return;
     const parsed: Array<{
       title: string;
@@ -2071,12 +2071,12 @@ export default function App() {
     }> = [];
     const failedMsgs: string[] = [];
     for (const file of files) {
-      if (/\.epub$/i.test(file.name) || file.type === 'application/epub+zip') {
+      if (isEbookFile(file)) {
         try {
-          const epubDoc = await parseEpubFile(file);
+          const ebookDoc = await parseEbookFile(file);
           parsed.push({
-            title: epubDoc.title,
-            content: epubDoc.content,
+            title: ebookDoc.title,
+            content: ebookDoc.content,
             folderId: defaultImportFolderId,
             format: 'txt',
           });
@@ -2258,7 +2258,7 @@ export default function App() {
                         setShowImportModal(true);
                       }}
                       aria-label="导入文本文档"
-                      title="导入 .txt / .md / .epub 文档或粘贴文本（可拖动调整图标位置）"
+                      title="导入 .txt / .md / .epub / .mobi 等文档或粘贴文本（可拖动调整图标位置）"
                       className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
                     >
                       <Download className="w-[22px] h-[22px]" strokeWidth={1.8} />
@@ -2796,7 +2796,7 @@ export default function App() {
       {windowDragging && (
         <div className="fixed inset-0 z-50 bg-black/10 dark:bg-black/25 eink:bg-transparent flex items-center justify-center pointer-events-none">
           <div className="px-5 py-3 rounded-xl bg-[var(--fei-bg-surface)] border-[1.5px] border-[var(--fei-modal-border)] shadow-lg eink:shadow-none text-[14px] text-[var(--fei-text-primary)]">
-            松开导入 .txt / .md / .epub 文档
+            松开导入 .txt / .md / .epub / .mobi 等文档
           </div>
         </div>
       )}
