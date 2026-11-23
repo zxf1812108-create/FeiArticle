@@ -10,6 +10,12 @@ export type LanDirectAction =
   | {
       type: 'importDocs';
       items: Array<{ title: string; content: string; folderId: string | null; format?: 'txt' | 'md' }>;
+    }
+  | {
+      type: 'importEbook';
+      fileName: string;
+      base64: string;
+      folderId: string | null;
     };
 
 interface LanServerNativePlugin {
@@ -17,6 +23,7 @@ interface LanServerNativePlugin {
     port?: number;
     html: string;
     stateJson: string;
+    password?: string;
   }): Promise<{ running: boolean; url: string; ip: string; port: number }>;
   stop(): Promise<{ running: boolean }>;
   updateState(options: { stateJson: string }): Promise<{ ok: boolean }>;
@@ -43,7 +50,8 @@ function serializeState(folders: FolderNode[], docs: ArticleDoc[]): string {
 
 export async function startLanDirectServer(
   folders: FolderNode[],
-  docs: ArticleDoc[]
+  docs: ArticleDoc[],
+  password = ''
 ): Promise<LanServerStatus> {
   const stateJson = serializeState(folders, docs);
 
@@ -55,6 +63,7 @@ export async function startLanDirectServer(
       port: 8899,
       html: PC_DIRECT_HTML,
       stateJson,
+      password,
     });
     return { running: Boolean(res.running), url: res.url || '' };
   }
@@ -63,7 +72,7 @@ export async function startLanDirectServer(
   const res = await fetch('/api/lan/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ html: PC_DIRECT_HTML, stateJson }),
+    body: JSON.stringify({ html: PC_DIRECT_HTML, stateJson, password }),
   });
   if (!res.ok) {
     throw new Error('启动电脑直连失败');

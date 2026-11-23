@@ -1,13 +1,21 @@
 import {
   convertHtmlToMarkdown,
   decodeBytesSmart,
+  detectImageInfoFromBytes,
+  ExtractedEbookImage,
+  formatMarkdownImage,
+  HtmlImageResolver,
   parseEpubFile,
+  sanitizeBookImageDirName,
   unzipFiltered,
 } from './epubParser';
+
+export type { ExtractedEbookImage };
 
 export interface ParsedEbookDocument {
   title: string;
   content: string;
+  images?: ExtractedEbookImage[];
 }
 
 const EPUB_EXT_RE = /\.epub$/i;
@@ -345,6 +353,8 @@ interface MobiSectionInfo {
   fileVersion: number;
   title: string;
   extraDataFlags: number;
+  firstImageRecordIndex: number;
+  coverOffset: number;
   huffRecordOffset: number;
   huffRecordCount: number;
   fdstRecordIndex: number;
@@ -367,6 +377,8 @@ function parseMobiSectionHeader(
   let fileVersion = 0;
   let title = '';
   let extraDataFlags = 0;
+  let firstImageRecordIndex = 0xffffffff;
+  let coverOffset = 0xffffffff;
   let huffRecordOffset = 0xffffffff;
   let huffRecordCount = 0;
   let fdstRecordIndex = 0xffffffff;
@@ -395,6 +407,9 @@ function parseMobiSectionHeader(
           .trim();
       }
     }
+    if (recordBytes.length >= 112) {
+      firstImageRecordIndex = view.getUint32(108, false);
+    }
     if (recordBytes.length >= 120) {
       huffRecordOffset = view.getUint32(112, false);
       huffRecordCount = view.getUint32(116, false);
@@ -406,7 +421,7 @@ function parseMobiSectionHeader(
       extraDataFlags = view.getUint32(240, false);
     }
 
-    // Parse EXTH header for updated title (503) and combo KF8 boundary (121)
+    // Parse EXTH header for updated title (503), combo KF8 boundary (121), and cover image offset (201)
     const exthFlags = recordBytes.length >= 132 ? view.getUint32(128, false) : 0;
     const exthOffset = 16 + headerLength;
     if (
@@ -432,6 +447,9 @@ function parseMobiSectionHeader(
         } else if (recType === 121 && valBytes.length >= 4) {
           const bView = new DataView(valBytes.buffer, valBytes.byteOffset, valBytes.byteLength);
           kf8Boundary = bView.getUint32(0, false);
+        } else if (recType === 201 && valBytes.length >= 4) {
+          const cView = new DataView(valBytes.buffer, valBytes.byteOffset, valBytes.byteLength);
+          coverOffset = cView.getUint32(0, false);
         }
         cursor += recLen;
       }
@@ -447,6 +465,8 @@ function parseMobiSectionHeader(
     fileVersion,
     title,
     extraDataFlags,
+    firstImageRecordIndex,
+    coverOffset,
     huffRecordOffset,
     huffRecordCount,
     fdstRecordIndex,
@@ -629,21 +649,119 @@ async function parseMobiFile(file: File): Promise<ParsedEbookDocument> {
     }
   }
 
+  const metaTitle = activeSection.title || primarySection.title;
+  const bookTitle = metaTitle && !isGenericBookTitle(metaTitle) ? metaTitle : fallbackTitle;
+  const bookImageDir = sanitizeBookImageDirName(bookTitle);
+
+  const firstImageRecIdx =
+    activeSection.firstImageRecordIndex !== 0xffffffff &&
+    activeSection.firstImageRecordIndex < records.length
+      ? activeSection.firstImageRecordIndex
+      : primarySection.firstImageRecordIndex !== 0xffffffff &&
+          primarySection.firstImageRecordIndex < records.length
+        ? primarySection.firstImageRecordIndex
+        : -1;
+
+  const extractedImages: ExtractedEbookImage[] = [];
+  const recIndexToRelPath = new Map<number, string>();
+  let mobiImgSeq = 0;
+
+  const registerMobiImageRecord = (
+    absRecordIndex: number,
+    preferredBaseName?: string
+  ): string | null => {
+    if (absRecordIndex < 0 || absRecordIndex >= records.length) return null;
+    const existing = recIndexToRelPath.get(absRecordIndex);
+    if (existing) return existing;
+    const imgBytes = records[absRecordIndex];
+    if (!imgBytes || imgBytes.length < 4) return null;
+    const info = detectImageInfoFromBytes(imgBytes);
+    if (!info) return null;
+    const fileName = preferredBaseName
+      ? `${preferredBaseName}${info.ext}`
+      : `${String(++mobiImgSeq).padStart(3, '0')}${info.ext}`;
+    const relPath = `images/${bookImageDir}/${fileName}`;
+    recIndexToRelPath.set(absRecordIndex, relPath);
+    extractedImages.push({
+      relPath,
+      mimeType: info.mimeType,
+      bytes: new Uint8Array(imgBytes),
+    });
+    return relPath;
+  };
+
+  const mobiImageResolver: HtmlImageResolver = (el: Element) => {
+    const alt = (el.getAttribute('alt') || el.getAttribute('title') || '').trim();
+    const recAttr = (
+      el.getAttribute('recindex') ||
+      el.getAttribute('mediarecindex') ||
+      ''
+    ).trim();
+
+    if (firstImageRecIdx >= 0 && recAttr) {
+      const oneBased = Number.parseInt(recAttr, 10);
+      if (Number.isFinite(oneBased) && oneBased >= 1) {
+        const relPath = registerMobiImageRecord(firstImageRecIdx + oneBased - 1);
+        if (relPath) return { relPath, alt };
+      }
+    }
+
+    const rawSrc = (
+      el.getAttribute('src') ||
+      el.getAttribute('href') ||
+      el.getAttribute('xlink:href') ||
+      el.getAttributeNS?.('http://www.w3.org/1999/xlink', 'href') ||
+      ''
+    ).trim();
+
+    if (!rawSrc) return null;
+    if (/^(?:https?:\/\/|data:image\/)/i.test(rawSrc)) {
+      return { relPath: rawSrc, alt };
+    }
+
+    // KF8 / AZW3 uses kindle:embed:XXXX (base-32 1-based resource index)
+    const embedMatch = rawSrc.match(/^kindle:embed:([0-9a-v]+)/i);
+    if (firstImageRecIdx >= 0 && embedMatch) {
+      const oneBased = Number.parseInt(embedMatch[1], 32);
+      if (Number.isFinite(oneBased) && oneBased >= 1) {
+        const relPath = registerMobiImageRecord(firstImageRecIdx + oneBased - 1);
+        if (relPath) return { relPath, alt };
+      }
+    }
+
+    return null;
+  };
+
   const decodedText = decodeMobiBytes(rawBytes, activeSection.textEncoding);
-  const looksLikeHtml = /<(?:html|body|p|div|h[1-6]|br|mbp:pagebreak)\b/i.test(
+  const looksLikeHtml = /<(?:html|body|p|div|h[1-6]|br|img|mbp:pagebreak)\b/i.test(
     decodedText.slice(0, 8000)
   );
 
   let content: string;
   if (looksLikeHtml) {
     const cleanedHtml = preprocessMobiHtml(decodedText);
-    content = convertHtmlToMarkdown(cleanedHtml);
+    content = convertHtmlToMarkdown(cleanedHtml, mobiImageResolver);
   } else {
     content = decodedText
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
+  }
+
+  // If EXTH specifies a cover image offset that wasn't already referenced in the HTML body, prepend it
+  const coverOffset =
+    activeSection.coverOffset !== 0xffffffff
+      ? activeSection.coverOffset
+      : primarySection.coverOffset;
+  if (firstImageRecIdx >= 0 && coverOffset !== 0xffffffff) {
+    const coverAbsIdx = firstImageRecIdx + coverOffset;
+    if (!recIndexToRelPath.has(coverAbsIdx)) {
+      const coverRelPath = registerMobiImageRecord(coverAbsIdx, 'cover');
+      if (coverRelPath) {
+        content = `${formatMarkdownImage('封面', coverRelPath)}\n\n${content}`;
+      }
+    }
   }
 
   content = content
@@ -656,12 +774,10 @@ async function parseMobiFile(file: File): Promise<ParsedEbookDocument> {
     throw new Error(`「${file.name}」中未提取到可读文本内容`);
   }
 
-  const metaTitle = activeSection.title || primarySection.title;
-  const bookTitle = metaTitle && !isGenericBookTitle(metaTitle) ? metaTitle : fallbackTitle;
-
   return {
     title: bookTitle,
     content,
+    images: extractedImages.length > 0 ? extractedImages : undefined,
   };
 }
 
@@ -689,6 +805,21 @@ function serializeFb2Inline(node: Node): string {
   return inner;
 }
 
+function decodeBase64ToBytes(rawBase64: string): Uint8Array | null {
+  try {
+    const cleaned = rawBase64.replace(/\s+/g, '');
+    if (!cleaned) return null;
+    const binary = atob(cleaned);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      out[i] = binary.charCodeAt(i);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 function parseFb2Xml(xmlText: string, fileName: string): ParsedEbookDocument {
   const parser = new DOMParser();
   let doc = parser.parseFromString(xmlText, 'application/xml');
@@ -712,6 +843,49 @@ function parseFb2Xml(xmlText: string, fileName: string): ParsedEbookDocument {
   const metaTitle = (titleEl?.textContent || '').replace(/\s+/g, ' ').trim();
   const fallbackTitle = stripEbookExtension(fileName);
   const bookTitle = metaTitle && !isGenericBookTitle(metaTitle) ? metaTitle : fallbackTitle;
+  const bookImageDir = sanitizeBookImageDirName(bookTitle);
+
+  // Index embedded <binary id="..."> images in FB2
+  const fb2Binaries = new Map<string, { bytes: Uint8Array; hintName: string }>();
+  for (const binEl of getLocal(doc, 'binary')) {
+    const id = (binEl.getAttribute('id') || '').trim();
+    if (!id) continue;
+    const decoded = decodeBase64ToBytes(binEl.textContent || '');
+    if (decoded && decoded.length >= 4) {
+      fb2Binaries.set(id.toLowerCase(), { bytes: decoded, hintName: id });
+    }
+  }
+
+  const extractedImages: ExtractedEbookImage[] = [];
+  const fb2IdToRelPath = new Map<string, string>();
+  let fb2ImgSeq = 0;
+
+  const registerFb2Image = (href: string, alt = ''): string | null => {
+    const key = href.replace(/^#/, '').trim().toLowerCase();
+    if (!key) return null;
+    const existing = fb2IdToRelPath.get(key);
+    if (existing) return formatMarkdownImage(alt, existing);
+    const bin = fb2Binaries.get(key);
+    if (!bin) return null;
+    const info = detectImageInfoFromBytes(bin.bytes, bin.hintName);
+    if (!info) return null;
+    const fileNamePart = `${String(++fb2ImgSeq).padStart(3, '0')}${info.ext}`;
+    const relPath = `images/${bookImageDir}/${fileNamePart}`;
+    fb2IdToRelPath.set(key, relPath);
+    extractedImages.push({ relPath, mimeType: info.mimeType, bytes: bin.bytes });
+    return formatMarkdownImage(alt, relPath);
+  };
+
+  const getFb2ImageHref = (imgEl: Element): string => {
+    for (let i = 0; i < imgEl.attributes.length; i++) {
+      const attr = imgEl.attributes[i];
+      const attrName = attr.name.toLowerCase();
+      if (attrName === 'href' || attrName.endsWith(':href')) {
+        return attr.value.trim();
+      }
+    }
+    return '';
+  };
 
   const bodies = getLocal(doc, 'body');
   const blocks: string[] = [];
@@ -731,6 +905,14 @@ function parseFb2Xml(xmlText: string, fileName: string): ParsedEbookDocument {
 
   const walkFb2Element = (el: Element, sectionDepth: number) => {
     const tag = (el.localName || el.tagName || '').toLowerCase();
+
+    if (tag === 'image') {
+      const href = getFb2ImageHref(el);
+      const alt = (el.getAttribute('alt') || el.getAttribute('title') || '').trim();
+      const mdImg = href ? registerFb2Image(href, alt) : null;
+      if (mdImg) blocks.push(mdImg);
+      return;
+    }
 
     if (tag === 'title') {
       const text = extractTitleText(el);
@@ -808,6 +990,20 @@ function parseFb2Xml(xmlText: string, fileName: string): ParsedEbookDocument {
     walkFb2Element(body, 0);
   }
 
+  // Prepend FB2 coverpage image if declared and not already emitted
+  const coverPage = getLocal(doc, 'coverpage')[0];
+  if (coverPage) {
+    const coverImgEl = getLocal(coverPage, 'image')[0];
+    if (coverImgEl) {
+      const href = getFb2ImageHref(coverImgEl);
+      const key = href.replace(/^#/, '').trim().toLowerCase();
+      if (key && !fb2IdToRelPath.has(key)) {
+        const mdImg = registerFb2Image(href, '封面');
+        if (mdImg) blocks.unshift(mdImg);
+      }
+    }
+  }
+
   const content = blocks
     .join('\n\n')
     .replace(/\r\n/g, '\n')
@@ -819,7 +1015,11 @@ function parseFb2Xml(xmlText: string, fileName: string): ParsedEbookDocument {
     throw new Error(`「${fileName}」中未提取到可读文本内容`);
   }
 
-  return { title: bookTitle, content };
+  return {
+    title: bookTitle,
+    content,
+    images: extractedImages.length > 0 ? extractedImages : undefined,
+  };
 }
 
 async function parseFb2File(file: File): Promise<ParsedEbookDocument> {
@@ -848,7 +1048,17 @@ async function parseHtmlEbookFile(file: File): Promise<ParsedEbookDocument> {
   const fallbackTitle = stripEbookExtension(file.name);
   const bookTitle = titleText && !isGenericBookTitle(titleText) ? titleText : fallbackTitle;
 
-  const content = convertHtmlToMarkdown(htmlText)
+  const htmlImageResolver: HtmlImageResolver = (el: Element) => {
+    const rawSrc = (el.getAttribute('src') || el.getAttribute('data-src') || '').trim();
+    if (!rawSrc) return null;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(rawSrc) && !/^(?:https?:\/\/|data:image\/)/i.test(rawSrc)) {
+      return null;
+    }
+    const alt = (el.getAttribute('alt') || el.getAttribute('title') || '').trim();
+    return { relPath: rawSrc, alt };
+  };
+
+  const content = convertHtmlToMarkdown(htmlText, htmlImageResolver)
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .replace(/\n{3,}/g, '\n\n')

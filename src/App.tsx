@@ -9,7 +9,6 @@ import {
   Minus,
   Pencil,
   Plus,
-  RefreshCw,
   Scissors,
   Settings,
   Trash2,
@@ -36,9 +35,11 @@ import {
 } from './components/StorageFolderModal';
 import { SyncModal } from './components/SyncModal';
 import { TrashModal } from './components/TrashModal';
+import { WifiSyncModal } from './components/WifiSyncModal';
 import {
   checkAndPullExternalLocalFsChanges,
   resetLocalFsSyncManifest,
+  saveLocalImageFiles,
   scanAndMergeFromLocalFs,
   subscribeLocalStorageResume,
   syncWorkspaceToLocalFs,
@@ -52,7 +53,6 @@ import {
   PurgedSyncRecords,
   QuotaStats,
   SyncedTreeState,
-  SyncLogEntry,
   WebDavConfig,
   WhistleSensitivity,
 } from './types';
@@ -79,7 +79,6 @@ import {
   loadQuotaStats,
   loadReaderSettings,
   loadStorageDirConfig,
-  loadSyncLogs,
   loadTheme,
   loadTreeToolbarOrder,
   loadTreeViewState,
@@ -96,7 +95,6 @@ import {
   saveQuotaStats,
   saveReaderSettings,
   saveStorageDirConfig,
-  saveSyncLogs,
   saveTheme,
   saveTreeToolbarOrder,
   saveTreeViewState,
@@ -105,6 +103,7 @@ import {
   TreeToolbarIconId,
 } from './utils/storage';
 import {
+  ExtractedEbookImage,
   isEbookFile,
   isSupportedImportFile,
   parseEbookFile,
@@ -124,8 +123,11 @@ import { purgeExpiredTrash } from './utils/trash';
 import {
   fetchRemoteDocBody,
   runAutoMetadataProgressSync,
-  runIncrementalWebDavSync,
 } from './utils/webdavSync';
+import {
+  applyWifiReceivedDocToDocs,
+  WifiDocBodyPayload,
+} from './utils/wifiSync';
 import {
   LanDirectAction,
   pushLanDirectState,
@@ -137,7 +139,7 @@ import { formatMicErrorMessage, WhistleDetector } from './utils/whistleDetector'
 
 type MainView = 'tree' | 'doc';
 
-const AUTO_PROGRESS_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const AUTO_PROGRESS_SYNC_INTERVAL_MS = 60 * 1000;
 const AUTO_CATALOG_DEBOUNCE_MS = 5000;
 const AUTO_PULL_COOLDOWN_MS = 15_000;
 const AUTO_SYNC_BACKOFF_STEPS_MS = [30_000, 60_000, 180_000, 300_000];
@@ -173,7 +175,6 @@ export default function App() {
   );
   const [webDavConfig, setWebDavConfig] = useState<WebDavConfig>(() => loadWebDavConfig());
   const [quotaStats, setQuotaStats] = useState<QuotaStats>(() => loadQuotaStats());
-  const [syncLogs, setSyncLogs] = useState<SyncLogEntry[]>(() => loadSyncLogs());
 
   const initialTreeState = useMemo(() => loadTreeViewState(), []);
 
@@ -208,6 +209,7 @@ export default function App() {
   const [storageModalSubtitle, setStorageModalSubtitle] = useState<string | undefined>(undefined);
   const [localFsReady, setLocalFsReady] = useState(false);
   const [showSyncModal, setShowSyncModal] = useState(false);
+  const [showWifiSyncModal, setShowWifiSyncModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTrashModal, setShowTrashModal] = useState(false);
   const [showFontSizeBar, setShowFontSizeBar] = useState(false);
@@ -247,7 +249,6 @@ export default function App() {
   const [mdictLookupPending, setMdictLookupPending] = useState(false);
   const [activeDragPayload, setActiveDragPayload] = useState<DragPayload | null>(null);
   const [trashDragOver, setTrashDragOver] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
   const [lanRunning, setLanRunning] = useState(false);
   const [lanUrl, setLanUrl] = useState('');
   const [lanLoading, setLanLoading] = useState(false);
@@ -286,9 +287,6 @@ export default function App() {
   treeScrollTopRef.current = treeScrollTop;
   const treeStateUpdatedAtRef = useRef<number>(treeStateUpdatedAt);
   treeStateUpdatedAtRef.current = treeStateUpdatedAt;
-  const foldersDirtyRef = useRef<boolean>(foldersDirty);
-  foldersDirtyRef.current = foldersDirty;
-  const isManualSyncingRef = useRef(false);
   const activeAutoSyncPromiseRef = useRef<Promise<void> | null>(null);
   const autoProgressDirtyRef = useRef(false);
   const autoCatalogDirtyRef = useRef(false);
@@ -397,7 +395,6 @@ export default function App() {
   useEffect(() => savePurgedSyncRecords(purgedRecords), [purgedRecords]);
   useEffect(() => saveWebDavConfig(webDavConfig), [webDavConfig]);
   useEffect(() => saveQuotaStats(quotaStats), [quotaStats]);
-  useEffect(() => saveSyncLogs(syncLogs), [syncLogs]);
   useEffect(() => saveLastOpenedDocId(selectedDocId), [selectedDocId]);
   useEffect(
     () =>
@@ -623,6 +620,7 @@ export default function App() {
           ];
         });
         setFoldersDirty(true);
+        markAutoCatalogDirty();
         return;
       }
 
@@ -660,6 +658,7 @@ export default function App() {
             },
           ];
         });
+        markAutoCatalogDirty();
         return;
       }
 
@@ -685,6 +684,7 @@ export default function App() {
               : d
           )
         );
+        markAutoCatalogDirty();
         return;
       }
 
@@ -700,6 +700,7 @@ export default function App() {
           setSelectedDocId(null);
           setMainView('tree');
         }
+        markAutoCatalogDirty();
         return;
       }
 
@@ -730,7 +731,7 @@ export default function App() {
             lastMode: 'read',
             lastScrollTop: 0,
             lastCharOffset: 0,
-            format: 'txt',
+            format: item.format ?? 'txt',
             createdAt: now + i,
             updatedAt: now + i,
             syncStatus: 'dirty',
@@ -740,6 +741,32 @@ export default function App() {
         }
         if (created.length > 0) {
           setDocs((prev) => [...prev, ...created]);
+          markAutoCatalogDirty();
+        }
+        return;
+      }
+
+      if (action.type === 'importEbook' && action.fileName && action.base64) {
+        if (action.folderId === INBOX_FOLDER_ID) return;
+        try {
+          const binStr = window.atob(action.base64);
+          const bytes = new Uint8Array(binStr.length);
+          for (let i = 0; i < binStr.length; i++) {
+            bytes[i] = binStr.charCodeAt(i);
+          }
+          const file = new File([bytes], action.fileName);
+          const parsed = await parseEbookFile(file);
+          await handleImportDocs([
+            {
+              title: parsed.title,
+              content: parsed.content,
+              folderId: action.folderId ?? null,
+              format: parsed.images && parsed.images.length > 0 ? 'md' : 'txt',
+              images: parsed.images,
+            },
+          ]);
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : `解析电子书「${action.fileName}」失败`);
         }
       }
     });
@@ -756,13 +783,6 @@ export default function App() {
       setToast((prev) => (prev?.msg === msg ? null : prev));
     }, durationMs);
   };
-
-  const dirtyCount = useMemo(
-    () => docs.filter((d) => d.syncStatus === 'dirty').length,
-    [docs]
-  );
-
-  const hasPendingSync = dirtyCount > 0 || foldersDirty;
 
   const selectedDoc = useMemo(
     () => docs.find((d) => d.id === selectedDocId && !d.deleted) ?? null,
@@ -1206,6 +1226,7 @@ export default function App() {
       if (nextEncrypted && !hasPassword) {
         showToast('已标记加密，同步前请点击设置图标设置加密密码');
       }
+      markAutoCatalogDirty();
       return;
     }
 
@@ -1232,6 +1253,7 @@ export default function App() {
           : d
       )
     );
+    markAutoCatalogDirty();
 
     if (nextEncrypted && !hasPassword) {
       showToast('已加密目录下全部文档，同步前请点击设置图标设置加密密码');
@@ -1356,6 +1378,7 @@ export default function App() {
     captureAndSaveTreeState(nextTarget, nextCollapsed);
 
     setDocs((prev) => [...prev, newDoc]);
+    markAutoCatalogDirty();
     setSelectedDocId(newDoc.id);
     setActiveTarget(nextTarget);
     setMainView('doc');
@@ -1538,6 +1561,7 @@ export default function App() {
     if (
       mainView !== 'doc' ||
       showSyncModal ||
+      showWifiSyncModal ||
       showImportModal ||
       showTrashModal ||
       showStorageFolderModal
@@ -1561,6 +1585,7 @@ export default function App() {
     whistleEnabled,
     mainView,
     showSyncModal,
+    showWifiSyncModal,
     showImportModal,
     showTrashModal,
     showStorageFolderModal,
@@ -1726,17 +1751,33 @@ export default function App() {
     }
   };
 
-  // Batch Import .txt / .md / pasted text (defaults to .txt storage format, silently deduplicates)
+  // Batch Import .txt / .md / ebook / pasted text (defaults to .txt storage format, silently deduplicates)
   const handleImportDocs = async (
-    items: Array<{ title: string; content: string; folderId: string | null; format?: 'txt' | 'md' }>
+    items: Array<{
+      title: string;
+      content: string;
+      folderId: string | null;
+      format?: 'txt' | 'md';
+      images?: ExtractedEbookImage[];
+    }>
   ) => {
     const now = Date.now();
     const maxOrder = docsRef.current.reduce((m, d) => Math.max(m, d.order), -1);
     const created: ArticleDoc[] = [];
+    let totalSavedImages = 0;
+    let totalFailedImages = 0;
+    let imageTarget: 'local-fs' | 'browser-cache' = 'local-fs';
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       if (item.folderId === INBOX_FOLDER_ID) continue;
+
+      if (item.images && item.images.length > 0) {
+        const res = await saveLocalImageFiles(item.images, storageDirRef.current);
+        totalSavedImages += res.savedCount;
+        totalFailedImages += res.failedCount;
+        imageTarget = res.target;
+      }
 
       const dupRes = await resolveDuplicateDocImport(item.title, item.content, [
         ...docsRef.current,
@@ -1769,6 +1810,19 @@ export default function App() {
 
     if (created.length > 0) {
       setDocs((prev) => [...prev, ...created]);
+      markAutoCatalogDirty();
+    }
+
+    if (totalSavedImages > 0) {
+      const destLabel =
+        imageTarget === 'local-fs' ? '本地 images/ 文件夹' : '浏览器本地缓存';
+      showToast(
+        totalFailedImages > 0
+          ? `已提取 ${totalSavedImages} 张插图至${destLabel}（${totalFailedImages} 张写入失败）`
+          : `已提取 ${totalSavedImages} 张插图至${destLabel}（不占坚果云流量）`
+      );
+    } else if (totalFailedImages > 0) {
+      showToast(`文档已导入，但 ${totalFailedImages} 张插图写入本地失败`);
     }
   };
 
@@ -1808,13 +1862,21 @@ export default function App() {
         )
       );
     }
+
+    if (nextConfig.username.trim() && nextConfig.password.trim()) {
+      markAutoCatalogDirty();
+    }
   };
 
   const handleToggleLanDirect = async (next: boolean) => {
     setLanLoading(true);
     try {
       if (next) {
-        const res = await startLanDirectServer(activeFolders, docs);
+        const res = await startLanDirectServer(
+          activeFolders,
+          docs,
+          webDavConfigRef.current.encryptionPassword || ''
+        );
         setLanRunning(res.running);
         setLanUrl(res.url);
         if (res.running && res.url) {
@@ -1861,7 +1923,7 @@ export default function App() {
   }) => {
     const cfg = webDavConfigRef.current;
     if (!cfg.username.trim() || !cfg.password.trim()) return;
-    if (isManualSyncingRef.current || activeAutoSyncPromiseRef.current) return;
+    if (activeAutoSyncPromiseRef.current) return;
 
     const now = Date.now();
     if (now < autoSyncBackoffUntilRef.current) return;
@@ -1917,31 +1979,33 @@ export default function App() {
 
         setWebDavConfig((prev) => ({
           ...prev,
-          baseUrl: outcome.config.baseUrl,
-          username: outcome.config.username,
-          password: outcome.config.password,
-          encryptionPassword: outcome.config.encryptionPassword,
+          syncShortDocsViaCloud: outcome.config.syncShortDocsViaCloud,
           settingsUpdatedAt: outcome.config.settingsUpdatedAt,
-          enabled: outcome.config.enabled,
-          // Preserve Manual Sync's lastManifestEtag untouched; update only auto-sync ETag
           lastAutoManifestEtag: outcome.config.lastAutoManifestEtag,
+          lastSyncedAt: outcome.config.lastSyncedAt ?? prev.lastSyncedAt,
         }));
 
+        const noConcurrentMutation = autoMutationSeqRef.current === seqBefore;
+
         if (outcome.didPull) {
-          const outcomeFolderMap = new Map(
-            outcome.folders.map((f) => [f.id, { ...f, parentId: null }])
-          );
-          setFolders((prev) => {
-            const merged = new Map<string, FolderNode>();
-            for (const f of prev) merged.set(f.id, f);
-            for (const [id, rf] of outcomeFolderMap) {
-              const lf = merged.get(id);
-              if (!lf || rf.updatedAt > lf.updatedAt) {
-                merged.set(id, rf);
+          if (noConcurrentMutation) {
+            setFolders(outcome.folders.map((f) => ({ ...f, parentId: null })));
+          } else {
+            const outcomeFolderMap = new Map(
+              outcome.folders.map((f) => [f.id, { ...f, parentId: null }])
+            );
+            setFolders((prev) => {
+              const merged = new Map<string, FolderNode>();
+              for (const f of prev) merged.set(f.id, f);
+              for (const [id, rf] of outcomeFolderMap) {
+                const lf = merged.get(id);
+                if (!lf || rf.updatedAt > lf.updatedAt) {
+                  merged.set(id, rf);
+                }
               }
-            }
-            return Array.from(merged.values());
-          });
+              return Array.from(merged.values());
+            });
+          }
 
           if (outcome.treeState.updatedAt > treeStateUpdatedAtRef.current) {
             setCollapsedFolderIds(outcome.treeState.collapsedIds);
@@ -1952,53 +2016,75 @@ export default function App() {
         }
 
         if (outcome.didPull || outcome.didPush) {
-          const noConcurrentMutation = autoMutationSeqRef.current === seqBefore;
           const outcomeDocMap = new Map(outcome.docs.map((d) => [d.id, d]));
-          setDocs((prev) =>
-            prev.map((curr) => {
-              const next = outcomeDocMap.get(curr.id);
-              if (!next) return curr;
-              if (noConcurrentMutation) return next;
-              const currProgressTs = curr.lastReadAt ?? 0;
-              const nextProgressTs = next.lastReadAt ?? 0;
-              const useNextProgress = nextProgressTs > currProgressTs;
-              const useNextCatalog = next.updatedAt > curr.updatedAt;
-              if (!useNextProgress && !useNextCatalog) return curr;
-              return {
-                ...curr,
-                ...(useNextCatalog
-                  ? {
-                      title: next.title,
-                      folderId: next.folderId,
-                      order: next.order,
-                      starred: next.starred,
-                      tags: next.tags,
-                      deleted: next.deleted,
-                      deletedAt: next.deletedAt,
-                      deletedByFolderId: next.deletedByFolderId,
-                      updatedAt: next.updatedAt,
-                      syncStatus: next.syncStatus,
-                    }
-                  : {}),
-                ...(useNextProgress
-                  ? {
-                      readProgress: next.readProgress,
-                      lastCharOffset: next.lastCharOffset,
-                      lastScrollTop: next.lastScrollTop,
-                      lastMode: next.lastMode,
-                      lastReadAt: next.lastReadAt,
-                    }
-                  : {}),
-              };
-            })
-          );
+          if (noConcurrentMutation) {
+            setDocs(outcome.docs);
+          } else {
+            setDocs((prev) => {
+              const seenIds = new Set<string>();
+              const updatedExisting = prev.map((curr) => {
+                seenIds.add(curr.id);
+                const next = outcomeDocMap.get(curr.id);
+                if (!next) return curr;
+                const currProgressTs = curr.lastReadAt ?? 0;
+                const nextProgressTs = next.lastReadAt ?? 0;
+                const useNextProgress = nextProgressTs > currProgressTs;
+                const useNextCatalog = next.updatedAt > curr.updatedAt;
+                const downloadedBody =
+                  curr.syncStatus === 'remote-only' && !curr.content && Boolean(next.content);
+                const cloudFlagChanged = Boolean(next.cloudBodySynced) !== Boolean(curr.cloudBodySynced);
+                if (!useNextProgress && !useNextCatalog && !downloadedBody && !cloudFlagChanged) {
+                  return curr;
+                }
+                return {
+                  ...curr,
+                  cloudBodySynced: Boolean(next.cloudBodySynced),
+                  ...(downloadedBody
+                    ? {
+                        content: next.content,
+                        contentHash: next.contentHash,
+                        byteSize: next.byteSize,
+                        excerpt: next.excerpt,
+                        syncStatus: next.syncStatus,
+                      }
+                    : {}),
+                  ...(useNextCatalog
+                    ? {
+                        title: next.title,
+                        folderId: next.folderId,
+                        order: next.order,
+                        starred: next.starred,
+                        tags: next.tags,
+                        deleted: next.deleted,
+                        deletedAt: next.deletedAt,
+                        deletedByFolderId: next.deletedByFolderId,
+                        updatedAt: next.updatedAt,
+                        syncStatus: next.syncStatus,
+                      }
+                    : {}),
+                  ...(useNextProgress
+                    ? {
+                        readProgress: next.readProgress,
+                        lastCharOffset: next.lastCharOffset,
+                        lastScrollTop: next.lastScrollTop,
+                        lastMode: next.lastMode,
+                        lastReadAt: next.lastReadAt,
+                      }
+                    : {}),
+                };
+              });
+              // Option A: append newly discovered remote catalog docs not yet present locally
+              const addedRemote = outcome.docs.filter((d) => !seenIds.has(d.id));
+              return addedRemote.length > 0 ? [...updatedExisting, ...addedRemote] : updatedExisting;
+            });
+          }
 
           const openDocId = selectedDocIdRef.current;
           if (
             mainViewRef.current === 'doc' &&
             openDocId &&
             Object.prototype.hasOwnProperty.call(outcome.pulledProgressDocIds, openDocId) &&
-            autoMutationSeqRef.current === seqBefore
+            noConcurrentMutation
           ) {
             const pulledOffset = outcome.pulledProgressDocIds[openDocId];
             const pulledDoc = outcomeDocMap.get(openDocId);
@@ -2009,9 +2095,13 @@ export default function App() {
           }
         }
 
-        if (autoMutationSeqRef.current === seqBefore) {
+        if (noConcurrentMutation) {
           autoProgressDirtyRef.current = false;
           autoCatalogDirtyRef.current = false;
+          setFoldersDirty(false);
+          if (outcome.purgedSynced) {
+            setPurgedRecords({ docs: {}, docFormats: {}, folders: {} });
+          }
         }
       } catch {
         // Silent exponential backoff on network/transient errors — never interrupt reading
@@ -2050,7 +2140,7 @@ export default function App() {
     }, AUTO_CATALOG_DEBOUNCE_MS);
   };
 
-  // Auto-sync Trigger 1: Every 5 minutes while reading (0 requests if no page turn/change occurred)
+  // Auto-sync Trigger 1: Every 60 seconds while reading (0 requests if no page turn/change occurred)
   const webDavConfigured = Boolean(webDavConfig.username.trim() && webDavConfig.password.trim());
   useEffect(() => {
     if (!webDavConfigured || mainView !== 'doc') return;
@@ -2109,88 +2199,43 @@ export default function App() {
     };
   }, []);
 
-  const handleRunLiveSync = async () => {
-    if (isManualSyncingRef.current) return;
-    isManualSyncingRef.current = true;
-    setIsSyncing(true);
-    try {
-      if (autoCatalogDebounceTimerRef.current !== null) {
-        window.clearTimeout(autoCatalogDebounceTimerRef.current);
-        autoCatalogDebounceTimerRef.current = null;
-      }
-      // Wait for any in-flight silent auto-sync to complete before running full manual sync
-      if (activeAutoSyncPromiseRef.current) {
-        await activeAutoSyncPromiseRef.current;
-      }
-      const currentTreeScroll =
-        mainViewRef.current === 'tree'
-          ? treeViewRef.current?.getScrollTop() ?? treeScrollTopRef.current
-          : treeScrollTopRef.current;
-      const localTreeState: SyncedTreeState = {
+  const getWifiLocalState = () => {
+    const currentTreeScroll =
+      mainViewRef.current === 'tree'
+        ? treeViewRef.current?.getScrollTop() ?? treeScrollTopRef.current
+        : treeScrollTopRef.current;
+    return {
+      folders: foldersRef.current,
+      docs: docsRef.current,
+      treeState: {
         collapsedIds: collapsedFolderIdsRef.current,
         activeTarget: activeTargetRef.current,
         scrollTop: currentTreeScroll,
         updatedAt: treeStateUpdatedAtRef.current,
-      };
-      const outcome = await runIncrementalWebDavSync(
-        webDavConfigRef.current,
-        foldersRef.current,
-        docsRef.current,
-        localTreeState,
-        foldersDirtyRef.current,
-        purgedRecordsRef.current
-      );
-      setFolders(outcome.folders.map((f) => ({ ...f, parentId: null })));
-      setDocs(outcome.docs);
-      setCollapsedFolderIds(outcome.treeState.collapsedIds);
-      setActiveTarget(outcome.treeState.activeTarget);
-      setTreeScrollTop(outcome.treeState.scrollTop);
-      setTreeStateUpdatedAt(outcome.treeState.updatedAt);
-      setFoldersDirty(false);
-      autoProgressDirtyRef.current = false;
-      autoCatalogDirtyRef.current = false;
-      autoSyncFailCountRef.current = 0;
-      autoSyncBackoffUntilRef.current = 0;
-      lastAutoPullAtRef.current = Date.now();
-      setPurgedRecords({ docs: {}, docFormats: {}, folders: {} });
-      setWebDavConfig(outcome.config);
-      applyQuotaDelta(outcome.quotaDelta);
-      setSyncLogs((prev) => [outcome.log, ...prev].slice(0, 20));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '坚果云同步失败';
-      setSyncLogs((prev) =>
-        [
-          {
-            id: `err_${Date.now()}`,
-            timestamp: Date.now(),
-            mode: 'live' as const,
-            summary: msg,
-            requests: 1,
-            uploadBytes: 0,
-            downloadBytes: 0,
-            status: 'error' as const,
-          },
-          ...prev,
-        ].slice(0, 20)
-      );
-      throw err;
-    } finally {
-      isManualSyncingRef.current = false;
-      setIsSyncing(false);
-    }
+      },
+      purgedRecords: purgedRecordsRef.current,
+    };
   };
 
-  const handleDirectSyncClick = async () => {
-    if (suppressToolbarClickRef.current) return;
-    if (webDavConfig.username.trim() && webDavConfig.password.trim()) {
-      try {
-        await handleRunLiveSync();
-      } catch (err) {
-        showToast(err instanceof Error ? err.message : '同步失败');
-      }
-    } else {
-      showToast('请先点击设置图标配置坚果云同步参数');
+  const applyWifiMergedCatalog = (
+    nextFolders: FolderNode[],
+    nextDocs: ArticleDoc[],
+    nextTreeState: SyncedTreeState
+  ) => {
+    setFolders(nextFolders.map((f) => ({ ...f, parentId: null })));
+    setDocs(nextDocs);
+    if (nextTreeState.updatedAt > treeStateUpdatedAtRef.current) {
+      setCollapsedFolderIds(nextTreeState.collapsedIds);
+      setActiveTarget(nextTreeState.activeTarget);
+      setTreeScrollTop(nextTreeState.scrollTop);
+      setTreeStateUpdatedAt(nextTreeState.updatedAt);
     }
+    setFoldersDirty(true);
+    markAutoCatalogDirty();
+  };
+
+  const applyWifiReceivedDocBody = async (payload: WifiDocBodyPayload) => {
+    setDocs((prev) => applyWifiReceivedDocToDocs(prev, payload));
   };
 
   // Drag-to-reorder handler for all movable bottom toolbar icons (both touch & mouse)
@@ -2339,6 +2384,7 @@ export default function App() {
       content: string;
       folderId: string | null;
       format: 'txt';
+      images?: ExtractedEbookImage[];
     }> = [];
     const failedMsgs: string[] = [];
     for (const file of files) {
@@ -2350,6 +2396,7 @@ export default function App() {
             content: ebookDoc.content,
             folderId: defaultImportFolderId,
             format: 'txt',
+            images: ebookDoc.images,
           });
         } catch (err) {
           failedMsgs.push(err instanceof Error ? err.message : `解析「${file.name}」失败`);
@@ -2389,6 +2436,12 @@ export default function App() {
             key={selectedDoc.id}
             ref={docViewRef}
             doc={selectedDoc}
+            storageDir={storageDir}
+            docFolderName={
+              selectedDoc.folderId
+                ? folders.find((f) => f.id === selectedDoc.folderId)?.name ?? null
+                : null
+            }
             fontSize={fontSize}
             autoHyphenate={autoHyphenate}
             hasActiveMdict={mdictDicts.length > 0}
@@ -2433,6 +2486,7 @@ export default function App() {
               );
             }}
             onFetchRemoteBody={() => handleFetchRemoteBody(selectedDoc.id)}
+            onOpenWifiSync={() => setShowWifiSyncModal(true)}
           />
         ) : (
           <MinimalTreeView
@@ -2597,42 +2651,6 @@ export default function App() {
                         <Lock className="w-[21px] h-[21px]" strokeWidth={1.8} />
                       ) : (
                         <LockOpen className="w-[21px] h-[21px]" strokeWidth={1.8} />
-                      )}
-                    </button>
-                  );
-                }
-
-                if (iconId === 'sync') {
-                  return (
-                    <button
-                      key={iconId}
-                      ref={bindRef}
-                      type="button"
-                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'sync', 'tree')}
-                      onClick={handleDirectSyncClick}
-                      onContextMenu={(e) => e.preventDefault()}
-                      disabled={isSyncing}
-                      aria-label={
-                        hasPendingSync
-                          ? '点击同步（有未同步变更）'
-                          : '点击同步'
-                      }
-                      title={
-                        hasPendingSync
-                          ? '有内容未同步至坚果云，点击直接同步（可拖动调整图标位置）'
-                          : '点击直接同步（可拖动调整图标位置）'
-                      }
-                      className={`relative w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all disabled:opacity-50 shrink-0 touch-none select-none ${dragCls}`}
-                    >
-                      <RefreshCw
-                        className={`w-[21px] h-[21px] ${isSyncing ? 'animate-spin' : ''}`}
-                        strokeWidth={1.8}
-                      />
-                      {hasPendingSync && (
-                        <span
-                          aria-hidden="true"
-                          className="absolute top-[9px] right-[9px] w-[6px] h-[6px] rounded-full bg-[var(--fei-text-muted)]"
-                        />
                       )}
                     </button>
                   );
@@ -2892,6 +2910,10 @@ export default function App() {
           lanLoading={lanLoading}
           onToggleLan={handleToggleLanDirect}
           onCopyLanUrl={handleCopyLanUrl}
+          onOpenWifiSync={() => {
+            setShowSyncModal(false);
+            setShowWifiSyncModal(true);
+          }}
           dictionaries={mdictDicts}
           activeDictId={activeMdictId}
           onImportDictFiles={handleImportMdictFiles}
@@ -2905,6 +2927,22 @@ export default function App() {
           onDeleteDict={handleDeleteMdictDict}
           onSaveConfig={handleSaveSyncConfig}
           onClose={() => setShowSyncModal(false)}
+        />
+      )}
+
+      {/* Same-Wi-Fi P2P Bidirectional Sync Modal */}
+      {showWifiSyncModal && (
+        <WifiSyncModal
+          encryptionPassword={webDavConfig.encryptionPassword || ''}
+          storageDir={storageDir}
+          getLocalState={getWifiLocalState}
+          applyMergedCatalog={applyWifiMergedCatalog}
+          applyReceivedDocBody={applyWifiReceivedDocBody}
+          onOpenSettings={() => {
+            setShowWifiSyncModal(false);
+            setShowSyncModal(true);
+          }}
+          onClose={() => setShowWifiSyncModal(false)}
         />
       )}
 

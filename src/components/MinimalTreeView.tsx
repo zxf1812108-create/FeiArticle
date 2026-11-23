@@ -9,10 +9,12 @@ import React, {
 import {
   ChevronDown,
   ChevronRight,
+  CloudDownload,
   FilePlus,
   Pencil,
   Plus,
   Trash2,
+  Wifi,
 } from 'lucide-react';
 import { ArticleDoc, FolderNode } from '../types';
 import { INBOX_FOLDER_ID, INBOX_FOLDER_NAME } from '../utils/inbox';
@@ -533,10 +535,32 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                 onSelectTarget({ kind: 'doc', id: doc.id });
               }
             }}
-            className="flex-1 min-w-0 text-left text-[15px] leading-snug truncate py-2.5 text-[var(--fei-text-primary)]"
+            className={`flex-1 min-w-0 text-left text-[15px] leading-snug truncate py-2.5 ${
+              doc.syncStatus === 'remote-only' && !doc.content
+                ? 'text-[var(--fei-text-muted)]'
+                : 'text-[var(--fei-text-primary)]'
+            }`}
           >
             {doc.title || '无标题文档'}
           </button>
+        )}
+
+        {doc.syncStatus === 'remote-only' && !doc.content && (
+          <span
+            title={
+              doc.cloudBodySynced
+                ? '正文在云端，打开后可拉取'
+                : '本机暂无正文，请在同 Wi-Fi 下同步'
+            }
+            aria-label={doc.cloudBodySynced ? '待从云端拉取正文' : '待 Wi-Fi 同步正文'}
+            className="mr-1 inline-flex items-center justify-center text-[var(--fei-text-muted)] shrink-0"
+          >
+            {doc.cloudBodySynced ? (
+              <CloudDownload className="w-[13.5px] h-[13.5px]" strokeWidth={1.75} />
+            ) : (
+              <Wifi className="w-[13.5px] h-[13.5px]" strokeWidth={1.75} />
+            )}
+          </span>
         )}
 
         {doc.encrypted && (

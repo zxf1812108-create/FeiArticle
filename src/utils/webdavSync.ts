@@ -7,7 +7,6 @@ import {
   QuotaStats,
   RemoteManifest,
   SyncedTreeState,
-  SyncLogEntry,
   WebDavConfig,
 } from '../types';
 import { decryptText, encryptText, isEncryptedPayload } from './crypto';
@@ -18,7 +17,7 @@ import {
   RemoteInboxFile,
   resolveDuplicateDocImport,
 } from './inbox';
-import { extractExcerpt, formatBytes, getByteSize, sha256Hex } from './textParser';
+import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
 import { isTrashExpired, purgeExpiredTrash } from './trash';
 
 interface ProxyResponse {
@@ -51,14 +50,16 @@ interface WebDavNativePlugin {
 const WebDavNative = registerPlugin<WebDavNativePlugin>('WebDavNative');
 
 export const DEFAULT_JIANGUOYUN_URL = 'https://dav.jianguoyun.com/dav/FeiArtical/';
+export const CLOUD_SHORT_DOC_MAX_BYTES = 200 * 1024; // 200 KB optional cloud fallback limit
 
 const MANIFEST_PATH = '_manifest.json';
 const DOCS_DIR = 'docs/';
 const INBOX_DIR = `${INBOX_FOLDER_NAME}/`;
+const ensuredInboxBaseUrls = new Set<string>();
 const EMPTY_CONTENT_SHA256 =
   'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
-function isDocBodyMissing(doc: ArticleDoc): boolean {
+export function isDocBodyMissing(doc: ArticleDoc): boolean {
   if (doc.deleted) return false;
   if (doc.syncStatus === 'remote-only') return true;
   if (doc.content.length > 0) return false;
@@ -66,6 +67,12 @@ function isDocBodyMissing(doc: ArticleDoc): boolean {
     doc.byteSize > 0 ||
     (Boolean(doc.contentHash) && doc.contentHash !== EMPTY_CONTENT_SHA256)
   );
+}
+
+function trimManifestExcerpt(excerpt: string): string {
+  const clean = (excerpt || '').trim();
+  if (clean.length <= 48) return clean;
+  return `${clean.slice(0, 48).trim()}…`;
 }
 
 /**
@@ -154,7 +161,6 @@ async function callWebDavUrlNative(
     headers['Content-Type'] = contentType;
   }
 
-  // Prefer OkHttp-based native WebDavPlugin (supports MKCOL/PROPFIND and raw UTF-8 bodies cleanly)
   if (Capacitor.isPluginAvailable('WebDavNative')) {
     try {
       const res = await WebDavNative.request({
@@ -193,7 +199,6 @@ async function callWebDavUrlNative(
     }
   }
 
-  // Fallback to CapacitorHttp (note: HttpURLConnection only allows standard HTTP methods)
   try {
     const res = await CapacitorHttp.request({
       url,
@@ -309,11 +314,11 @@ async function callWebDav(
 }
 
 /**
- * Recursively create missing collection folders on WebDAV (e.g. /dav/FeiArtical/ and /dav/FeiArtical/docs/).
- * On Jianguoyun, MKCOL returns 201 (created) or 405 (already exists) — both are treated as success.
+ * Recursively create missing collection folders on WebDAV (e.g. /dav/FeiArtical/ and optionally docs/).
  */
 async function ensureRemoteDirectories(
-  config: WebDavConfig
+  config: WebDavConfig,
+  includeDocsDir = false
 ): Promise<{ requests: number; authFailedStatus?: number; docsReady: boolean }> {
   const normalizedBase = normalizeWebDavBaseUrl(config.baseUrl);
   const username = config.username.trim();
@@ -324,8 +329,6 @@ async function ensureRemoteDirectories(
     const parsed = new URL(normalizedBase);
     const segments = parsed.pathname.split('/').filter(Boolean);
     const isJianguoyun = parsed.hostname.toLowerCase() === 'dav.jianguoyun.com';
-
-    // Never MKCOL /dav/ itself on Jianguoyun; start from the subfolder after /dav/
     const startIdx = isJianguoyun && segments[0]?.toLowerCase() === 'dav' ? 1 : 0;
 
     let currentPath = startIdx > 0 ? `/${segments.slice(0, startIdx).join('/')}/` : '/';
@@ -346,19 +349,26 @@ async function ensureRemoteDirectories(
     }
   }
 
-  requests++;
-  const docsRes = await callWebDav(config, 'MKCOL', DOCS_DIR);
-  if (docsRes.status === 401 || docsRes.status === 403) {
-    return { requests, authFailedStatus: docsRes.status, docsReady: false };
-  }
-  const docsReady =
-    docsRes.ok || docsRes.status === 201 || docsRes.status === 405 || docsRes.status === 301;
+  let docsReady = true;
+  if (includeDocsDir) {
+    requests++;
+    const docsRes = await callWebDav(config, 'MKCOL', DOCS_DIR);
+    if (docsRes.status === 401 || docsRes.status === 403) {
+      return { requests, authFailedStatus: docsRes.status, docsReady: false };
+    }
+    docsReady =
+      docsRes.ok || docsRes.status === 201 || docsRes.status === 405 || docsRes.status === 301;
 
-  // Also ensure the dropbox inbox/ directory exists alongside docs/
-  requests++;
-  const inboxRes = await callWebDav(config, 'MKCOL', INBOX_DIR);
-  if (inboxRes.status === 401 || inboxRes.status === 403) {
-    return { requests, authFailedStatus: inboxRes.status, docsReady: false };
+    if (!ensuredInboxBaseUrls.has(normalizedBase)) {
+      requests++;
+      const inboxRes = await callWebDav(config, 'MKCOL', INBOX_DIR);
+      if (inboxRes.status === 401 || inboxRes.status === 403) {
+        return { requests, authFailedStatus: inboxRes.status, docsReady: false };
+      }
+      if (inboxRes.ok || inboxRes.status === 201 || inboxRes.status === 405 || inboxRes.status === 301) {
+        ensuredInboxBaseUrls.add(normalizedBase);
+      }
+    }
   }
 
   return { requests, docsReady };
@@ -391,7 +401,7 @@ export async function testWebDavConnection(
     };
   }
   if (result.status === 404 || result.status === 409) {
-    const ensured = await ensureRemoteDirectories(config);
+    const ensured = await ensureRemoteDirectories(config, true);
     if (ensured.authFailedStatus) {
       return {
         ok: false,
@@ -412,701 +422,30 @@ export async function testWebDavConnection(
   return { ok: false, message: formatSyncHttpError('连接异常', result) };
 }
 
-export function buildLocalManifest(
-  folders: FolderNode[],
-  docs: ArticleDoc[],
-  treeState?: SyncedTreeState,
-  config?: WebDavConfig
-): RemoteManifest {
-  const docMap: Record<string, ManifestDocEntry> = {};
-  for (const doc of docs) {
-    docMap[doc.id] = {
-      id: doc.id,
-      title: doc.title,
-      folderId: doc.folderId,
-      order: doc.order,
-      contentHash: doc.contentHash,
-      excerpt: doc.encrypted ? '' : doc.excerpt,
-      tags: doc.tags,
-      starred: doc.starred,
-      readProgress: doc.readProgress,
-      lastReadAt: doc.lastReadAt,
-      lastMode: doc.lastMode ?? 'read',
-      lastScrollTop: doc.lastScrollTop ?? 0,
-      lastCharOffset: doc.lastCharOffset ?? 0,
-      encrypted: Boolean(doc.encrypted),
-      format: doc.format ?? 'txt',
-      updatedAt: doc.updatedAt,
-      createdAt: doc.createdAt,
-      deleted: doc.deleted,
-      deletedAt: doc.deletedAt,
-      deletedByFolderId: doc.deletedByFolderId,
-      byteSize: doc.byteSize,
-    };
-  }
+function toManifestDocEntry(doc: ArticleDoc, cloudBodySynced?: boolean): ManifestDocEntry {
   return {
-    version: 2,
-    updatedAt: Date.now(),
-    folders,
-    docs: docMap,
-    treeState,
-    syncSettings: config
-      ? {
-          provider: 'jianguoyun',
-          baseUrl: normalizeWebDavBaseUrl(config.baseUrl),
-          username: config.username.trim(),
-          password: config.password.trim(),
-          encryptionPassword: config.encryptionPassword || '',
-          updatedAt: config.settingsUpdatedAt || 0,
-        }
-      : undefined,
-  };
-}
-
-export interface SyncOutcome {
-  folders: FolderNode[];
-  docs: ArticleDoc[];
-  treeState: SyncedTreeState;
-  config: WebDavConfig;
-  quotaDelta: {
-    uploadBytes: number;
-    downloadBytes: number;
-    requestCount: number;
-    skippedByEtag304: number;
-    skippedByHashMatch: number;
-  };
-  log: SyncLogEntry;
-}
-
-/**
- * Quota-saving incremental sync with Jianguoyun WebDAV:
- * - Automatically normalizes Jianguoyun URLs & creates remote folders on 404/409
- * - Syncs all document contents (AES-256-GCM encrypted when doc.encrypted is true)
- * - Syncs all document states (encrypted, lastMode, lastScrollTop, order, folderId)
- * - Syncs directory tree state (folders, collapsedIds, activeTarget, scrollTop)
- * - Syncs settings parameters (Jianguoyun WebDAV params + encryption password)
- */
-export async function runIncrementalWebDavSync(
-  rawConfig: WebDavConfig,
-  localFolders: FolderNode[],
-  localDocs: ArticleDoc[],
-  localTreeState: SyncedTreeState,
-  metaDirty = false,
-  purgedRecords?: PurgedSyncRecords
-): Promise<SyncOutcome> {
-  const syncNow = Date.now();
-  const config: WebDavConfig = {
-    ...rawConfig,
-    baseUrl: normalizeWebDavBaseUrl(rawConfig.baseUrl),
-    username: rawConfig.username.trim(),
-    password: rawConfig.password.trim(),
-  };
-
-  let uploadBytes = 0;
-  let downloadBytes = 0;
-  let requestCount = 0;
-  let skippedByEtag304 = 0;
-  let skippedByHashMatch = 0;
-
-  const dirtyDocs = localDocs.filter((d) => d.syncStatus === 'dirty' && !isDocBodyMissing(d));
-  const hasMissingLocalBodies = localDocs.some(isDocBodyMissing);
-
-  // Step 1: Conditional fetch _manifest.json (bypass 304 when local docs have missing bodies to self-heal)
-  requestCount++;
-  const manifestRes = await callWebDav(config, 'GET', MANIFEST_PATH, {
-    ifNoneMatch: hasMissingLocalBodies ? undefined : config.lastManifestEtag,
-  });
-
-  if (manifestRes.status === 401 || manifestRes.status === 403) {
-    throw new Error(formatSyncHttpError('拉取索引失败', manifestRes));
-  }
-
-  let remoteManifest: RemoteManifest | null = null;
-  let newEtag = config.lastManifestEtag;
-  let dirsEnsured = false;
-  const wasEtag304 = manifestRes.status === 304;
-
-  if (wasEtag304) {
-    skippedByEtag304++;
-  } else if (manifestRes.status === 404 || manifestRes.status === 409) {
-    // First sync or missing remote folder: Jianguoyun returns 404 (no file) or 409 (no parent folder)
-    const ensured = await ensureRemoteDirectories(config);
-    requestCount += ensured.requests;
-    dirsEnsured = true;
-    if (ensured.authFailedStatus) {
-      throw new Error(
-        formatSyncHttpError('创建远端目录失败', { ok: false, status: ensured.authFailedStatus })
-      );
-    }
-  } else if (manifestRes.ok && manifestRes.body) {
-    downloadBytes += manifestRes.bytesTransferred || getByteSize(manifestRes.body);
-    newEtag = manifestRes.etag || newEtag;
-    try {
-      remoteManifest = JSON.parse(manifestRes.body) as RemoteManifest;
-    } catch {
-      remoteManifest = null;
-    }
-  } else if (!manifestRes.ok) {
-    throw new Error(formatSyncHttpError('拉取索引失败', manifestRes));
-  }
-
-  // Step 1b: Check Jianguoyun inbox/ dropbox folder for external files
-  let inboxFiles: RemoteInboxFile[] = [];
-  requestCount++;
-  const inboxPropRes = await callWebDav(config, 'PROPFIND', INBOX_DIR, { depth: '1' });
-  if (inboxPropRes.status === 401 || inboxPropRes.status === 403) {
-    throw new Error(formatSyncHttpError('检查投递箱失败', inboxPropRes));
-  } else if (inboxPropRes.status === 404 || inboxPropRes.status === 409) {
-    if (!dirsEnsured) {
-      const ensured = await ensureRemoteDirectories(config);
-      requestCount += ensured.requests;
-      dirsEnsured = true;
-      if (ensured.authFailedStatus) {
-        throw new Error(
-          formatSyncHttpError('创建投递箱目录失败', { ok: false, status: ensured.authFailedStatus })
-        );
-      }
-    }
-  } else if (inboxPropRes.ok && typeof inboxPropRes.body === 'string') {
-    downloadBytes += inboxPropRes.bytesTransferred || getByteSize(inboxPropRes.body);
-    inboxFiles = parseWebDavInboxXml(inboxPropRes.body, `${config.baseUrl}${INBOX_DIR}`);
-  }
-
-  const hasExpiredLocalTrash =
-    localFolders.some((f) => isTrashExpired(f, syncNow)) ||
-    localDocs.some((d) => isTrashExpired(d, syncNow));
-  const hasPendingPurges = Boolean(
-    purgedRecords &&
-      (Object.keys(purgedRecords.docs).length > 0 ||
-        Object.keys(purgedRecords.folders).length > 0)
-  );
-
-  if (
-    wasEtag304 &&
-    dirtyDocs.length === 0 &&
-    !hasMissingLocalBodies &&
-    !metaDirty &&
-    inboxFiles.length === 0 &&
-    !hasExpiredLocalTrash &&
-    !hasPendingPurges
-  ) {
-    return {
-      folders: localFolders,
-      docs: localDocs,
-      treeState: localTreeState,
-      config: {
-        ...config,
-        lastAutoManifestEtag: config.lastManifestEtag || config.lastAutoManifestEtag,
-        lastSyncedAt: Date.now(),
-      },
-      quotaDelta: {
-        uploadBytes: 0,
-        downloadBytes,
-        requestCount,
-        skippedByEtag304,
-        skippedByHashMatch: localDocs.length,
-      },
-      log: {
-        id: `log_${Date.now()}`,
-        timestamp: Date.now(),
-        mode: 'live',
-        summary: '已是最新（304 零流量）',
-        requests: requestCount,
-        uploadBytes: 0,
-        downloadBytes,
-        status: 'noop',
-      },
-    };
-  }
-
-  // Step 2: Merge sync settings (Last-Write-Wins by updatedAt)
-  let mergedConfig: WebDavConfig = { ...config };
-  let needManifestPush = false;
-  const remoteSettings = remoteManifest?.syncSettings;
-  const localSettingsTs = config.settingsUpdatedAt || 0;
-  if (remoteSettings && remoteSettings.updatedAt > localSettingsTs) {
-    mergedConfig = {
-      ...mergedConfig,
-      provider: 'jianguoyun',
-      baseUrl: normalizeWebDavBaseUrl(remoteSettings.baseUrl || mergedConfig.baseUrl),
-      username: (remoteSettings.username || mergedConfig.username).trim(),
-      password: (remoteSettings.password || mergedConfig.password).trim(),
-      encryptionPassword: remoteSettings.encryptionPassword ?? mergedConfig.encryptionPassword ?? '',
-      settingsUpdatedAt: remoteSettings.updatedAt,
-      enabled: Boolean(
-        (remoteSettings.username || mergedConfig.username) &&
-          (remoteSettings.password || mergedConfig.password)
-      ),
-    };
-  } else if (localSettingsTs > (remoteSettings?.updatedAt || 0)) {
-    needManifestPush = true;
-  }
-
-  const effectiveEncPassword = mergedConfig.encryptionPassword || '';
-
-  // Step 3: Merge folders (Last-Write-Wins by updatedAt per folder)
-  const folderMap = new Map<string, FolderNode>();
-  for (const f of localFolders) folderMap.set(f.id, f);
-  if (remoteManifest?.folders) {
-    for (const rf of remoteManifest.folders) {
-      const purgedAt = purgedRecords?.folders?.[rf.id];
-      if ((purgedAt && purgedAt >= rf.updatedAt) || isTrashExpired(rf, syncNow)) {
-        needManifestPush = true;
-        continue;
-      }
-      const lf = folderMap.get(rf.id);
-      if (!lf || rf.updatedAt > lf.updatedAt) {
-        folderMap.set(rf.id, { ...rf, parentId: null });
-      }
-    }
-  }
-  const mergedFolders = Array.from(folderMap.values());
-
-  // Step 4: Merge directory tree state (expanded/collapsed folders, selection, scrollTop)
-  let mergedTreeState: SyncedTreeState = localTreeState;
-  const remoteTree = remoteManifest?.treeState;
-  if (remoteTree && remoteTree.updatedAt > localTreeState.updatedAt) {
-    mergedTreeState = {
-      collapsedIds: Array.isArray(remoteTree.collapsedIds) ? remoteTree.collapsedIds : [],
-      activeTarget: remoteTree.activeTarget ?? null,
-      scrollTop: typeof remoteTree.scrollTop === 'number' ? remoteTree.scrollTop : 0,
-      updatedAt: remoteTree.updatedAt,
-    };
-  } else if (localTreeState.updatedAt > (remoteTree?.updatedAt || 0)) {
-    needManifestPush = true;
-  }
-
-  // Step 5: Diff documents by plaintext SHA-256 hash, encryption flag & updatedAt
-  const mergedDocsMap = new Map<string, ArticleDoc>();
-  for (const d of localDocs) mergedDocsMap.set(d.id, { ...d });
-
-  let pushedCount = 0;
-  let pulledCount = 0;
-  let lazyQueuedCount = 0;
-
-  // 5a. Push locally dirty or unindexed documents (never overwrite remote with an un-fetched empty stub)
-  for (const doc of localDocs) {
-    if (isDocBodyMissing(doc)) {
-      continue;
-    }
-    const remoteEntry = remoteManifest?.docs?.[doc.id];
-    const hashDiffers = !remoteEntry || remoteEntry.contentHash !== doc.contentHash;
-    const encryptionDiffers = Boolean(remoteEntry?.encrypted) !== Boolean(doc.encrypted);
-    const isLocallyNewer = !remoteEntry || doc.updatedAt >= remoteEntry.updatedAt;
-    const shouldPush = wasEtag304
-      ? doc.syncStatus === 'dirty'
-      : (doc.syncStatus === 'dirty' || !remoteEntry || encryptionDiffers) && isLocallyNewer;
-
-    if (shouldPush) {
-      if ((wasEtag304 || hashDiffers || encryptionDiffers || doc.syncStatus === 'dirty') && !doc.deleted) {
-        let uploadBody = doc.content;
-        if (doc.encrypted) {
-          if (!effectiveEncPassword) {
-            throw new Error(`文档《${doc.title}》已启用加密，请点击设置图标设置加密密码`);
-          }
-          uploadBody = await encryptText(doc.content, effectiveEncPassword);
-        }
-
-        const docExt = doc.format === 'md' ? 'md' : 'txt';
-        requestCount++;
-        let putRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${doc.id}.${docExt}`, {
-          body: uploadBody,
-        });
-
-        if (!putRes.ok && (putRes.status === 404 || putRes.status === 409)) {
-          if (!dirsEnsured) {
-            const ensured = await ensureRemoteDirectories(config);
-            requestCount += ensured.requests;
-            dirsEnsured = true;
-            requestCount++;
-            putRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${doc.id}.${docExt}`, {
-              body: uploadBody,
-            });
-          }
-          if (!putRes.ok && (putRes.status === 404 || putRes.status === 409)) {
-            // Fallback to root sync folder if docs/ subfolder cannot be created
-            requestCount++;
-            putRes = await callWebDav(config, 'PUT', `${doc.id}.${docExt}`, {
-              body: uploadBody,
-            });
-          }
-        }
-
-        if (!putRes.ok) {
-          throw new Error(formatSyncHttpError(`上传《${doc.title}》失败`, putRes));
-        }
-        uploadBytes += getByteSize(uploadBody);
-        pushedCount++;
-      } else {
-        skippedByHashMatch++;
-      }
-      mergedDocsMap.set(doc.id, { ...doc, syncStatus: 'synced' });
-      needManifestPush = true;
-    } else if (!hashDiffers && !encryptionDiffers) {
-      skippedByHashMatch++;
-      mergedDocsMap.set(doc.id, { ...doc, syncStatus: 'synced' });
-    }
-  }
-
-  // 5b. Pull newer remote documents (or sync metadata + decrypt encrypted payloads)
-  const remotePurgedDocsToDelete: Array<{ id: string; format: 'txt' | 'md' }> = [];
-  if (remoteManifest?.docs) {
-    for (const [id, rEntry] of Object.entries(remoteManifest.docs)) {
-      const purgedAt = purgedRecords?.docs?.[id];
-      if ((purgedAt && purgedAt >= rEntry.updatedAt) || isTrashExpired(rEntry, syncNow)) {
-        remotePurgedDocsToDelete.push({ id, format: rEntry.format === 'md' ? 'md' : 'txt' });
-        needManifestPush = true;
-        continue;
-      }
-      const localDoc = mergedDocsMap.get(id);
-      const remoteHasBody =
-        !rEntry.deleted &&
-        (rEntry.byteSize > 0 ||
-          (Boolean(rEntry.contentHash) && rEntry.contentHash !== EMPTY_CONTENT_SHA256));
-      const localHasValidBody =
-        Boolean(localDoc) &&
-        !isDocBodyMissing(localDoc!) &&
-        (localDoc!.content.length > 0 || !remoteHasBody);
-      const needsBodyRepair = Boolean(localDoc) && !localHasValidBody && remoteHasBody;
-
-      if (!localDoc || rEntry.updatedAt > localDoc.updatedAt || needsBodyRepair) {
-        const hashMatchesLocal = localHasValidBody && localDoc!.contentHash === rEntry.contentHash;
-        if (hashMatchesLocal || rEntry.deleted) {
-          skippedByHashMatch++;
-          mergedDocsMap.set(id, {
-            ...(localDoc || {
-              id: rEntry.id,
-              content: '',
-              lastReadAt: null,
-              highlights: [],
-            }),
-            title: rEntry.title,
-            folderId: rEntry.folderId,
-            order: rEntry.order,
-            contentHash: rEntry.contentHash,
-            excerpt: rEntry.encrypted ? '' : rEntry.excerpt,
-            tags: rEntry.tags,
-            starred: rEntry.starred,
-            readProgress: rEntry.readProgress,
-            lastReadAt: rEntry.lastReadAt ?? localDoc?.lastReadAt ?? null,
-            lastMode: rEntry.lastMode ?? localDoc?.lastMode ?? 'read',
-            lastScrollTop: rEntry.lastScrollTop ?? localDoc?.lastScrollTop ?? 0,
-            lastCharOffset: rEntry.lastCharOffset ?? localDoc?.lastCharOffset ?? 0,
-            encrypted: Boolean(rEntry.encrypted),
-            format: rEntry.format ?? localDoc?.format ?? 'txt',
-            createdAt: rEntry.createdAt,
-            updatedAt: rEntry.updatedAt,
-            deleted: rEntry.deleted,
-            deletedAt: rEntry.deletedAt,
-            deletedByFolderId: rEntry.deletedByFolderId,
-            byteSize: rEntry.byteSize,
-            syncStatus: 'synced',
-          });
-        } else if (mergedConfig.lazyFetch) {
-          lazyQueuedCount++;
-          mergedDocsMap.set(id, {
-            id: rEntry.id,
-            title: rEntry.title,
-            folderId: rEntry.folderId,
-            order: rEntry.order,
-            content: localDoc?.content || '',
-            contentHash: rEntry.contentHash,
-            excerpt: rEntry.encrypted ? '' : rEntry.excerpt,
-            tags: rEntry.tags,
-            starred: rEntry.starred,
-            readProgress: rEntry.readProgress,
-            lastReadAt: rEntry.lastReadAt ?? localDoc?.lastReadAt ?? null,
-            lastMode: rEntry.lastMode ?? localDoc?.lastMode ?? 'read',
-            lastScrollTop: rEntry.lastScrollTop ?? localDoc?.lastScrollTop ?? 0,
-            lastCharOffset: rEntry.lastCharOffset ?? localDoc?.lastCharOffset ?? 0,
-            encrypted: Boolean(rEntry.encrypted),
-            format: rEntry.format ?? localDoc?.format ?? 'txt',
-            createdAt: rEntry.createdAt,
-            updatedAt: rEntry.updatedAt,
-            deleted: rEntry.deleted,
-            deletedAt: rEntry.deletedAt,
-            deletedByFolderId: rEntry.deletedByFolderId,
-            highlights: localDoc?.highlights || [],
-            byteSize: rEntry.byteSize,
-            syncStatus: 'remote-only',
-          });
-        } else {
-          const primaryExt = rEntry.format === 'md' ? 'md' : 'txt';
-          const fallbackExt = primaryExt === 'txt' ? 'md' : 'txt';
-          requestCount++;
-          let getDoc = await callWebDav(config, 'GET', `${DOCS_DIR}${id}.${primaryExt}`);
-          if (!getDoc.ok && (getDoc.status === 404 || getDoc.status === 409)) {
-            requestCount++;
-            getDoc = await callWebDav(config, 'GET', `${DOCS_DIR}${id}.${fallbackExt}`);
-          }
-          if (!getDoc.ok && (getDoc.status === 404 || getDoc.status === 409)) {
-            requestCount++;
-            getDoc = await callWebDav(config, 'GET', `${id}.${primaryExt}`);
-          }
-          if (getDoc.ok && typeof getDoc.body === 'string') {
-            downloadBytes += getDoc.bytesTransferred || getByteSize(getDoc.body);
-            const rawBody = getDoc.body;
-            const plainContent =
-              rEntry.encrypted || isEncryptedPayload(rawBody)
-                ? await decryptText(rawBody, effectiveEncPassword)
-                : rawBody;
-            pulledCount++;
-            mergedDocsMap.set(id, {
-              id: rEntry.id,
-              title: rEntry.title,
-              folderId: rEntry.folderId,
-              order: rEntry.order,
-              content: plainContent,
-              contentHash: await sha256Hex(plainContent),
-              excerpt: rEntry.encrypted ? '' : extractExcerpt(plainContent),
-              tags: rEntry.tags,
-              starred: rEntry.starred,
-              readProgress: rEntry.readProgress,
-              lastReadAt: rEntry.lastReadAt ?? localDoc?.lastReadAt ?? null,
-              lastMode: rEntry.lastMode ?? localDoc?.lastMode ?? 'read',
-              lastScrollTop: rEntry.lastScrollTop ?? localDoc?.lastScrollTop ?? 0,
-              lastCharOffset: rEntry.lastCharOffset ?? localDoc?.lastCharOffset ?? 0,
-              encrypted: Boolean(rEntry.encrypted),
-              format: rEntry.format ?? 'txt',
-              createdAt: rEntry.createdAt,
-              updatedAt: rEntry.updatedAt,
-              deleted: rEntry.deleted,
-              deletedAt: rEntry.deletedAt,
-              deletedByFolderId: rEntry.deletedByFolderId,
-              highlights: localDoc?.highlights || [],
-              byteSize: getByteSize(plainContent),
-              syncStatus: 'synced',
-            });
-          } else {
-            // Keep as remote-only stub if download failed transiently so localFs never writes a 0KB file
-            lazyQueuedCount++;
-            mergedDocsMap.set(id, {
-              id: rEntry.id,
-              title: rEntry.title,
-              folderId: rEntry.folderId,
-              order: rEntry.order,
-              content: '',
-              contentHash: rEntry.contentHash,
-              excerpt: rEntry.encrypted ? '' : rEntry.excerpt,
-              tags: rEntry.tags,
-              starred: rEntry.starred,
-              readProgress: rEntry.readProgress,
-              lastReadAt: rEntry.lastReadAt ?? localDoc?.lastReadAt ?? null,
-              lastMode: rEntry.lastMode ?? localDoc?.lastMode ?? 'read',
-              lastScrollTop: rEntry.lastScrollTop ?? localDoc?.lastScrollTop ?? 0,
-              lastCharOffset: rEntry.lastCharOffset ?? localDoc?.lastCharOffset ?? 0,
-              encrypted: Boolean(rEntry.encrypted),
-              format: rEntry.format ?? localDoc?.format ?? 'txt',
-              createdAt: rEntry.createdAt,
-              updatedAt: rEntry.updatedAt,
-              deleted: rEntry.deleted,
-              deletedAt: rEntry.deletedAt,
-              deletedByFolderId: rEntry.deletedByFolderId,
-              highlights: localDoc?.highlights || [],
-              byteSize: rEntry.byteSize,
-              syncStatus: 'remote-only',
-            });
-          }
-        }
-      }
-    }
-  }
-
-  // 5c. Ingest files placed inside Jianguoyun inbox/ into app's dynamic inbox folder
-  let inboxImportedCount = 0;
-  const inboxFilesToDelete: string[] = [];
-
-  if (inboxFiles.length > 0) {
-    let nextInboxOrder = Array.from(mergedDocsMap.values())
-      .filter((d) => !d.deleted && d.folderId === INBOX_FOLDER_ID)
-      .reduce((max, d) => Math.max(max, d.order), -1) + 1;
-
-    for (let i = 0; i < inboxFiles.length; i++) {
-      const inboxFile = inboxFiles[i];
-      requestCount++;
-      const getInboxRes = await callWebDav(config, 'GET', inboxFile.relPath);
-      if (getInboxRes.status === 401 || getInboxRes.status === 403) {
-        throw new Error(formatSyncHttpError('读取投递箱文件失败', getInboxRes));
-      }
-      if (!getInboxRes.ok || typeof getInboxRes.body !== 'string') {
-        continue;
-      }
-
-      const plainContent = getInboxRes.body.replace(/^\uFEFF/, '');
-      downloadBytes += getInboxRes.bytesTransferred || getByteSize(plainContent);
-
-      const isMd = /\.(md|markdown)$/i.test(inboxFile.name);
-      const format: 'txt' | 'md' = isMd ? 'md' : 'txt';
-      const rawTitle =
-        inboxFile.name.replace(/\.(txt|md|markdown|text)$/i, '').trim() || '导入文档';
-
-      const dupRes = await resolveDuplicateDocImport(
-        rawTitle,
-        plainContent,
-        Array.from(mergedDocsMap.values())
-      );
-
-      if (dupRes.action === 'skip') {
-        inboxFilesToDelete.push(inboxFile.relPath);
-        continue;
-      }
-
-      const now = Date.now() + i;
-      const newDoc: ArticleDoc = {
-        id: `doc_${now}_${Math.random().toString(36).slice(2, 6)}`,
-        title: dupRes.title,
-        folderId: INBOX_FOLDER_ID,
-        order: nextInboxOrder++,
-        content: plainContent,
-        contentHash: dupRes.contentHash,
-        excerpt: extractExcerpt(plainContent),
-        tags: [],
-        starred: false,
-        readProgress: 0,
-        lastReadAt: null,
-        lastMode: 'read',
-        lastScrollTop: 0,
-        lastCharOffset: 0,
-        format,
-        createdAt: now,
-        updatedAt: now,
-        syncStatus: 'synced',
-        highlights: [],
-        byteSize: getByteSize(plainContent),
-      };
-
-      requestCount++;
-      let putDocRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${newDoc.id}.${format}`, {
-        body: plainContent,
-      });
-      if (!putDocRes.ok && (putDocRes.status === 404 || putDocRes.status === 409)) {
-        if (!dirsEnsured) {
-          const ensured = await ensureRemoteDirectories(config);
-          requestCount += ensured.requests;
-          dirsEnsured = true;
-          requestCount++;
-          putDocRes = await callWebDav(config, 'PUT', `${DOCS_DIR}${newDoc.id}.${format}`, {
-            body: plainContent,
-          });
-        }
-        if (!putDocRes.ok && (putDocRes.status === 404 || putDocRes.status === 409)) {
-          requestCount++;
-          putDocRes = await callWebDav(config, 'PUT', `${newDoc.id}.${format}`, {
-            body: plainContent,
-          });
-        }
-      }
-
-      if (!putDocRes.ok) {
-        throw new Error(formatSyncHttpError(`归档投递箱《${newDoc.title}》失败`, putDocRes));
-      }
-
-      uploadBytes += getByteSize(plainContent);
-      inboxImportedCount++;
-      mergedDocsMap.set(newDoc.id, newDoc);
-      needManifestPush = true;
-      inboxFilesToDelete.push(inboxFile.relPath);
-    }
-  }
-
-  const purgedMerge = purgeExpiredTrash(
-    mergedFolders,
-    Array.from(mergedDocsMap.values()),
-    syncNow
-  );
-  const finalFolders = purgedMerge.folders;
-  const finalDocs = purgedMerge.docs;
-  if (purgedMerge.changed || hasPendingPurges) {
-    needManifestPush = true;
-    for (const d of purgedMerge.expiredDocs) {
-      remotePurgedDocsToDelete.push({ id: d.id, format: d.format === 'md' ? 'md' : 'txt' });
-    }
-    if (purgedRecords?.docs) {
-      for (const purgedId of Object.keys(purgedRecords.docs)) {
-        const fmt = purgedRecords.docFormats?.[purgedId] ?? 'txt';
-        remotePurgedDocsToDelete.push({ id: purgedId, format: fmt });
-      }
-    }
-  }
-
-  // Step 6: Upload single updated _manifest.json containing all doc states, tree state & sync settings
-  if (needManifestPush || metaDirty || (!remoteManifest && !wasEtag304)) {
-    const nextManifest = buildLocalManifest(finalFolders, finalDocs, mergedTreeState, mergedConfig);
-    const manifestJson = JSON.stringify(nextManifest);
-    requestCount++;
-    let putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
-    if (!putManifest.ok && (putManifest.status === 404 || putManifest.status === 409)) {
-      const ensured = await ensureRemoteDirectories(config);
-      requestCount += ensured.requests;
-      requestCount++;
-      putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
-    }
-    if (!putManifest.ok) {
-      throw new Error(formatSyncHttpError('更新云端索引失败', putManifest));
-    }
-    uploadBytes += getByteSize(manifestJson);
-    newEtag = putManifest.etag || newEtag;
-  }
-
-  // Step 7: Delete processed inbox/ files & permanently purged remote doc files ONLY AFTER _manifest.json succeeds
-  for (const relPath of inboxFilesToDelete) {
-    requestCount++;
-    await callWebDav(config, 'DELETE', relPath);
-  }
-  const seenPurgeIds = new Set<string>();
-  for (const item of remotePurgedDocsToDelete) {
-    if (seenPurgeIds.has(item.id)) continue;
-    seenPurgeIds.add(item.id);
-    requestCount++;
-    const delRes = await callWebDav(config, 'DELETE', `${DOCS_DIR}${item.id}.${item.format}`);
-    if (delRes.status === 404) {
-      const altFormat = item.format === 'txt' ? 'md' : 'txt';
-      requestCount++;
-      const altRes = await callWebDav(config, 'DELETE', `${DOCS_DIR}${item.id}.${altFormat}`);
-      if (altRes.status === 404) {
-        requestCount++;
-        await callWebDav(config, 'DELETE', `${item.id}.${item.format}`);
-      }
-    }
-  }
-
-  const summaryParts: string[] = [];
-  if (inboxImportedCount > 0) summaryParts.push(`投递箱导入 ${inboxImportedCount} 篇`);
-  if (pushedCount > 0) summaryParts.push(`上传 ${pushedCount} 篇`);
-  if (pulledCount > 0) summaryParts.push(`拉取 ${pulledCount} 篇`);
-  if (lazyQueuedCount > 0) summaryParts.push(`索引 ${lazyQueuedCount} 篇`);
-  const summary =
-    summaryParts.length > 0
-      ? `同步完成（${summaryParts.join(' · ')}）`
-      : '同步完成';
-
-  return {
-    folders: finalFolders,
-    docs: finalDocs,
-    treeState: mergedTreeState,
-    config: {
-      ...mergedConfig,
-      lastManifestEtag: newEtag,
-      lastAutoManifestEtag: newEtag,
-      lastSyncedAt: Date.now(),
-    },
-    quotaDelta: {
-      uploadBytes,
-      downloadBytes,
-      requestCount,
-      skippedByEtag304,
-      skippedByHashMatch,
-    },
-    log: {
-      id: `log_${Date.now()}`,
-      timestamp: Date.now(),
-      mode: 'live',
-      summary,
-      requests: requestCount,
-      uploadBytes,
-      downloadBytes,
-      status: 'success',
-    },
+    id: doc.id,
+    title: doc.title,
+    folderId: doc.folderId,
+    order: doc.order,
+    contentHash: doc.contentHash,
+    excerpt: doc.encrypted ? '' : trimManifestExcerpt(doc.excerpt),
+    tags: doc.tags,
+    starred: doc.starred,
+    readProgress: doc.readProgress,
+    lastReadAt: doc.lastReadAt,
+    lastMode: doc.lastMode ?? 'read',
+    lastScrollTop: doc.lastScrollTop ?? 0,
+    lastCharOffset: doc.lastCharOffset ?? 0,
+    encrypted: Boolean(doc.encrypted),
+    format: doc.format ?? 'txt',
+    cloudBodySynced: Boolean(cloudBodySynced ?? doc.cloudBodySynced),
+    updatedAt: doc.updatedAt,
+    createdAt: doc.createdAt,
+    deleted: doc.deleted,
+    deletedAt: doc.deletedAt,
+    deletedByFolderId: doc.deletedByFolderId,
+    byteSize: doc.byteSize,
   };
 }
 
@@ -1125,6 +464,7 @@ export interface AutoSyncOutcome {
   pulledProgressDocIds: Record<string, number>;
   didPush: boolean;
   didPull: boolean;
+  purgedSynced?: boolean;
   wasRateLimited?: boolean;
 }
 
@@ -1162,6 +502,7 @@ function catalogFieldsDiffer(localDoc: ArticleDoc, remoteEntry: ManifestDocEntry
     Boolean(localDoc.deleted) !== Boolean(remoteEntry.deleted) ||
     (localDoc.deletedAt ?? undefined) !== (remoteEntry.deletedAt ?? undefined) ||
     (localDoc.deletedByFolderId ?? undefined) !== (remoteEntry.deletedByFolderId ?? undefined) ||
+    Boolean(localDoc.encrypted) !== Boolean(remoteEntry.encrypted) ||
     !tagsEqual(localDoc.tags, remoteEntry.tags)
   );
 }
@@ -1185,14 +526,13 @@ function folderFieldsDiffer(a: FolderNode, b: FolderNode): boolean {
 }
 
 /**
- * Ultra-lightweight automatic background sync for Jianguoyun free-tier quota conservation:
- * - Syncs ONLY directory structure (folders, treeState, catalog metadata of existing docs) & reading progress.
- * - NEVER uploads or downloads document body files (docs/*.txt / docs/*.md) and NEVER scans inbox/.
- * - Strict Option 1 isolation:
- *   - Upload: newly imported local docs not yet in cloud manifest are NOT published until Manual Sync uploads their bodies.
- *   - Download: newly uploaded remote docs not yet on this device are NOT added as empty stubs locally (preserved intact in
- *     remote manifest so Manual Sync downloads their full bodies later).
- * - Uses an isolated `lastAutoManifestEtag` so Manual Sync's `lastManifestEtag` is never prematurely invalidated/masked.
+ * Dual-track Jianguoyun cloud sync (catalog + reading progress + optional <= 200 KB short-doc & inbox fallback):
+ * - Always syncs directory structure, catalog metadata (Option A: remote new books appear as stubs pending Wi-Fi sync),
+ *   and per-book reading progress via lightweight `_manifest.json`.
+ * - Never uploads/downloads large docs (> 200 KB) or images to Jianguoyun.
+ * - Optional lightweight fallback: when `syncShortDocsViaCloud` is enabled, non-deleted docs <= 200 KB sync
+ *   their bodies through Jianguoyun `docs/{id}.{ext}` (`cloudBodySynced: true`), AND short text/markdown files
+ *   (<= 200 KB) dropped into Jianguoyun `inbox/` are ingested into the `inbox` folder and synced automatically.
  */
 export async function runAutoMetadataProgressSync(
   rawConfig: WebDavConfig,
@@ -1215,12 +555,78 @@ export async function runAutoMetadataProgressSync(
   let requestCount = 0;
   let skippedByEtag304 = 0;
   let skippedByHashMatch = 0;
+  let dirsEnsured = false;
+  let docsDirEnsured = false;
 
-  // Step 1: Fetch _manifest.json
-  // Pull-only checks send If-None-Match (304 = 0 bytes); push checks fetch full manifest so remote-only books are preserved
+  const listEligibleShortInboxFiles = async (
+    targetConfig: WebDavConfig
+  ): Promise<{ rateLimited: boolean; files: RemoteInboxFile[] }> => {
+    requestCount++;
+    const inboxRes = await callWebDav(targetConfig, 'PROPFIND', INBOX_DIR, { depth: '1' });
+    if (inboxRes.status === 429 || inboxRes.status === 503) {
+      return { rateLimited: true, files: [] };
+    }
+    if (inboxRes.status === 404 || inboxRes.status === 409) {
+      if (!ensuredInboxBaseUrls.has(targetConfig.baseUrl)) {
+        requestCount++;
+        const mkRes = await callWebDav(targetConfig, 'MKCOL', INBOX_DIR);
+        if (mkRes.status === 429 || mkRes.status === 503) {
+          return { rateLimited: true, files: [] };
+        }
+        if (mkRes.ok || mkRes.status === 201 || mkRes.status === 405 || mkRes.status === 301) {
+          ensuredInboxBaseUrls.add(targetConfig.baseUrl);
+        }
+      }
+      return { rateLimited: false, files: [] };
+    }
+    if (!inboxRes.ok || !inboxRes.body) {
+      return { rateLimited: false, files: [] };
+    }
+    ensuredInboxBaseUrls.add(targetConfig.baseUrl);
+    downloadBytes += inboxRes.bytesTransferred || getByteSize(inboxRes.body);
+    const parsed = parseWebDavInboxXml(inboxRes.body, `${targetConfig.baseUrl}${INBOX_DIR}`);
+    const eligible = parsed.filter(
+      (f) => f.size === undefined || f.size <= CLOUD_SHORT_DOC_MAX_BYTES
+    );
+    return { rateLimited: false, files: eligible };
+  };
+
+  const hasPendingPurges = Boolean(
+    purgedRecords &&
+      (Object.keys(purgedRecords.docs).length > 0 ||
+        Object.keys(purgedRecords.folders).length > 0)
+  );
+  const hasEligibleUnbackedShortDoc = Boolean(
+    config.syncShortDocsViaCloud &&
+      localDocs.some(
+        (d) =>
+          !d.deleted &&
+          !isDocBodyMissing(d) &&
+          d.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES &&
+          !d.cloudBodySynced
+      )
+  );
+  const hasRemoteShortDocToAutoPull = Boolean(
+    config.syncShortDocsViaCloud &&
+      localDocs.some(
+        (d) =>
+          !d.deleted &&
+          isDocBodyMissing(d) &&
+          Boolean(d.cloudBodySynced) &&
+          d.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES
+      )
+  );
+
+  const shouldBypass304 =
+    hasLocalChanges ||
+    hasPendingPurges ||
+    hasEligibleUnbackedShortDoc ||
+    hasRemoteShortDocToAutoPull;
+
+  // Step 1: Conditional fetch _manifest.json (304 = 0 bytes when unchanged)
   requestCount++;
-  const manifestRes = await callWebDav(config, 'GET', MANIFEST_PATH, {
-    ifNoneMatch: hasLocalChanges ? undefined : config.lastAutoManifestEtag,
+  let manifestRes = await callWebDav(config, 'GET', MANIFEST_PATH, {
+    ifNoneMatch: shouldBypass304 ? undefined : config.lastAutoManifestEtag,
   });
 
   if (manifestRes.status === 429 || manifestRes.status === 503) {
@@ -1243,31 +649,86 @@ export async function runAutoMetadataProgressSync(
     };
   }
 
-  if (manifestRes.status === 304 && !hasLocalChanges) {
-    skippedByEtag304++;
-    return {
-      folders: localFolders,
-      docs: localDocs,
-      treeState: localTreeState,
-      config,
-      quotaDelta: {
-        uploadBytes: 0,
-        downloadBytes: 0,
-        requestCount,
-        skippedByEtag304,
-        skippedByHashMatch: localDocs.length,
-      },
-      pulledProgressDocIds: {},
-      didPush: false,
-      didPull: false,
-    };
+  let precheckedInboxFiles: RemoteInboxFile[] | null = null;
+  if (manifestRes.status === 304 && !shouldBypass304) {
+    if (config.syncShortDocsViaCloud) {
+      const inboxCheck = await listEligibleShortInboxFiles(config);
+      if (inboxCheck.rateLimited) {
+        return {
+          folders: localFolders,
+          docs: localDocs,
+          treeState: localTreeState,
+          config,
+          quotaDelta: {
+            uploadBytes: 0,
+            downloadBytes,
+            requestCount,
+            skippedByEtag304: 0,
+            skippedByHashMatch: 0,
+          },
+          pulledProgressDocIds: {},
+          didPush: false,
+          didPull: false,
+          wasRateLimited: true,
+        };
+      }
+      precheckedInboxFiles = inboxCheck.files;
+    }
+
+    if (!precheckedInboxFiles || precheckedInboxFiles.length === 0) {
+      skippedByEtag304++;
+      return {
+        folders: localFolders,
+        docs: localDocs,
+        treeState: localTreeState,
+        config: {
+          ...config,
+          lastSyncedAt: Date.now(),
+        },
+        quotaDelta: {
+          uploadBytes: 0,
+          downloadBytes,
+          requestCount,
+          skippedByEtag304,
+          skippedByHashMatch: localDocs.length,
+        },
+        pulledProgressDocIds: {},
+        didPush: false,
+        didPull: false,
+      };
+    }
+
+    // Eligible short files were dropped into inbox/ while manifest was 304 -> fetch full manifest to merge cleanly
+    requestCount++;
+    manifestRes = await callWebDav(config, 'GET', MANIFEST_PATH);
+    if (manifestRes.status === 429 || manifestRes.status === 503) {
+      return {
+        folders: localFolders,
+        docs: localDocs,
+        treeState: localTreeState,
+        config,
+        quotaDelta: {
+          uploadBytes: 0,
+          downloadBytes,
+          requestCount,
+          skippedByEtag304: 0,
+          skippedByHashMatch: 0,
+        },
+        pulledProgressDocIds: {},
+        didPush: false,
+        didPull: false,
+        wasRateLimited: true,
+      };
+    }
   }
 
   let remoteManifest: RemoteManifest | null = null;
   let nextAutoEtag = config.lastAutoManifestEtag;
 
   if (manifestRes.status === 404 || manifestRes.status === 409) {
-    if (!hasLocalChanges) {
+    const hasAnythingLocal =
+      localFolders.length > 0 || localDocs.length > 0 || localTreeState.updatedAt > 0;
+    if (!shouldBypass304 && !hasAnythingLocal) {
       return {
         folders: localFolders,
         docs: localDocs,
@@ -1285,11 +746,13 @@ export async function runAutoMetadataProgressSync(
         didPull: false,
       };
     }
-    const ensured = await ensureRemoteDirectories(config);
+    const ensured = await ensureRemoteDirectories(config, Boolean(config.syncShortDocsViaCloud));
     requestCount += ensured.requests;
+    dirsEnsured = true;
+    docsDirEnsured = Boolean(config.syncShortDocsViaCloud && ensured.docsReady);
     if (ensured.authFailedStatus) {
       throw new Error(
-        formatSyncHttpError('自动同步创建远端目录失败', {
+        formatSyncHttpError('创建远端目录失败', {
           ok: false,
           status: ensured.authFailedStatus,
         })
@@ -1304,36 +767,134 @@ export async function runAutoMetadataProgressSync(
       remoteManifest = null;
     }
   } else if (!manifestRes.ok) {
-    throw new Error(formatSyncHttpError('自动同步拉取索引失败', manifestRes));
+    throw new Error(formatSyncHttpError('拉取目录索引失败', manifestRes));
   }
 
   let mergedConfig: WebDavConfig = { ...config };
-  let needManifestPush = false;
+  let needManifestPush = remoteManifest === null;
   let didPull = false;
   let didPush = false;
   const pulledProgressDocIds: Record<string, number> = {};
 
-  // Step 2: Merge sync settings (LWW)
-  const remoteSettings = remoteManifest?.syncSettings;
-  const localSettingsTs = config.settingsUpdatedAt || 0;
-  if (remoteSettings && remoteSettings.updatedAt > localSettingsTs) {
-    mergedConfig = {
-      ...mergedConfig,
-      provider: 'jianguoyun',
-      baseUrl: normalizeWebDavBaseUrl(remoteSettings.baseUrl || mergedConfig.baseUrl),
-      username: (remoteSettings.username || mergedConfig.username).trim(),
-      password: (remoteSettings.password || mergedConfig.password).trim(),
-      encryptionPassword: remoteSettings.encryptionPassword ?? mergedConfig.encryptionPassword ?? '',
-      settingsUpdatedAt: remoteSettings.updatedAt,
-      enabled: Boolean(
-        (remoteSettings.username || mergedConfig.username) &&
-          (remoteSettings.password || mergedConfig.password)
-      ),
-    };
-    didPull = true;
-  } else if (localSettingsTs > (remoteSettings?.updatedAt || 0)) {
+  // Step 2: Merge non-sensitive sync settings only (credentials & encryptionPassword stay strictly local)
+  const remoteSettings = remoteManifest?.syncSettings as
+    | (Record<string, unknown> & { syncShortDocsViaCloud?: boolean; updatedAt?: number })
+    | undefined;
+  const hasLegacySensitiveFields = Boolean(
+    remoteSettings &&
+      ('encryptionPassword' in remoteSettings ||
+        'password' in remoteSettings ||
+        'username' in remoteSettings ||
+        'baseUrl' in remoteSettings)
+  );
+  if (hasLegacySensitiveFields) {
+    // Automatically scrub legacy plaintext credentials from remote _manifest.json on push
     needManifestPush = true;
   }
+
+  const localSettingsTs = config.settingsUpdatedAt || 0;
+  const remoteSettingsTs =
+    typeof remoteSettings?.updatedAt === 'number' ? remoteSettings.updatedAt : 0;
+  if (remoteSettings && remoteSettingsTs > localSettingsTs) {
+    const nextShortDocFlag =
+      typeof remoteSettings.syncShortDocsViaCloud === 'boolean'
+        ? remoteSettings.syncShortDocsViaCloud
+        : Boolean(mergedConfig.syncShortDocsViaCloud);
+    mergedConfig = {
+      ...mergedConfig,
+      syncShortDocsViaCloud: nextShortDocFlag,
+      settingsUpdatedAt: remoteSettingsTs,
+    };
+    didPull = true;
+  } else if (localSettingsTs > remoteSettingsTs) {
+    needManifestPush = true;
+  }
+
+  const effectiveEncPassword = mergedConfig.encryptionPassword || '';
+  const shortDocFallback = Boolean(mergedConfig.syncShortDocsViaCloud);
+
+  const uploadShortDocBody = async (doc: ArticleDoc): Promise<boolean> => {
+    if (doc.deleted || isDocBodyMissing(doc) || doc.byteSize > CLOUD_SHORT_DOC_MAX_BYTES) {
+      return false;
+    }
+    let uploadBody = doc.content;
+    if (doc.encrypted) {
+      if (!effectiveEncPassword) {
+        return false;
+      }
+      uploadBody = await encryptText(doc.content, effectiveEncPassword);
+    }
+
+    const docExt = doc.format === 'md' ? 'md' : 'txt';
+    if (!docsDirEnsured) {
+      const ensured = await ensureRemoteDirectories(mergedConfig, true);
+      requestCount += ensured.requests;
+      dirsEnsured = true;
+      docsDirEnsured = ensured.docsReady;
+      if (ensured.authFailedStatus) {
+        return false;
+      }
+    }
+
+    requestCount++;
+    let putRes = await callWebDav(mergedConfig, 'PUT', `${DOCS_DIR}${doc.id}.${docExt}`, {
+      body: uploadBody,
+    });
+    if (!putRes.ok && (putRes.status === 404 || putRes.status === 409)) {
+      const ensured = await ensureRemoteDirectories(mergedConfig, true);
+      requestCount += ensured.requests;
+      dirsEnsured = true;
+      docsDirEnsured = ensured.docsReady;
+      requestCount++;
+      putRes = await callWebDav(mergedConfig, 'PUT', `${DOCS_DIR}${doc.id}.${docExt}`, {
+        body: uploadBody,
+      });
+    }
+    if (!putRes.ok) {
+      return false;
+    }
+    uploadBytes += getByteSize(uploadBody);
+    return true;
+  };
+
+  const downloadShortDocBody = async (
+    rEntry: ManifestDocEntry
+  ): Promise<{ content: string; contentHash: string; byteSize: number } | null> => {
+    if (rEntry.deleted || rEntry.byteSize > CLOUD_SHORT_DOC_MAX_BYTES) {
+      return null;
+    }
+    const primaryExt = rEntry.format === 'md' ? 'md' : 'txt';
+    const fallbackExt = primaryExt === 'txt' ? 'md' : 'txt';
+    requestCount++;
+    let getDoc = await callWebDav(mergedConfig, 'GET', `${DOCS_DIR}${rEntry.id}.${primaryExt}`);
+    if (!getDoc.ok && (getDoc.status === 404 || getDoc.status === 409)) {
+      requestCount++;
+      getDoc = await callWebDav(mergedConfig, 'GET', `${DOCS_DIR}${rEntry.id}.${fallbackExt}`);
+    }
+    if (!getDoc.ok && (getDoc.status === 404 || getDoc.status === 409)) {
+      requestCount++;
+      getDoc = await callWebDav(mergedConfig, 'GET', `${rEntry.id}.${primaryExt}`);
+    }
+    if (!getDoc.ok || typeof getDoc.body !== 'string') {
+      return null;
+    }
+    downloadBytes += getDoc.bytesTransferred || getByteSize(getDoc.body);
+    const rawBody = getDoc.body;
+    let plainContent = rawBody;
+    if (rEntry.encrypted || isEncryptedPayload(rawBody)) {
+      if (!effectiveEncPassword) return null;
+      try {
+        plainContent = await decryptText(rawBody, effectiveEncPassword);
+      } catch {
+        return null;
+      }
+    }
+    return {
+      content: plainContent,
+      contentHash: await sha256Hex(plainContent),
+      byteSize: getByteSize(plainContent),
+    };
+  };
 
   // Step 3: Merge folders (LWW by updatedAt)
   const remoteFolderMap = new Map<string, FolderNode>();
@@ -1371,7 +932,7 @@ export async function runAutoMetadataProgressSync(
       }
     }
   }
-  const mergedFolders = Array.from(folderMap.values());
+  const mergedFoldersRaw = Array.from(folderMap.values());
 
   // Step 4: Merge directory tree state (LWW by updatedAt)
   let mergedTreeState: SyncedTreeState = localTreeState;
@@ -1388,32 +949,47 @@ export async function runAutoMetadataProgressSync(
     needManifestPush = true;
   }
 
-  // Step 5: Merge existing docs' catalog metadata & reading progress (Strict Option 1: zero body transfers, zero ghost docs)
-  // Start remote docs map from the exact remote snapshot so un-pulled remote new books stay 100% preserved!
-  const nextRemoteDocs: Record<string, ManifestDocEntry> = {
-    ...(remoteManifest?.docs || {}),
-  };
+  // Step 5: Merge ALL documents (Option A: remote books appear in catalog immediately as pending-Wi-Fi or cloud-short-doc)
+  const mergedDocsMap = new Map<string, ArticleDoc>();
+  const nextRemoteDocs: Record<string, ManifestDocEntry> = {};
+  const remotePurgedDocsToDelete: Array<{ id: string; format: 'txt' | 'md' }> = [];
 
-  const mergedDocs: ArticleDoc[] = localDocs.map((localDoc) => {
-    if (isDocBodyMissing(localDoc)) {
-      return localDoc;
-    }
+  for (const localDoc of localDocs) {
     const remoteEntry = remoteManifest?.docs?.[localDoc.id];
-    // Upload isolation: do NOT publish newly imported local docs whose bodies haven't been synced yet
+    const localMissingBody = isDocBodyMissing(localDoc);
+
+    // 5a. Brand new local doc not yet in cloud manifest -> publish catalog immediately (Option A)
     if (!remoteEntry) {
-      return localDoc;
+      let cloudSynced = Boolean(localDoc.cloudBodySynced);
+      if (shortDocFallback && !localDoc.deleted && !localMissingBody && localDoc.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES) {
+        const uploaded = await uploadShortDocBody(localDoc);
+        if (uploaded) {
+          cloudSynced = true;
+        }
+      }
+      const nextLocal: ArticleDoc = {
+        ...localDoc,
+        cloudBodySynced: cloudSynced,
+        syncStatus: localMissingBody ? 'remote-only' : 'synced',
+      };
+      mergedDocsMap.set(localDoc.id, nextLocal);
+      nextRemoteDocs[localDoc.id] = toManifestDocEntry(nextLocal, cloudSynced);
+      needManifestPush = true;
+      continue;
     }
 
+    // 5b. Existing doc present in both local and remote manifest
     skippedByHashMatch++;
     const sameBody =
+      !localMissingBody &&
       remoteEntry.contentHash === localDoc.contentHash &&
       Boolean(remoteEntry.encrypted) === Boolean(localDoc.encrypted);
 
     let nextLocal: ArticleDoc = { ...localDoc };
     const nextRemoteEntry: ManifestDocEntry = { ...remoteEntry };
-    let pushedThisDocMetaOrProgress = false;
+    let cloudSynced = Boolean(remoteEntry.cloudBodySynced);
 
-    // 5a. Reading progress merge (independent per-book LWW by lastReadAt)
+    // Reading progress merge (independent per-book LWW by lastReadAt)
     const localProgressTs = getEffectiveProgressTs(
       localDoc.lastReadAt,
       localDoc.readProgress,
@@ -1446,12 +1022,11 @@ export async function runAutoMetadataProgressSync(
         nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
         nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
         nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? localProgressTs;
-        pushedThisDocMetaOrProgress = true;
         needManifestPush = true;
       }
     }
 
-    // 5b. Catalog metadata merge (title, folderId, order, starred, tags, soft-delete)
+    // Catalog metadata merge (title, folderId, order, starred, tags, soft-delete, encrypted)
     if (catalogFieldsDiffer(localDoc, remoteEntry)) {
       if (remoteEntry.updatedAt > localDoc.updatedAt) {
         nextLocal = {
@@ -1464,9 +1039,8 @@ export async function runAutoMetadataProgressSync(
           deleted: remoteEntry.deleted,
           deletedAt: remoteEntry.deletedAt,
           deletedByFolderId: remoteEntry.deletedByFolderId,
-          // Only advance updatedAt when body hashes match, so Manual Sync still detects remote body edits
-          updatedAt: sameBody ? remoteEntry.updatedAt : localDoc.updatedAt,
-          syncStatus: sameBody ? 'synced' : localDoc.syncStatus,
+          encrypted: Boolean(remoteEntry.encrypted),
+          updatedAt: remoteEntry.updatedAt,
         };
         didPull = true;
       } else if (localDoc.updatedAt > remoteEntry.updatedAt) {
@@ -1478,59 +1052,376 @@ export async function runAutoMetadataProgressSync(
         nextRemoteEntry.deleted = localDoc.deleted;
         nextRemoteEntry.deletedAt = localDoc.deletedAt;
         nextRemoteEntry.deletedByFolderId = localDoc.deletedByFolderId;
-        pushedThisDocMetaOrProgress = true;
+        nextRemoteEntry.encrypted = Boolean(localDoc.encrypted);
+        nextRemoteEntry.updatedAt = localDoc.updatedAt;
         needManifestPush = true;
       }
     }
 
-    if (pushedThisDocMetaOrProgress) {
-      if (sameBody) {
-        const mergedTs = Math.max(
-          remoteEntry.updatedAt,
-          localDoc.updatedAt,
-          localProgressTs
-        );
-        nextRemoteEntry.updatedAt = mergedTs;
+    // Short-doc <= 200 KB optional cloud fallback body sync
+    if (!localMissingBody) {
+      const localBodyNewer = localDoc.updatedAt >= remoteEntry.updatedAt;
+      if (localBodyNewer && (!sameBody || !cloudSynced)) {
+        if (shortDocFallback && !nextLocal.deleted && localDoc.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES) {
+          const uploaded = await uploadShortDocBody(nextLocal);
+          if (uploaded) {
+            cloudSynced = true;
+            nextRemoteEntry.contentHash = nextLocal.contentHash;
+            nextRemoteEntry.byteSize = nextLocal.byteSize;
+            nextRemoteEntry.excerpt = nextLocal.encrypted ? '' : trimManifestExcerpt(nextLocal.excerpt);
+            nextRemoteEntry.encrypted = Boolean(nextLocal.encrypted);
+            nextRemoteEntry.cloudBodySynced = true;
+            nextRemoteEntry.updatedAt = Math.max(nextRemoteEntry.updatedAt, nextLocal.updatedAt);
+            needManifestPush = true;
+          }
+        } else if (!sameBody) {
+          // Body updated locally (e.g. > 200 KB or fallback off): update catalog hash/size without cloud body
+          cloudSynced = false;
+          nextRemoteEntry.contentHash = nextLocal.contentHash;
+          nextRemoteEntry.byteSize = nextLocal.byteSize;
+          nextRemoteEntry.excerpt = nextLocal.encrypted ? '' : trimManifestExcerpt(nextLocal.excerpt);
+          nextRemoteEntry.cloudBodySynced = false;
+          nextRemoteEntry.updatedAt = Math.max(nextRemoteEntry.updatedAt, nextLocal.updatedAt);
+          needManifestPush = true;
+        }
+      } else if (
+        !localBodyNewer &&
+        !sameBody &&
+        shortDocFallback &&
+        remoteEntry.cloudBodySynced &&
+        !remoteEntry.deleted &&
+        remoteEntry.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES
+      ) {
+        const downloaded = await downloadShortDocBody(remoteEntry);
+        if (downloaded) {
+          nextLocal = {
+            ...nextLocal,
+            content: downloaded.content,
+            contentHash: downloaded.contentHash,
+            byteSize: downloaded.byteSize,
+            excerpt: remoteEntry.encrypted ? '' : extractExcerpt(downloaded.content),
+            updatedAt: remoteEntry.updatedAt,
+            syncStatus: 'synced',
+            cloudBodySynced: true,
+          };
+          cloudSynced = true;
+          didPull = true;
+        }
+      }
+      nextLocal = {
+        ...nextLocal,
+        cloudBodySynced: cloudSynced,
+        syncStatus: 'synced',
+      };
+    } else {
+      // Local doc is currently a remote-only stub (no body yet)
+      if (
+        shortDocFallback &&
+        remoteEntry.cloudBodySynced &&
+        !remoteEntry.deleted &&
+        remoteEntry.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES
+      ) {
+        const downloaded = await downloadShortDocBody(remoteEntry);
+        if (downloaded) {
+          nextLocal = {
+            ...nextLocal,
+            content: downloaded.content,
+            contentHash: downloaded.contentHash,
+            byteSize: downloaded.byteSize,
+            excerpt: remoteEntry.encrypted ? '' : extractExcerpt(downloaded.content),
+            updatedAt: Math.max(nextLocal.updatedAt, remoteEntry.updatedAt),
+            syncStatus: 'synced',
+            cloudBodySynced: true,
+          };
+          cloudSynced = true;
+          didPull = true;
+        } else {
+          nextLocal = {
+            ...nextLocal,
+            contentHash: remoteEntry.contentHash,
+            byteSize: remoteEntry.byteSize,
+            cloudBodySynced: Boolean(remoteEntry.cloudBodySynced),
+            syncStatus: 'remote-only',
+          };
+        }
+      } else {
+        if (
+          nextLocal.cloudBodySynced !== Boolean(remoteEntry.cloudBodySynced) ||
+          nextLocal.byteSize !== remoteEntry.byteSize ||
+          nextLocal.contentHash !== remoteEntry.contentHash
+        ) {
+          didPull = true;
+        }
         nextLocal = {
           ...nextLocal,
-          updatedAt: mergedTs,
-          syncStatus: 'synced',
+          contentHash: remoteEntry.contentHash,
+          byteSize: remoteEntry.byteSize,
+          cloudBodySynced: Boolean(remoteEntry.cloudBodySynced),
+          syncStatus: 'remote-only',
         };
-      } else {
-        // Keep remote updatedAt <= localDoc.updatedAt and preserve dirty status so Manual Sync uploads edited body
-        nextRemoteEntry.updatedAt = Math.min(
-          localDoc.updatedAt,
-          Math.max(remoteEntry.updatedAt, localProgressTs)
-        );
       }
-      nextRemoteDocs[localDoc.id] = nextRemoteEntry;
     }
 
-    return nextLocal;
-  });
+    nextRemoteEntry.cloudBodySynced = cloudSynced;
+    nextRemoteEntry.excerpt = nextRemoteEntry.encrypted
+      ? ''
+      : trimManifestExcerpt(nextRemoteEntry.excerpt);
+
+    mergedDocsMap.set(localDoc.id, nextLocal);
+    nextRemoteDocs[localDoc.id] = nextRemoteEntry;
+  }
+
+  // 5c. Remote docs not yet on this device -> Option A (create local catalog stub or auto-pull <= 200 KB fallback)
+  if (remoteManifest?.docs) {
+    for (const [id, rEntry] of Object.entries(remoteManifest.docs)) {
+      if (mergedDocsMap.has(id)) continue;
+
+      const purgedAt = purgedRecords?.docs?.[id];
+      if ((purgedAt && purgedAt >= rEntry.updatedAt) || isTrashExpired(rEntry, syncNow)) {
+        if (rEntry.cloudBodySynced) {
+          remotePurgedDocsToDelete.push({ id, format: rEntry.format === 'md' ? 'md' : 'txt' });
+        }
+        needManifestPush = true;
+        continue;
+      }
+
+      if (
+        shortDocFallback &&
+        rEntry.cloudBodySynced &&
+        !rEntry.deleted &&
+        rEntry.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES
+      ) {
+        const downloaded = await downloadShortDocBody(rEntry);
+        if (downloaded) {
+          const pulledDoc: ArticleDoc = {
+            id: rEntry.id,
+            title: rEntry.title,
+            folderId: rEntry.folderId,
+            order: rEntry.order,
+            content: downloaded.content,
+            contentHash: downloaded.contentHash,
+            excerpt: rEntry.encrypted ? '' : extractExcerpt(downloaded.content),
+            tags: rEntry.tags || [],
+            starred: Boolean(rEntry.starred),
+            readProgress: rEntry.readProgress ?? 0,
+            lastReadAt: rEntry.lastReadAt ?? null,
+            lastMode: rEntry.lastMode ?? 'read',
+            lastScrollTop: rEntry.lastScrollTop ?? 0,
+            lastCharOffset: rEntry.lastCharOffset ?? 0,
+            encrypted: Boolean(rEntry.encrypted),
+            format: rEntry.format ?? 'txt',
+            cloudBodySynced: true,
+            createdAt: rEntry.createdAt,
+            updatedAt: rEntry.updatedAt,
+            deleted: rEntry.deleted,
+            deletedAt: rEntry.deletedAt,
+            deletedByFolderId: rEntry.deletedByFolderId,
+            highlights: [],
+            byteSize: downloaded.byteSize,
+            syncStatus: 'synced',
+          };
+          mergedDocsMap.set(id, pulledDoc);
+          nextRemoteDocs[id] = {
+            ...rEntry,
+            excerpt: rEntry.encrypted ? '' : trimManifestExcerpt(pulledDoc.excerpt),
+          };
+          didPull = true;
+          continue;
+        }
+      }
+
+      // Option A: show catalog entry immediately on this device with remote-only status
+      const stubDoc: ArticleDoc = {
+        id: rEntry.id,
+        title: rEntry.title,
+        folderId: rEntry.folderId,
+        order: rEntry.order,
+        content: '',
+        contentHash: rEntry.contentHash,
+        excerpt: rEntry.encrypted ? '' : rEntry.excerpt || '',
+        tags: rEntry.tags || [],
+        starred: Boolean(rEntry.starred),
+        readProgress: rEntry.readProgress ?? 0,
+        lastReadAt: rEntry.lastReadAt ?? null,
+        lastMode: rEntry.lastMode ?? 'read',
+        lastScrollTop: rEntry.lastScrollTop ?? 0,
+        lastCharOffset: rEntry.lastCharOffset ?? 0,
+        encrypted: Boolean(rEntry.encrypted),
+        format: rEntry.format ?? 'txt',
+        cloudBodySynced: Boolean(rEntry.cloudBodySynced),
+        createdAt: rEntry.createdAt,
+        updatedAt: rEntry.updatedAt,
+        deleted: rEntry.deleted,
+        deletedAt: rEntry.deletedAt,
+        deletedByFolderId: rEntry.deletedByFolderId,
+        highlights: [],
+        byteSize: rEntry.byteSize ?? 0,
+        syncStatus: rEntry.deleted ? 'synced' : 'remote-only',
+      };
+      mergedDocsMap.set(id, stubDoc);
+      nextRemoteDocs[id] = rEntry;
+      didPull = true;
+    }
+  }
+
+  // 5d. Jianguoyun inbox/ dropbox ingestion (ONLY when short-doc cloud fallback <= 200 KB is enabled)
+  const inboxFilesToDelete: string[] = [];
+  if (shortDocFallback) {
+    let inboxCandidates: RemoteInboxFile[] = [];
+    if (precheckedInboxFiles !== null) {
+      inboxCandidates = precheckedInboxFiles;
+    } else {
+      const inboxCheck = await listEligibleShortInboxFiles(mergedConfig);
+      if (inboxCheck.rateLimited) {
+        return {
+          folders: mergedFoldersRaw,
+          docs: Array.from(mergedDocsMap.values()),
+          treeState: mergedTreeState,
+          config: {
+            ...mergedConfig,
+            lastAutoManifestEtag: nextAutoEtag,
+          },
+          quotaDelta: {
+            uploadBytes,
+            downloadBytes,
+            requestCount,
+            skippedByEtag304,
+            skippedByHashMatch,
+          },
+          pulledProgressDocIds,
+          didPush: false,
+          didPull,
+          wasRateLimited: true,
+        };
+      }
+      inboxCandidates = inboxCheck.files;
+    }
+
+    if (inboxCandidates.length > 0) {
+      let maxInboxOrder = Array.from(mergedDocsMap.values())
+        .filter((d) => !d.deleted && d.folderId === INBOX_FOLDER_ID)
+        .reduce((m, d) => Math.max(m, d.order), -1);
+
+      for (let i = 0; i < inboxCandidates.length; i++) {
+        const file = inboxCandidates[i];
+        requestCount++;
+        const getInboxRes = await callWebDav(mergedConfig, 'GET', file.relPath);
+        if (getInboxRes.status === 429 || getInboxRes.status === 503) {
+          break;
+        }
+        if (!getInboxRes.ok || typeof getInboxRes.body !== 'string') {
+          continue;
+        }
+        const rawText = getInboxRes.body;
+        const byteSize = getByteSize(rawText);
+        downloadBytes += getInboxRes.bytesTransferred || byteSize;
+
+        // Enforce <= 200 KB short-doc limit (skip larger files safely without deleting from inbox/)
+        if (byteSize > CLOUD_SHORT_DOC_MAX_BYTES) {
+          continue;
+        }
+
+        const rawTitle = file.name.replace(/\.(txt|md|markdown|text)$/i, '').trim() || '投递短文';
+        const format: 'txt' | 'md' = /\.(md|markdown)$/i.test(file.name) ? 'md' : 'txt';
+        const dupRes = await resolveDuplicateDocImport(
+          rawTitle,
+          rawText,
+          Array.from(mergedDocsMap.values())
+        );
+
+        if (dupRes.action === 'skip') {
+          inboxFilesToDelete.push(file.relPath);
+          continue;
+        }
+
+        const docTs = Date.now() + i;
+        maxInboxOrder += 1;
+        const inboxDoc: ArticleDoc = {
+          id: `doc_${docTs}_${Math.random().toString(36).slice(2, 6)}`,
+          title: dupRes.title,
+          folderId: INBOX_FOLDER_ID,
+          order: maxInboxOrder,
+          content: rawText,
+          contentHash: dupRes.contentHash,
+          excerpt: extractExcerpt(rawText),
+          tags: [],
+          starred: false,
+          readProgress: 0,
+          lastReadAt: null,
+          lastMode: 'read',
+          lastScrollTop: 0,
+          lastCharOffset: 0,
+          encrypted: false,
+          format,
+          cloudBodySynced: false,
+          createdAt: docTs,
+          updatedAt: docTs,
+          syncStatus: 'synced',
+          highlights: [],
+          byteSize,
+        };
+
+        const uploaded = await uploadShortDocBody(inboxDoc);
+        if (!uploaded) {
+          // Keep file in inbox/ so next sync retries safely with zero data loss
+          continue;
+        }
+
+        inboxDoc.cloudBodySynced = true;
+        mergedDocsMap.set(inboxDoc.id, inboxDoc);
+        nextRemoteDocs[inboxDoc.id] = toManifestDocEntry(inboxDoc, true);
+        inboxFilesToDelete.push(file.relPath);
+        needManifestPush = true;
+        didPull = true;
+      }
+    }
+  }
+
+  // Purge 30-day expired trash cleanly
+  const purgedMerge = purgeExpiredTrash(
+    mergedFoldersRaw,
+    Array.from(mergedDocsMap.values()),
+    syncNow
+  );
+  const mergedFolders = purgedMerge.folders;
+  const mergedDocs = purgedMerge.docs;
+  if (purgedMerge.changed || hasPendingPurges) {
+    needManifestPush = true;
+    for (const d of purgedMerge.expiredDocs) {
+      delete nextRemoteDocs[d.id];
+      if (d.cloudBodySynced) {
+        remotePurgedDocsToDelete.push({ id: d.id, format: d.format === 'md' ? 'md' : 'txt' });
+      }
+    }
+    if (purgedRecords?.docs) {
+      for (const purgedId of Object.keys(purgedRecords.docs)) {
+        const existingRemote = remoteManifest?.docs?.[purgedId];
+        delete nextRemoteDocs[purgedId];
+        if (existingRemote?.cloudBodySynced) {
+          const fmt = purgedRecords.docFormats?.[purgedId] ?? existingRemote.format ?? 'txt';
+          remotePurgedDocsToDelete.push({ id: purgedId, format: fmt === 'md' ? 'md' : 'txt' });
+        }
+      }
+    }
+  }
 
   // Step 6: Push updated _manifest.json ONLY when metadata/folders/progress actually changed
-  const canBootstrapEmptyManifest =
-    remoteManifest === null && (mergedFolders.length > 0 || mergedTreeState.updatedAt > 0);
-  if (needManifestPush && (remoteManifest !== null || canBootstrapEmptyManifest)) {
+  let purgedSynced = false;
+  if (needManifestPush) {
     const nextManifest: RemoteManifest = {
-      version: 2,
+      version: 3,
       updatedAt: Date.now(),
       folders: mergedFolders,
       docs: nextRemoteDocs,
       treeState: mergedTreeState,
       syncSettings: {
-        provider: 'jianguoyun',
-        baseUrl: normalizeWebDavBaseUrl(mergedConfig.baseUrl),
-        username: mergedConfig.username.trim(),
-        password: mergedConfig.password.trim(),
-        encryptionPassword: mergedConfig.encryptionPassword || '',
+        syncShortDocsViaCloud: Boolean(mergedConfig.syncShortDocsViaCloud),
         updatedAt: mergedConfig.settingsUpdatedAt || 0,
       },
     };
     const manifestJson = JSON.stringify(nextManifest);
     requestCount++;
-    let putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
+    let putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, { body: manifestJson });
     if (putManifest.status === 429 || putManifest.status === 503) {
       return {
         folders: mergedFolders,
@@ -1554,17 +1445,42 @@ export async function runAutoMetadataProgressSync(
       };
     }
     if (!putManifest.ok && (putManifest.status === 404 || putManifest.status === 409)) {
-      const ensured = await ensureRemoteDirectories(config);
-      requestCount += ensured.requests;
+      if (!dirsEnsured) {
+        const ensured = await ensureRemoteDirectories(mergedConfig, false);
+        requestCount += ensured.requests;
+        dirsEnsured = true;
+      }
       requestCount++;
-      putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
+      putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, { body: manifestJson });
     }
     if (!putManifest.ok) {
-      throw new Error(formatSyncHttpError('自动同步更新索引失败', putManifest));
+      throw new Error(formatSyncHttpError('更新目录索引失败', putManifest));
     }
     uploadBytes += getByteSize(manifestJson);
     nextAutoEtag = putManifest.etag || nextAutoEtag;
     didPush = true;
+    purgedSynced = hasPendingPurges;
+
+    // Clean up cloud bodies of permanently purged short docs ONLY AFTER manifest PUT succeeds
+    const seenPurgeIds = new Set<string>();
+    for (const item of remotePurgedDocsToDelete) {
+      if (seenPurgeIds.has(item.id)) continue;
+      seenPurgeIds.add(item.id);
+      requestCount++;
+      await callWebDav(mergedConfig, 'DELETE', `${DOCS_DIR}${item.id}.${item.format}`);
+    }
+
+    // Remove ingested short files from Jianguoyun inbox/ ONLY AFTER manifest PUT succeeds
+    for (const relPath of inboxFilesToDelete) {
+      requestCount++;
+      await callWebDav(mergedConfig, 'DELETE', relPath);
+    }
+  } else if (inboxFilesToDelete.length > 0) {
+    // Only duplicate inbox files were encountered (already present in library): clean up inbox/
+    for (const relPath of inboxFilesToDelete) {
+      requestCount++;
+      await callWebDav(mergedConfig, 'DELETE', relPath);
+    }
   }
 
   return {
@@ -1573,8 +1489,8 @@ export async function runAutoMetadataProgressSync(
     treeState: mergedTreeState,
     config: {
       ...mergedConfig,
-      // Keep Manual Sync's lastManifestEtag completely untouched so Manual Sync never skips remote new books!
       lastAutoManifestEtag: nextAutoEtag,
+      lastSyncedAt: Date.now(),
     },
     quotaDelta: {
       uploadBytes,
@@ -1586,11 +1502,12 @@ export async function runAutoMetadataProgressSync(
     pulledProgressDocIds,
     didPush,
     didPull,
+    purgedSynced,
   };
 }
 
 /**
- * Fetch a single remote-only document body on-demand (automatically decrypts if encrypted)
+ * Fetch a single cloud-backed document body on-demand (automatically decrypts if encrypted)
  */
 export async function fetchRemoteDocBody(
   config: WebDavConfig,
@@ -1608,7 +1525,7 @@ export async function fetchRemoteDocBody(
     res = await callWebDav(config, 'GET', `${docId}.${primaryExt}`);
   }
   if (!res.ok || typeof res.body !== 'string') {
-    throw new Error(formatSyncHttpError('拉取正文失败', res));
+    throw new Error(formatSyncHttpError('拉取云端正文失败', res));
   }
   const bytes = res.bytesTransferred || getByteSize(res.body);
   const content =
@@ -1616,82 +1533,6 @@ export async function fetchRemoteDocBody(
       ? await decryptText(res.body, config.encryptionPassword || '')
       : res.body;
   return { content, bytes };
-}
-
-export function simulateIncrementalSync(
-  folders: FolderNode[],
-  docs: ArticleDoc[],
-  metaDirty = false,
-  treeState?: SyncedTreeState,
-  config?: WebDavConfig
-): {
-  docs: ArticleDoc[];
-  quotaDelta: {
-    uploadBytes: number;
-    downloadBytes: number;
-    requestCount: number;
-    skippedByEtag304: number;
-    skippedByHashMatch: number;
-  };
-  log: SyncLogEntry;
-} {
-  const dirtyDocs = docs.filter((d) => d.syncStatus === 'dirty');
-  const unchangedCount = docs.length - dirtyDocs.length;
-
-  if (dirtyDocs.length === 0 && !metaDirty) {
-    return {
-      docs,
-      quotaDelta: {
-        uploadBytes: 0,
-        downloadBytes: 0,
-        requestCount: 1,
-        skippedByEtag304: 1,
-        skippedByHashMatch: unchangedCount,
-      },
-      log: {
-        id: `sim_${Date.now()}`,
-        timestamp: Date.now(),
-        mode: 'simulate',
-        summary: `演练：ETag 命中 304，仅 1 次请求、0 B 流量`,
-        requests: 1,
-        uploadBytes: 0,
-        downloadBytes: 0,
-        status: 'noop',
-      },
-    };
-  }
-
-  const manifestSize = getByteSize(
-    JSON.stringify(buildLocalManifest(folders, docs, treeState, config))
-  );
-  const docBytes = dirtyDocs.reduce((acc, d) => acc + (d.deleted ? 0 : d.byteSize), 0);
-  const uploadBytes = docBytes + manifestSize;
-  const requests = 1 + dirtyDocs.filter((d) => !d.deleted).length + 1;
-
-  const syncedDocs = docs.map((d) =>
-    d.syncStatus === 'dirty' ? { ...d, syncStatus: 'synced' as const } : d
-  );
-
-  return {
-    docs: syncedDocs,
-    quotaDelta: {
-      uploadBytes,
-      downloadBytes: 0,
-      requestCount: requests,
-      skippedByEtag304: 0,
-      skippedByHashMatch: unchangedCount,
-    },
-    log: {
-      id: `sim_${Date.now()}`,
-      timestamp: Date.now(),
-      mode: 'simulate',
-      summary: `演练：上传 ${dirtyDocs.length} 篇 + 索引（${formatBytes(uploadBytes)}）`,
-      requests,
-      uploadBytes,
-      downloadBytes: 0,
-      status: 'success',
-    },
-  };
 }
 
 export function getCurrentMonthKey(): string {

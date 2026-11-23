@@ -40,6 +40,7 @@ export interface ArticleDoc {
   createdAt: number;
   updatedAt: number;
   syncStatus: SyncStatus;
+  cloudBodySynced?: boolean;
   deleted?: boolean;
   deletedAt?: number;
   deletedByFolderId?: string;
@@ -63,6 +64,7 @@ export interface ManifestDocEntry {
   lastCharOffset?: number;
   encrypted?: boolean;
   format?: 'txt' | 'md';
+  cloudBodySynced?: boolean;
   updatedAt: number;
   createdAt: number;
   deleted?: boolean;
@@ -85,11 +87,7 @@ export interface SyncedTreeState {
 }
 
 export interface SyncedSettings {
-  provider: 'jianguoyun';
-  baseUrl: string;
-  username: string;
-  password: string;
-  encryptionPassword: string;
+  syncShortDocsViaCloud?: boolean;
   updatedAt: number;
 }
 
@@ -109,6 +107,7 @@ export interface WebDavConfig {
   username: string;
   password: string;
   encryptionPassword?: string;
+  syncShortDocsViaCloud?: boolean;
   settingsUpdatedAt?: number;
   lazyFetch: boolean; // On-demand body fetch to save download quota
   lastManifestEtag?: string;

@@ -68,6 +68,20 @@ interface LocalStorageNativePlugin {
   }): Promise<{ ok: boolean; applied?: number; fingerprint?: string; error?: string }>;
   getWorkspaceFingerprint(): Promise<{ ok: boolean; fingerprint?: string }>;
   scanWorkspace(): Promise<NativeScanResult>;
+  writeBinaryFile(options: {
+    path: string;
+    base64: string;
+  }): Promise<{ ok: boolean; error?: string }>;
+  readBinaryFile(options: {
+    path: string;
+  }): Promise<{ ok: boolean; base64?: string; mimeType?: string; notFound?: boolean; error?: string }>;
+  listBinaryFiles(options?: {
+    prefix?: string;
+  }): Promise<{
+    ok: boolean;
+    files?: Array<{ relPath: string; size: number; lastModified: number }>;
+    error?: string;
+  }>;
   addListener(
     eventName: 'workspaceResume',
     listenerFunc: () => void
@@ -76,11 +90,21 @@ interface LocalStorageNativePlugin {
 
 const LocalStorageNative = registerPlugin<LocalStorageNativePlugin>('LocalStorageNative');
 
+export const LOCAL_IMAGES_DIR_NAME = 'images';
+
+export function isReservedMediaDirName(name: string | null | undefined): boolean {
+  if (!name) return false;
+  const lower = name.trim().toLowerCase();
+  return lower === 'images' || lower === 'assets';
+}
+
 const INDEX_FILE_NAME = '.feiartical-index.json';
 const SYNC_MANIFEST_STORAGE_KEY = 'feiartical_local_fs_manifest_v1';
 const WEB_FS_DB_NAME = 'feiartical_local_fs_db';
 const WEB_FS_STORE_NAME = 'handles';
 const WEB_FS_ROOT_KEY = 'root_dir_handle';
+const LOCAL_IMAGES_IDB_NAME = 'feiartical_local_images_v1';
+const LOCAL_IMAGES_IDB_STORE = 'images';
 
 interface SyncedManifestState {
   folderPaths: Record<string, string>;
@@ -563,6 +587,7 @@ async function computeWebFsFingerprint(): Promise<string | null> {
     for await (const [name, handle] of root.entries()) {
       if (!name || name.startsWith('.')) continue;
       if (handle.kind === 'directory') {
+        if (isReservedMediaDirName(name)) continue;
         lines.push(`D:${name}`);
         for await (const [subName, subHandle] of handle.entries()) {
           if (subHandle.kind !== 'file') continue;
@@ -712,6 +737,7 @@ async function scanWebFsWorkspace(): Promise<NativeScanResult> {
       if (name.startsWith('.')) continue;
 
       if (handle.kind === 'directory') {
+        if (isReservedMediaDirName(name)) continue;
         folders.push({ name });
         for await (const [subName, subHandle] of handle.entries()) {
           if (subHandle.kind !== 'file') continue;
@@ -768,7 +794,7 @@ function buildDesiredWorkspaceLayout(
     .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
 
   const folderPaths: Record<string, string> = {};
-  const usedDirNames = new Set<string>();
+  const usedDirNames = new Set<string>(['images', 'assets']);
   const folderMeta: Array<{ id: string; name: string; order: number; updatedAt: number }> = [];
 
   for (const f of activeFolders) {
@@ -1059,7 +1085,7 @@ export async function scanAndMergeFromLocalFs(
 
   for (const diskFolder of scan.folders ?? []) {
     const dirName = (diskFolder.name || '').trim();
-    if (!dirName) continue;
+    if (!dirName || isReservedMediaDirName(dirName)) continue;
     const key = dirName.toLowerCase();
     const indexed = indexFolderMetaByDir.get(key);
     if (indexed && folderById.has(indexed.id)) continue;
@@ -1530,3 +1556,497 @@ export function checkAndPullExternalLocalFsChanges(
   );
   return next;
 }
+
+// ---------------------------------------------------------------------------
+// Local-only image storage & resolution (never synced to WebDAV / Jianguoyun)
+// ---------------------------------------------------------------------------
+
+export interface LocalBinaryImageFile {
+  relPath: string;
+  mimeType: string;
+  bytes: Uint8Array;
+}
+
+function normalizeImageRelPath(raw: string): string {
+  let cleaned = (raw || '').trim().replace(/\\/g, '/');
+  // Strip wrapping angle brackets if present from Markdown (<images/foo bar.jpg>)
+  if (cleaned.startsWith('<') && cleaned.endsWith('>')) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  // Drop query/hash fragments for local file resolution
+  cleaned = cleaned.split(/[?#]/)[0];
+  try {
+    cleaned = decodeURIComponent(cleaned);
+  } catch {
+    // Keep original if malformed percent-encoding
+  }
+  const parts = cleaned.split('/');
+  const stack: string[] = [];
+  for (const part of parts) {
+    const seg = part.trim();
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      // Collapse leading ../ (e.g. "../images/book/001.jpg" from a subfolder doc -> "images/book/001.jpg")
+      if (stack.length > 0) stack.pop();
+    } else {
+      stack.push(seg);
+    }
+  }
+  return stack.join('/');
+}
+
+function guessImageMimeType(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  if (lower.endsWith('.bmp')) return 'image/bmp';
+  if (lower.endsWith('.avif')) return 'image/avif';
+  return 'image/jpeg';
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, Math.min(bytes.length, i + chunkSize));
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+function openLocalImagesIdb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB unavailable'));
+      return;
+    }
+    const req = indexedDB.open(LOCAL_IMAGES_IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(LOCAL_IMAGES_IDB_STORE)) {
+        db.createObjectStore(LOCAL_IMAGES_IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('Failed to open local images db'));
+  });
+}
+
+async function putImageInIdb(relPath: string, mimeType: string, bytes: Uint8Array): Promise<void> {
+  try {
+    const db = await openLocalImagesIdb();
+    const key = normalizeImageRelPath(relPath).toLowerCase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(LOCAL_IMAGES_IDB_STORE, 'readwrite');
+      tx.objectStore(LOCAL_IMAGES_IDB_STORE).put({ mimeType, bytes }, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Failed to store image in IDB'));
+    });
+    db.close();
+  } catch {
+    // Ignore IDB storage failures
+  }
+}
+
+async function getImageFromIdb(
+  relPath: string
+): Promise<{ mimeType: string; bytes: Uint8Array } | null> {
+  try {
+    const db = await openLocalImagesIdb();
+    const key = normalizeImageRelPath(relPath).toLowerCase();
+    const record = await new Promise<
+      { mimeType?: string; bytes?: Uint8Array | ArrayBuffer } | undefined
+    >((resolve, reject) => {
+      const tx = db.transaction(LOCAL_IMAGES_IDB_STORE, 'readonly');
+      const req = tx.objectStore(LOCAL_IMAGES_IDB_STORE).get(key);
+      req.onsuccess = () =>
+        resolve(req.result as { mimeType?: string; bytes?: Uint8Array | ArrayBuffer } | undefined);
+      req.onerror = () => reject(req.error || new Error('Failed to read image from IDB'));
+    });
+    db.close();
+    if (!record || !record.bytes) return null;
+    const bytes =
+      record.bytes instanceof Uint8Array ? record.bytes : new Uint8Array(record.bytes);
+    return {
+      mimeType: record.mimeType || guessImageMimeType(relPath),
+      bytes,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeWebFsBinaryFile(relPath: string, bytes: Uint8Array): Promise<boolean> {
+  const root = await loadWebDirHandle();
+  if (!root) return false;
+  const writable = await ensureWebHandleWritable(root, false);
+  if (!writable) return false;
+
+  const clean = normalizeImageRelPath(relPath);
+  if (!clean) return false;
+  const parts = clean.split('/').filter(Boolean);
+  const fileName = parts.pop();
+  if (!fileName) return false;
+
+  try {
+    let dir = root;
+    for (const seg of parts) {
+      dir = await dir.getDirectoryHandle(seg, { create: true });
+    }
+    const fh = await dir.getFileHandle(fileName, { create: true });
+    const stream = await fh.createWritable();
+    await stream.write(bytes);
+    await stream.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readWebFsBinaryFile(relPath: string): Promise<File | null> {
+  const root = await loadWebDirHandle();
+  if (!root) return null;
+  const permitted = await ensureWebHandleWritable(root, false);
+  if (!permitted) return null;
+
+  const clean = normalizeImageRelPath(relPath);
+  if (!clean) return null;
+  const parts = clean.split('/').filter(Boolean);
+  const fileName = parts.pop();
+  if (!fileName) return null;
+
+  try {
+    let dir = root;
+    for (const seg of parts) {
+      try {
+        dir = await dir.getDirectoryHandle(seg, { create: false });
+      } catch {
+        // Case-insensitive directory lookup fallback
+        let matched: WebFileSystemDirectoryHandle | null = null;
+        for await (const [entryName, handle] of dir.entries()) {
+          if (handle.kind === 'directory' && entryName.toLowerCase() === seg.toLowerCase()) {
+            matched = handle;
+            break;
+          }
+        }
+        if (!matched) return null;
+        dir = matched;
+      }
+    }
+    try {
+      const fh = await dir.getFileHandle(fileName, { create: false });
+      return await fh.getFile();
+    } catch {
+      for await (const [entryName, handle] of dir.entries()) {
+        if (handle.kind === 'file' && entryName.toLowerCase() === fileName.toLowerCase()) {
+          return await handle.getFile();
+        }
+      }
+      return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+// Bounded LRU cache for resolved blob: object URLs (prevents memory leaks on E-Ink devices)
+const MAX_CACHED_IMAGE_URLS = 100;
+const resolvedImageUrlCache = new Map<string, string>();
+
+function getCachedImageUrl(key: string): string | null {
+  const existing = resolvedImageUrlCache.get(key);
+  if (!existing) return null;
+  // Refresh LRU recency
+  resolvedImageUrlCache.delete(key);
+  resolvedImageUrlCache.set(key, existing);
+  return existing;
+}
+
+function setCachedImageUrl(key: string, blobUrl: string): void {
+  const prev = resolvedImageUrlCache.get(key);
+  if (prev && prev !== blobUrl && prev.startsWith('blob:')) {
+    try {
+      URL.revokeObjectURL(prev);
+    } catch {
+      // ignore
+    }
+  }
+  resolvedImageUrlCache.delete(key);
+  resolvedImageUrlCache.set(key, blobUrl);
+  while (resolvedImageUrlCache.size > MAX_CACHED_IMAGE_URLS) {
+    const oldestKey = resolvedImageUrlCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    const oldestUrl = resolvedImageUrlCache.get(oldestKey);
+    resolvedImageUrlCache.delete(oldestKey);
+    if (oldestUrl && oldestUrl.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(oldestUrl);
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+export function invalidateLocalImageCache(rawSrc?: string): void {
+  if (!rawSrc) {
+    for (const url of resolvedImageUrlCache.values()) {
+      if (url.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+      }
+    }
+    resolvedImageUrlCache.clear();
+    return;
+  }
+  const norm = normalizeImageRelPath(rawSrc).toLowerCase();
+  for (const [k, url] of Array.from(resolvedImageUrlCache.entries())) {
+    if (k === norm || k.endsWith(`/${norm}`) || k.includes(norm)) {
+      resolvedImageUrlCache.delete(k);
+      if (url.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Save extracted ebook images directly to the local images/ folder (never synced via WebDAV).
+ * Falls back to IndexedDB in browser-only preview mode so images still render immediately.
+ */
+export async function saveLocalImageFiles(
+  images: LocalBinaryImageFile[],
+  config: StorageDirectoryConfig
+): Promise<{ savedCount: number; failedCount: number; target: 'local-fs' | 'browser-cache' }> {
+  if (!images || images.length === 0) {
+    return { savedCount: 0, failedCount: 0, target: 'local-fs' };
+  }
+
+  const isNative = isNativeLocalStorageAvailable();
+  const isWebFs = !isNative && config.storageMode === 'web-fs';
+  const useRealFs = config.initialized && (isNative || isWebFs);
+
+  let savedCount = 0;
+  let failedCount = 0;
+
+  for (const img of images) {
+    const cleanRel = normalizeImageRelPath(img.relPath);
+    if (!cleanRel || !img.bytes || img.bytes.length === 0) continue;
+
+    invalidateLocalImageCache(cleanRel);
+
+    if (useRealFs && isNative) {
+      try {
+        const res = await LocalStorageNative.writeBinaryFile({
+          path: cleanRel,
+          base64: bytesToBase64(img.bytes),
+        });
+        if (res.ok) {
+          savedCount += 1;
+        } else {
+          failedCount += 1;
+        }
+      } catch {
+        failedCount += 1;
+      }
+    } else if (useRealFs && isWebFs) {
+      const ok = await writeWebFsBinaryFile(cleanRel, img.bytes);
+      if (ok) {
+        savedCount += 1;
+      } else {
+        failedCount += 1;
+      }
+    } else {
+      await putImageInIdb(cleanRel, img.mimeType || guessImageMimeType(cleanRel), img.bytes);
+      savedCount += 1;
+    }
+  }
+
+  return {
+    savedCount,
+    failedCount,
+    target: useRealFs ? 'local-fs' : 'browser-cache',
+  };
+}
+
+/**
+ * Resolve a Markdown image src to a displayable URL (external URL, data URL, or local file blob URL).
+ */
+export async function resolveLocalImageUrl(
+  rawSrc: string,
+  config: StorageDirectoryConfig,
+  options?: { docFolderName?: string | null; bypassCache?: boolean }
+): Promise<{ url: string; displayPath: string } | null> {
+  const trimmed = (rawSrc || '').trim();
+  if (!trimmed) return null;
+
+  // Allow external HTTP(S) images and inline data:image URLs directly
+  if (/^(?:https?:\/\/|data:image\/)/i.test(trimmed)) {
+    return { url: trimmed, displayPath: trimmed };
+  }
+  // Reject unsafe schemes (javascript:, file:, etc.)
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+    return null;
+  }
+
+  const normalized = normalizeImageRelPath(trimmed);
+  if (!normalized) return null;
+
+  const candidates: string[] = [normalized];
+  const lowerNorm = normalized.toLowerCase();
+  const startsWithMediaRoot =
+    lowerNorm.startsWith(`${LOCAL_IMAGES_DIR_NAME}/`) || lowerNorm.startsWith('assets/');
+
+  if (!startsWithMediaRoot) {
+    if (options?.docFolderName) {
+      const safeFolder = sanitizeFsName(options.docFolderName, '');
+      if (safeFolder) {
+        candidates.push(`${safeFolder}/${normalized}`);
+      }
+    }
+    candidates.push(`${LOCAL_IMAGES_DIR_NAME}/${normalized}`);
+  }
+
+  if (options?.bypassCache) {
+    for (const c of candidates) {
+      invalidateLocalImageCache(c);
+    }
+  } else {
+    for (const c of candidates) {
+      const cached = getCachedImageUrl(c.toLowerCase());
+      if (cached) {
+        return { url: cached, displayPath: c };
+      }
+    }
+  }
+
+  const isNative = isNativeLocalStorageAvailable();
+  const isWebFs = !isNative && config.storageMode === 'web-fs';
+
+  if (config.initialized && isNative) {
+    for (const candidate of candidates) {
+      try {
+        const res = await LocalStorageNative.readBinaryFile({ path: candidate });
+        if (res.ok && res.base64) {
+          const bytes = base64ToUint8Array(res.base64);
+          const mime = res.mimeType || guessImageMimeType(candidate);
+          const blobUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: mime }));
+          setCachedImageUrl(candidate.toLowerCase(), blobUrl);
+          return { url: blobUrl, displayPath: candidate };
+        }
+      } catch {
+        // Try next candidate
+      }
+    }
+  } else if (config.initialized && isWebFs) {
+    for (const candidate of candidates) {
+      const file = await readWebFsBinaryFile(candidate);
+      if (file) {
+        const blobUrl = URL.createObjectURL(file);
+        setCachedImageUrl(candidate.toLowerCase(), blobUrl);
+        return { url: blobUrl, displayPath: candidate };
+      }
+    }
+  }
+
+  // Fallback to IndexedDB local image cache (used in browser-only mode)
+  for (const candidate of candidates) {
+    const idbImg = await getImageFromIdb(candidate);
+    if (idbImg) {
+      const blobUrl = URL.createObjectURL(
+        new Blob([idbImg.bytes.buffer as ArrayBuffer], { type: idbImg.mimeType })
+      );
+      setCachedImageUrl(candidate.toLowerCase(), blobUrl);
+      return { url: blobUrl, displayPath: candidate };
+    }
+  }
+
+  return null;
+}
+
+export interface LocalImageFileMeta {
+  relPath: string;
+  size: number;
+  lastModified: number;
+}
+
+async function listWebFsImagesRecursive(
+  dir: WebFileSystemDirectoryHandle,
+  currentRel: string,
+  out: LocalImageFileMeta[],
+  depth = 0
+): Promise<void> {
+  if (depth > 8) return;
+  for await (const [name, handle] of dir.entries()) {
+    if (!name || name.startsWith('.')) continue;
+    const nextRel = currentRel ? `${currentRel}/${name}` : name;
+    if (handle.kind === 'directory') {
+      await listWebFsImagesRecursive(handle, nextRel, out, depth + 1);
+    } else if (handle.kind === 'file') {
+      try {
+        const f = await handle.getFile();
+        if (f.size > 0) {
+          out.push({ relPath: nextRel, size: f.size, lastModified: f.lastModified || 0 });
+        }
+      } catch {
+        // ignore unreadable entries
+      }
+    }
+  }
+}
+
+export async function listLocalImageFiles(
+  config: StorageDirectoryConfig
+): Promise<LocalImageFileMeta[]> {
+  const isNative = isNativeLocalStorageAvailable();
+  if (config.initialized && isNative) {
+    try {
+      const res = await LocalStorageNative.listBinaryFiles({ prefix: LOCAL_IMAGES_DIR_NAME });
+      if (res.ok && Array.isArray(res.files)) {
+        return res.files.filter((f) => f && typeof f.relPath === 'string' && f.size > 0);
+      }
+    } catch {
+      return [];
+    }
+    return [];
+  }
+
+  const isWebFs = !isNative && config.storageMode === 'web-fs';
+  if (config.initialized && isWebFs) {
+    try {
+      const root = cachedWebDirHandle ?? (await loadWebDirHandle());
+      if (!root) return [];
+      const perm = await root.queryPermission?.({ mode: 'read' });
+      if (perm && perm !== 'granted') return [];
+      const imgDir = await root.getDirectoryHandle(LOCAL_IMAGES_DIR_NAME, { create: false });
+      const out: LocalImageFileMeta[] = [];
+      await listWebFsImagesRecursive(imgDir, LOCAL_IMAGES_DIR_NAME, out, 0);
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+

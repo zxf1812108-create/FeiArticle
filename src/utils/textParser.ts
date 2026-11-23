@@ -22,7 +22,34 @@ export type BlockNode =
       startOffset: number;
       endOffset: number;
     }
+  | { type: 'image'; src: string; alt: string; startOffset: number; endOffset: number }
   | { type: 'hr'; startOffset: number; endOffset: number };
+
+function parseStandaloneMarkdownImage(trimmed: string): { alt: string; src: string } | null {
+  if (!trimmed.startsWith('![') || !trimmed.endsWith(')')) return null;
+  const closeBracket = trimmed.indexOf('](');
+  if (closeBracket < 2) return null;
+  const alt = trimmed.slice(2, closeBracket).trim();
+  let inside = trimmed.slice(closeBracket + 2, -1).trim();
+  if (!inside) return null;
+
+  // Handle optional <...> path wrapper: ![alt](<images/my book/001.jpg> "title")
+  if (inside.startsWith('<')) {
+    const closeAngle = inside.indexOf('>');
+    if (closeAngle > 1) {
+      const src = inside.slice(1, closeAngle).trim();
+      return src ? { alt, src } : null;
+    }
+  }
+
+  // Strip optional quoted title at the end: ![alt](images/001.jpg "caption")
+  const titleMatch = inside.match(/^(.*?)\s+(?:"[^"]*"|'[^']*')\s*$/);
+  if (titleMatch && titleMatch[1].trim()) {
+    inside = titleMatch[1].trim();
+  }
+
+  return inside ? { alt, src: inside } : null;
+}
 
 function splitTableCells(rawLine: string): string[] {
   let line = rawLine.trim();
@@ -82,7 +109,10 @@ function isTableStart(lines: string[], index: number): boolean {
 
 export function countWords(text: string): number {
   if (!text) return 0;
-  const cleaned = text.replace(/[#*`>~\-[\]()_|]/g, ' ').trim();
+  const cleaned = text
+    .replace(/!\[[^\]]*\]\((?:<[^>]+>(?:\s+(?:"[^"]*"|'[^']*'))?|[^)]+)\)/g, ' ')
+    .replace(/[#*`>~\-[\]()_|]/g, ' ')
+    .trim();
   const cjkMatches = cleaned.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g);
   const cjkCount = cjkMatches ? cjkMatches.length : 0;
   const nonCjk = cleaned.replace(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g, ' ');
@@ -99,6 +129,7 @@ export function extractExcerpt(content: string, maxLen = 96): string {
   const sample = content.length > 2000 ? content.slice(0, 2000) : content;
   const plain = sample
     .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[[^\]]*\]\((?:<[^>]+>(?:\s+(?:"[^"]*"|'[^']*'))?|[^)]+)\)/g, ' ')
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/[*_`>~|]/g, ' ')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
@@ -351,6 +382,20 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
         startOffset: blockStart,
         endOffset: spans[lastRowIdx].endOffset,
       });
+      continue;
+    }
+
+    // Standalone Markdown image: ![alt](images/book/001.jpg)
+    const mdImage = parseStandaloneMarkdownImage(trimmed);
+    if (mdImage) {
+      blocks.push({
+        type: 'image',
+        alt: mdImage.alt,
+        src: mdImage.src,
+        startOffset: blockStart,
+        endOffset: spans[i].endOffset,
+      });
+      i++;
       continue;
     }
 

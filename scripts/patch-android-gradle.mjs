@@ -96,6 +96,7 @@ if (fs.existsSync(manifestPath)) {
     '<uses-permission android:name="android.permission.INTERNET" />',
     '<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />',
     '<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />',
+    '<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />',
     '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
     '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />',
     '<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />',
@@ -240,31 +241,48 @@ import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import org.json.JSONObject;
 
 @CapacitorPlugin(name = "LanServerNative")
 public class LanServerPlugin extends Plugin {
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final SecureRandom secureRandom = new SecureRandom();
+    private final Map<String, Long> pendingNonces = new ConcurrentHashMap<>();
+    private final Map<String, Long> validTokens = new ConcurrentHashMap<>();
+    private final Map<String, long[]> failedAuthByIp = new ConcurrentHashMap<>();
     private volatile ServerSocket serverSocket;
     private volatile boolean running = false;
     private volatile int activePort = 8899;
     private volatile String activeIp = "";
     private volatile String pageHtml = "";
     private volatile String stateJson = "{\\"folders\\":[],\\"docs\\":[]}";
+    private volatile String authPassword = "";
 
     @PluginMethod
     public void start(PluginCall call) {
         int preferredPort = call.getInt("port", 8899);
         String html = call.getString("html", "");
         String state = call.getString("stateJson", "{\\"folders\\":[],\\"docs\\":[]}");
+        String password = call.getString("password", "");
 
         this.pageHtml = html != null ? html : "";
         this.stateJson = state != null ? state : "{\\"folders\\":[],\\"docs\\":[]}";
+        this.authPassword = password != null ? password : "";
+        this.pendingNonces.clear();
+        this.validTokens.clear();
+        this.failedAuthByIp.clear();
 
         if (running && serverSocket != null && !serverSocket.isClosed()) {
             JSObject res = new JSObject();
@@ -360,6 +378,10 @@ public class LanServerPlugin extends Plugin {
 
     private void stopInternal() {
         running = false;
+        authPassword = "";
+        pendingNonces.clear();
+        validTokens.clear();
+        failedAuthByIp.clear();
         ServerSocket s = serverSocket;
         serverSocket = null;
         if (s != null) {
@@ -370,9 +392,78 @@ public class LanServerPlugin extends Plugin {
         }
     }
 
+    private boolean isIpLockedOut(String ip) {
+        long[] info = failedAuthByIp.get(ip);
+        if (info == null) return false;
+        long now = System.currentTimeMillis();
+        if (now - info[1] > 60_000L) {
+            failedAuthByIp.remove(ip);
+            return false;
+        }
+        return info[0] >= 5L;
+    }
+
+    private void recordFailedAuth(String ip) {
+        long now = System.currentTimeMillis();
+        long[] info = failedAuthByIp.get(ip);
+        if (info == null || now - info[1] > 60_000L) {
+            failedAuthByIp.put(ip, new long[] { 1L, now });
+        } else {
+            info[0] += 1L;
+            info[1] = now;
+        }
+    }
+
+    private boolean isTokenAuthorized(String token) {
+        if (authPassword == null || authPassword.isEmpty()) return true;
+        if (token == null || token.isEmpty()) return false;
+        Long expiry = validTokens.get(token);
+        if (expiry == null) return false;
+        if (System.currentTimeMillis() > expiry) {
+            validTokens.remove(token);
+            return false;
+        }
+        return true;
+    }
+
+    private String randomHex(int byteLen) {
+        byte[] buf = new byte[byteLen];
+        secureRandom.nextBytes(buf);
+        return toHex(buf);
+    }
+
+    private static String toHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+        }
+        return sb.toString();
+    }
+
+    private static byte[] sha256(String input) throws Exception {
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        return md.digest(input.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String hmacSha256Hex(byte[] key, String message) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(key, "HmacSHA256"));
+        return toHex(mac.doFinal(message.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static boolean constantTimeEquals(String a, String b) {
+        if (a == null || b == null || a.length() != b.length()) return false;
+        int diff = 0;
+        for (int i = 0; i < a.length(); i++) {
+            diff |= a.charAt(i) ^ b.charAt(i);
+        }
+        return diff == 0;
+    }
+
     private void handleClient(Socket client) {
         try (Socket sock = client) {
-            sock.setSoTimeout(15000);
+            sock.setSoTimeout(30000);
+            String remoteIp = sock.getInetAddress() != null ? sock.getInetAddress().getHostAddress() : "unknown";
             InputStream in = new BufferedInputStream(sock.getInputStream());
             OutputStream out = sock.getOutputStream();
 
@@ -391,6 +482,7 @@ public class LanServerPlugin extends Plugin {
             String path = qIdx >= 0 ? fullPath.substring(0, qIdx) : fullPath;
 
             int contentLength = 0;
+            String lanToken = "";
             for (int i = 1; i < lines.length; i++) {
                 int colon = lines[i].indexOf(':');
                 if (colon > 0) {
@@ -401,12 +493,14 @@ public class LanServerPlugin extends Plugin {
                             contentLength = Integer.parseInt(v);
                         } catch (NumberFormatException ignored) {
                         }
+                    } else if ("x-lan-token".equals(k)) {
+                        lanToken = v;
                     }
                 }
             }
 
             String requestBody = "";
-            if (contentLength > 0 && contentLength <= 20 * 1024 * 1024) {
+            if (contentLength > 0 && contentLength <= 64 * 1024 * 1024) {
                 byte[] buf = readExactBytes(in, contentLength);
                 requestBody = new String(buf, StandardCharsets.UTF_8);
             }
@@ -421,12 +515,73 @@ public class LanServerPlugin extends Plugin {
                 return;
             }
 
+            if ("GET".equals(method) && "/api/auth/challenge".equals(path)) {
+                boolean reqAuth = authPassword != null && !authPassword.isEmpty();
+                JSONObject resp = new JSONObject();
+                resp.put("required", reqAuth);
+                if (reqAuth) {
+                    if (isIpLockedOut(remoteIp)) {
+                        writeResponse(out, 429, "Too Many Requests", "application/json; charset=utf-8", "{\\"error\\":\\"密码错误次数过多，请 1 分钟后再试\\"}");
+                        return;
+                    }
+                    String nonce = randomHex(16);
+                    long now = System.currentTimeMillis();
+                    pendingNonces.entrySet().removeIf(e -> now > e.getValue());
+                    pendingNonces.put(nonce, now + 120_000L);
+                    resp.put("nonce", nonce);
+                }
+                writeResponse(out, 200, "OK", "application/json; charset=utf-8", resp.toString());
+                return;
+            }
+
+            if ("POST".equals(method) && "/api/auth/login".equals(path)) {
+                if (authPassword == null || authPassword.isEmpty()) {
+                    writeResponse(out, 200, "OK", "application/json; charset=utf-8", "{\\"ok\\":true,\\"token\\":\\"open\\"}");
+                    return;
+                }
+                if (isIpLockedOut(remoteIp)) {
+                    writeResponse(out, 429, "Too Many Requests", "application/json; charset=utf-8", "{\\"error\\":\\"密码错误次数过多，请 1 分钟后再试\\"}");
+                    return;
+                }
+                JSONObject bodyObj = new JSONObject(requestBody.isEmpty() ? "{}" : requestBody);
+                String nonce = bodyObj.optString("nonce", "");
+                String proof = bodyObj.optString("proof", "");
+                Long nonceExp = pendingNonces.remove(nonce);
+                if (nonceExp == null || System.currentTimeMillis() > nonceExp) {
+                    writeResponse(out, 401, "Unauthorized", "application/json; charset=utf-8", "{\\"error\\":\\"验证已过期，请重试\\"}");
+                    return;
+                }
+                byte[] authKey = sha256("fei-lan-auth-v1:" + authPassword);
+                String expected = hmacSha256Hex(authKey, "pc:" + nonce);
+                if (!constantTimeEquals(expected, proof.toLowerCase(Locale.ROOT))) {
+                    recordFailedAuth(remoteIp);
+                    writeResponse(out, 401, "Unauthorized", "application/json; charset=utf-8", "{\\"error\\":\\"加密密码错误\\"}");
+                    return;
+                }
+                failedAuthByIp.remove(remoteIp);
+                String token = randomHex(24);
+                validTokens.put(token, System.currentTimeMillis() + 12L * 3600L * 1000L);
+                JSONObject resp = new JSONObject();
+                resp.put("ok", true);
+                resp.put("token", token);
+                writeResponse(out, 200, "OK", "application/json; charset=utf-8", resp.toString());
+                return;
+            }
+
             if ("GET".equals(method) && "/api/state".equals(path)) {
+                if (!isTokenAuthorized(lanToken)) {
+                    writeResponse(out, 401, "Unauthorized", "application/json; charset=utf-8", "{\\"error\\":\\"需要验证加密密码\\"}");
+                    return;
+                }
                 writeResponse(out, 200, "OK", "application/json; charset=utf-8", stateJson);
                 return;
             }
 
             if ("POST".equals(method) && "/api/action".equals(path)) {
+                if (!isTokenAuthorized(lanToken)) {
+                    writeResponse(out, 401, "Unauthorized", "application/json; charset=utf-8", "{\\"error\\":\\"需要验证加密密码\\"}");
+                    return;
+                }
                 JSObject payload = new JSObject();
                 payload.put("actionJson", requestBody);
                 notifyListeners("lanAction", payload);
@@ -475,7 +630,7 @@ public class LanServerPlugin extends Plugin {
             "Content-Length: " + bodyBytes.length + "\\r\\n" +
             "Access-Control-Allow-Origin: *\\r\\n" +
             "Access-Control-Allow-Methods: GET, POST, OPTIONS\\r\\n" +
-            "Access-Control-Allow-Headers: Content-Type\\r\\n" +
+            "Access-Control-Allow-Headers: Content-Type, X-Lan-Token\\r\\n" +
             "Cache-Control: no-store\\r\\n" +
             "Connection: close\\r\\n\\r\\n";
         out.write(headers.getBytes(StandardCharsets.UTF_8));
@@ -703,6 +858,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
+import android.util.Base64;
 import androidx.activity.result.ActivityResult;
 import androidx.documentfile.provider.DocumentFile;
 import com.getcapacitor.JSArray;
@@ -751,8 +907,37 @@ public class LocalStoragePlugin extends Plugin {
     private static final String KEY_FOLDER_PATH = "folder_path";
     private static final String INDEX_FILE_NAME = ".feiartical-index.json";
     private static final long MAX_SCAN_FILE_BYTES = 15L * 1024L * 1024L;
+    private static final long MAX_BINARY_FILE_BYTES = 25L * 1024L * 1024L;
 
+    private static volatile LocalStoragePlugin activeInstance;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ExecutorService mediaExecutor = Executors.newFixedThreadPool(2);
+
+    public static class BinaryFileMeta {
+        public final String relPath;
+        public final long size;
+        public final long lastModified;
+
+        public BinaryFileMeta(String relPath, long size, long lastModified) {
+            this.relPath = relPath;
+            this.size = size;
+            this.lastModified = lastModified;
+        }
+    }
+
+    @Override
+    public void load() {
+        super.load();
+        activeInstance = this;
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        if (activeInstance == this) {
+            activeInstance = null;
+        }
+        super.handleOnDestroy();
+    }
 
     @Override
     protected void handleOnResume() {
@@ -1247,6 +1432,7 @@ public class LocalStoragePlugin extends Plugin {
                     String name = entry.getName();
                     if (name == null || name.isEmpty() || name.startsWith(".")) continue;
                     if (entry.isDirectory()) {
+                        if (isReservedMediaDir(name)) continue;
                         lines.add("D:" + name);
                         DocumentFile[] subFiles = entry.listFiles();
                         if (subFiles != null) {
@@ -1272,6 +1458,7 @@ public class LocalStoragePlugin extends Plugin {
                     String name = entry.getName();
                     if (name == null || name.isEmpty() || name.startsWith(".")) continue;
                     if (entry.isDirectory()) {
+                        if (isReservedMediaDir(name)) continue;
                         lines.add("D:" + name);
                         File[] subFiles = entry.listFiles();
                         if (subFiles != null) {
@@ -1336,6 +1523,7 @@ public class LocalStoragePlugin extends Plugin {
                             if (name.startsWith(".")) continue;
 
                             if (entry.isDirectory()) {
+                                if (isReservedMediaDir(name)) continue;
                                 JSObject fObj = new JSObject();
                                 fObj.put("name", name);
                                 foldersArr.put(fObj);
@@ -1402,6 +1590,7 @@ public class LocalStoragePlugin extends Plugin {
                             if (name.startsWith(".")) continue;
 
                             if (entry.isDirectory()) {
+                                if (isReservedMediaDir(name)) continue;
                                 JSObject fObj = new JSObject();
                                 fObj.put("name", name);
                                 foldersArr.put(fObj);
@@ -1466,6 +1655,418 @@ public class LocalStoragePlugin extends Plugin {
         });
     }
 
+    @PluginMethod
+    public void writeBinaryFile(PluginCall call) {
+        String rawPath = call.getString("path", "");
+        String base64 = call.getString("base64", "");
+        final String rel = normalizeRelPath(rawPath);
+        if (rel.isEmpty() || base64 == null) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            err.put("error", "无效的写入路径或文件数据");
+            call.resolve(err);
+            return;
+        }
+
+        SharedPreferences prefs = getPrefs();
+        final String mode = prefs.getString(KEY_MODE, "");
+        final String folderPath = prefs.getString(KEY_FOLDER_PATH, "");
+        final String treeUri = prefs.getString(KEY_TREE_URI, "");
+
+        mediaExecutor.execute(() -> {
+            try {
+                byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
+                if ("saf".equals(mode)) {
+                    DocumentFile root = resolveSafRoot(treeUri);
+                    if (root == null) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("error", "本地文件夹访问授权已失效");
+                        call.resolve(err);
+                        return;
+                    }
+                    Map<String, DocumentFile> cache = new HashMap<>();
+                    cache.put("", root);
+                    writeSafBinaryFile(root, rel, bytes, cache);
+                } else if ("path".equals(mode) && !folderPath.isEmpty()) {
+                    File rootDir = resolvePathRoot(folderPath);
+                    if (!rootDir.exists() && !rootDir.mkdirs()) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("error", "无法创建本地文档目录");
+                        call.resolve(err);
+                        return;
+                    }
+                    String rootCanonical = rootDir.getCanonicalPath();
+                    File target = new File(rootDir, rel);
+                    String targetCanonical = target.getCanonicalPath();
+                    if (
+                        !targetCanonical.equals(rootCanonical) &&
+                        !targetCanonical.startsWith(rootCanonical + File.separator)
+                    ) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("error", "非法文件路径");
+                        call.resolve(err);
+                        return;
+                    }
+                    File parent = target.getParentFile();
+                    if (parent != null && !parent.exists()) {
+                        parent.mkdirs();
+                    }
+                    try (FileOutputStream fos = new FileOutputStream(target, false)) {
+                        fos.write(bytes);
+                        fos.flush();
+                    }
+                } else {
+                    JSObject err = new JSObject();
+                    err.put("ok", false);
+                    err.put("error", "尚未绑定本地文档目录");
+                    call.resolve(err);
+                    return;
+                }
+
+                JSObject res = new JSObject();
+                res.put("ok", true);
+                call.resolve(res);
+            } catch (Exception e) {
+                JSObject err = new JSObject();
+                err.put("ok", false);
+                err.put("error", e.getMessage() != null ? e.getMessage() : "写入本地图片失败");
+                call.resolve(err);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void readBinaryFile(PluginCall call) {
+        String rawPath = call.getString("path", "");
+        final String rel = normalizeRelPath(rawPath);
+        if (rel.isEmpty()) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            err.put("notFound", true);
+            call.resolve(err);
+            return;
+        }
+
+        SharedPreferences prefs = getPrefs();
+        final String mode = prefs.getString(KEY_MODE, "");
+        final String folderPath = prefs.getString(KEY_FOLDER_PATH, "");
+        final String treeUri = prefs.getString(KEY_TREE_URI, "");
+
+        mediaExecutor.execute(() -> {
+            try {
+                byte[] bytes = null;
+                String resolvedName = rel;
+
+                if ("saf".equals(mode)) {
+                    DocumentFile root = resolveSafRoot(treeUri);
+                    if (root == null) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("notFound", true);
+                        call.resolve(err);
+                        return;
+                    }
+                    DocumentFile target = findSafFileFlexible(root, rel);
+                    if (target == null || !target.isFile()) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("notFound", true);
+                        call.resolve(err);
+                        return;
+                    }
+                    if (target.length() > MAX_BINARY_FILE_BYTES) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("error", "图片文件过大");
+                        call.resolve(err);
+                        return;
+                    }
+                    if (target.getName() != null) {
+                        resolvedName = target.getName();
+                    }
+                    try (InputStream is = getContext().getContentResolver().openInputStream(target.getUri())) {
+                        if (is != null) {
+                            bytes = readStreamBytes(is);
+                        }
+                    }
+                } else if ("path".equals(mode) && !folderPath.isEmpty()) {
+                    File rootDir = resolvePathRoot(folderPath);
+                    if (!rootDir.exists() || !rootDir.isDirectory()) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("notFound", true);
+                        call.resolve(err);
+                        return;
+                    }
+                    String rootCanonical = rootDir.getCanonicalPath();
+                    File target = findRegularFileFlexible(rootDir, rel);
+                    if (target == null || !target.exists() || !target.isFile()) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("notFound", true);
+                        call.resolve(err);
+                        return;
+                    }
+                    String targetCanonical = target.getCanonicalPath();
+                    if (
+                        !targetCanonical.equals(rootCanonical) &&
+                        !targetCanonical.startsWith(rootCanonical + File.separator)
+                    ) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("notFound", true);
+                        call.resolve(err);
+                        return;
+                    }
+                    if (target.length() > MAX_BINARY_FILE_BYTES) {
+                        JSObject err = new JSObject();
+                        err.put("ok", false);
+                        err.put("error", "图片文件过大");
+                        call.resolve(err);
+                        return;
+                    }
+                    resolvedName = target.getName();
+                    try (InputStream is = new FileInputStream(target)) {
+                        bytes = readStreamBytes(is);
+                    }
+                } else {
+                    JSObject err = new JSObject();
+                    err.put("ok", false);
+                    err.put("notFound", true);
+                    call.resolve(err);
+                    return;
+                }
+
+                if (bytes == null || bytes.length == 0) {
+                    JSObject err = new JSObject();
+                    err.put("ok", false);
+                    err.put("notFound", true);
+                    call.resolve(err);
+                    return;
+                }
+
+                JSObject res = new JSObject();
+                res.put("ok", true);
+                res.put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP));
+                res.put("mimeType", guessMimeType(resolvedName));
+                call.resolve(res);
+            } catch (Exception e) {
+                JSObject err = new JSObject();
+                err.put("ok", false);
+                err.put("error", e.getMessage() != null ? e.getMessage() : "读取本地图片失败");
+                call.resolve(err);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void listBinaryFiles(PluginCall call) {
+        final String prefix = normalizeRelPath(call.getString("prefix", "images"));
+        mediaExecutor.execute(() -> {
+            try {
+                List<BinaryFileMeta> list = listBinaryFilesInternal(prefix.isEmpty() ? "images" : prefix);
+                JSArray arr = new JSArray();
+                for (BinaryFileMeta item : list) {
+                    JSObject obj = new JSObject();
+                    obj.put("relPath", item.relPath);
+                    obj.put("size", item.size);
+                    obj.put("lastModified", item.lastModified);
+                    arr.put(obj);
+                }
+                JSObject res = new JSObject();
+                res.put("ok", true);
+                res.put("files", arr);
+                call.resolve(res);
+            } catch (Exception e) {
+                JSObject err = new JSObject();
+                err.put("ok", false);
+                err.put("error", e.getMessage() != null ? e.getMessage() : "列出本地图片失败");
+                call.resolve(err);
+            }
+        });
+    }
+
+    public static List<BinaryFileMeta> listBinaryFilesSync(String prefix) {
+        LocalStoragePlugin inst = activeInstance;
+        if (inst == null) return Collections.emptyList();
+        return inst.listBinaryFilesInternal(prefix);
+    }
+
+    public static byte[] readBinaryBytesSync(String rawPath) {
+        LocalStoragePlugin inst = activeInstance;
+        if (inst == null) return null;
+        return inst.readBinaryBytesInternal(rawPath);
+    }
+
+    public static boolean writeBinaryBytesSync(String rawPath, byte[] bytes) {
+        LocalStoragePlugin inst = activeInstance;
+        if (inst == null || bytes == null) return false;
+        return inst.writeBinaryBytesInternal(rawPath, bytes);
+    }
+
+    private List<BinaryFileMeta> listBinaryFilesInternal(String rawPrefix) {
+        List<BinaryFileMeta> out = new ArrayList<>();
+        String prefix = normalizeRelPath(rawPrefix);
+        if (prefix.isEmpty()) prefix = "images";
+
+        SharedPreferences prefs = getPrefs();
+        String mode = prefs.getString(KEY_MODE, "");
+        String folderPath = prefs.getString(KEY_FOLDER_PATH, "");
+        String treeUri = prefs.getString(KEY_TREE_URI, "");
+
+        try {
+            if ("saf".equals(mode)) {
+                DocumentFile root = resolveSafRoot(treeUri);
+                if (root == null) return out;
+                DocumentFile start = findSafDir(root, prefix, new HashMap<>());
+                if (start == null || !start.isDirectory()) return out;
+                walkSafBinaryDir(start, prefix, out, 0);
+            } else if ("path".equals(mode) && !folderPath.isEmpty()) {
+                File rootDir = resolvePathRoot(folderPath);
+                if (!rootDir.exists() || !rootDir.isDirectory()) return out;
+                File start = new File(rootDir, prefix);
+                if (!start.exists() || !start.isDirectory()) return out;
+                String rootCanonical = rootDir.getCanonicalPath();
+                walkPathBinaryDir(start, prefix, rootCanonical, out, 0);
+            }
+        } catch (Exception ignored) {
+        }
+        return out;
+    }
+
+    private void walkSafBinaryDir(DocumentFile dir, String currentRel, List<BinaryFileMeta> out, int depth) {
+        if (depth > 8 || dir == null) return;
+        DocumentFile[] children = dir.listFiles();
+        if (children == null) return;
+        for (DocumentFile child : children) {
+            String name = child.getName();
+            if (name == null || name.isEmpty() || name.startsWith(".")) continue;
+            String nextRel = currentRel.isEmpty() ? name : (currentRel + "/" + name);
+            if (child.isDirectory()) {
+                walkSafBinaryDir(child, nextRel, out, depth + 1);
+            } else if (child.isFile()) {
+                long len = child.length();
+                if (len > 0 && len <= MAX_BINARY_FILE_BYTES) {
+                    out.add(new BinaryFileMeta(nextRel, len, child.lastModified()));
+                }
+            }
+        }
+    }
+
+    private void walkPathBinaryDir(File dir, String currentRel, String rootCanonical, List<BinaryFileMeta> out, int depth) {
+        if (depth > 8 || dir == null) return;
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            String name = child.getName();
+            if (name == null || name.isEmpty() || name.startsWith(".")) continue;
+            try {
+                String cPath = child.getCanonicalPath();
+                if (!cPath.startsWith(rootCanonical + File.separator)) continue;
+            } catch (IOException e) {
+                continue;
+            }
+            String nextRel = currentRel.isEmpty() ? name : (currentRel + "/" + name);
+            if (child.isDirectory()) {
+                walkPathBinaryDir(child, nextRel, rootCanonical, out, depth + 1);
+            } else if (child.isFile()) {
+                long len = child.length();
+                if (len > 0 && len <= MAX_BINARY_FILE_BYTES) {
+                    out.add(new BinaryFileMeta(nextRel, len, child.lastModified()));
+                }
+            }
+        }
+    }
+
+    private byte[] readBinaryBytesInternal(String rawPath) {
+        String rel = normalizeRelPath(rawPath);
+        if (rel.isEmpty()) return null;
+
+        SharedPreferences prefs = getPrefs();
+        String mode = prefs.getString(KEY_MODE, "");
+        String folderPath = prefs.getString(KEY_FOLDER_PATH, "");
+        String treeUri = prefs.getString(KEY_TREE_URI, "");
+
+        try {
+            if ("saf".equals(mode)) {
+                DocumentFile root = resolveSafRoot(treeUri);
+                if (root == null) return null;
+                DocumentFile target = findSafFileFlexible(root, rel);
+                if (target == null || !target.isFile() || target.length() > MAX_BINARY_FILE_BYTES) return null;
+                try (InputStream is = getContext().getContentResolver().openInputStream(target.getUri())) {
+                    return is != null ? readStreamBytes(is) : null;
+                }
+            } else if ("path".equals(mode) && !folderPath.isEmpty()) {
+                File rootDir = resolvePathRoot(folderPath);
+                if (!rootDir.exists() || !rootDir.isDirectory()) return null;
+                String rootCanonical = rootDir.getCanonicalPath();
+                File target = findRegularFileFlexible(rootDir, rel);
+                if (target == null || !target.exists() || !target.isFile()) return null;
+                String targetCanonical = target.getCanonicalPath();
+                if (!targetCanonical.equals(rootCanonical) && !targetCanonical.startsWith(rootCanonical + File.separator)) {
+                    return null;
+                }
+                if (target.length() > MAX_BINARY_FILE_BYTES) return null;
+                try (InputStream is = new FileInputStream(target)) {
+                    return readStreamBytes(is);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private boolean writeBinaryBytesInternal(String rawPath, byte[] bytes) {
+        String rel = normalizeRelPath(rawPath);
+        if (rel.isEmpty() || bytes == null || bytes.length == 0 || bytes.length > MAX_BINARY_FILE_BYTES) {
+            return false;
+        }
+
+        SharedPreferences prefs = getPrefs();
+        String mode = prefs.getString(KEY_MODE, "");
+        String folderPath = prefs.getString(KEY_FOLDER_PATH, "");
+        String treeUri = prefs.getString(KEY_TREE_URI, "");
+
+        try {
+            if ("saf".equals(mode)) {
+                DocumentFile root = resolveSafRoot(treeUri);
+                if (root == null) return false;
+                Map<String, DocumentFile> cache = new HashMap<>();
+                cache.put("", root);
+                writeSafBinaryFile(root, rel, bytes, cache);
+                return true;
+            } else if ("path".equals(mode) && !folderPath.isEmpty()) {
+                File rootDir = resolvePathRoot(folderPath);
+                if (!rootDir.exists() && !rootDir.mkdirs()) return false;
+                String rootCanonical = rootDir.getCanonicalPath();
+                File target = new File(rootDir, rel);
+                String targetCanonical = target.getCanonicalPath();
+                if (!targetCanonical.equals(rootCanonical) && !targetCanonical.startsWith(rootCanonical + File.separator)) {
+                    return false;
+                }
+                File parent = target.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
+                try (FileOutputStream fos = new FileOutputStream(target, false)) {
+                    fos.write(bytes);
+                    fos.flush();
+                }
+                return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private static boolean isReservedMediaDir(String name) {
+        if (name == null) return false;
+        return "images".equalsIgnoreCase(name) || "assets".equalsIgnoreCase(name);
+    }
+
     private static String detectDocFormat(String fileName) {
         if (fileName == null || fileName.startsWith(".")) return null;
         String lower = fileName.toLowerCase(Locale.ROOT);
@@ -1479,7 +2080,129 @@ public class LocalStoragePlugin extends Plugin {
         if (lower.endsWith(".txt")) return "text/plain";
         if (lower.endsWith(".json")) return "application/json";
         if (lower.endsWith(".md")) return "text/markdown";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".gif")) return "image/gif";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".svg")) return "image/svg+xml";
+        if (lower.endsWith(".bmp")) return "image/bmp";
+        if (lower.endsWith(".avif")) return "image/avif";
         return "application/octet-stream";
+    }
+
+    private static File findRegularFileFlexible(File rootDir, String relPath) {
+        File direct = new File(rootDir, relPath);
+        if (direct.exists() && direct.isFile()) return direct;
+
+        String[] parts = relPath.split("/");
+        File current = rootDir;
+        for (int i = 0; i < parts.length; i++) {
+            String seg = parts[i];
+            if (seg.isEmpty()) continue;
+            File exact = new File(current, seg);
+            if (exact.exists()) {
+                current = exact;
+                continue;
+            }
+            File[] children = current.listFiles();
+            if (children == null) return null;
+            File matched = null;
+            for (File c : children) {
+                if (seg.equalsIgnoreCase(c.getName())) {
+                    matched = c;
+                    break;
+                }
+            }
+            if (matched == null) return null;
+            current = matched;
+        }
+        return current.isFile() ? current : null;
+    }
+
+    private DocumentFile findSafFileFlexible(DocumentFile root, String relPath) {
+        String[] parts = relPath.split("/");
+        DocumentFile current = root;
+        for (int i = 0; i < parts.length; i++) {
+            String seg = parts[i];
+            if (seg.isEmpty()) continue;
+            DocumentFile next = current.findFile(seg);
+            if (next == null) {
+                DocumentFile[] children = current.listFiles();
+                if (children != null) {
+                    for (DocumentFile c : children) {
+                        if (seg.equalsIgnoreCase(c.getName())) {
+                            next = c;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (next == null) return null;
+            current = next;
+        }
+        return current.isFile() ? current : null;
+    }
+
+    private void writeSafBinaryFile(
+        DocumentFile root,
+        String relPath,
+        byte[] bytes,
+        Map<String, DocumentFile> cache
+    ) throws IOException {
+        int slash = relPath.lastIndexOf('/');
+        String dirPart = slash >= 0 ? relPath.substring(0, slash) : "";
+        String fileName = slash >= 0 ? relPath.substring(slash + 1) : relPath;
+        DocumentFile parent = ensureSafDir(root, dirPart, cache);
+        if (parent == null) {
+            throw new IOException("无法创建子目录：" + dirPart);
+        }
+
+        DocumentFile target = parent.findFile(fileName);
+        if (target == null) {
+            // Use application/octet-stream so Android SAF preserves the exact image extension without doubling it
+            target = parent.createFile("application/octet-stream", fileName);
+            if (target == null) {
+                target = parent.createFile(guessMimeType(fileName), fileName);
+            }
+        }
+        if (target == null) {
+            throw new IOException("无法创建图片文件：" + fileName);
+        }
+
+        OutputStream os = null;
+        try {
+            try {
+                os = getContext().getContentResolver().openOutputStream(target.getUri(), "wt");
+            } catch (IllegalArgumentException e) {
+                try {
+                    os = getContext().getContentResolver().openOutputStream(target.getUri(), "rwt");
+                } catch (IllegalArgumentException e2) {
+                    os = getContext().getContentResolver().openOutputStream(target.getUri(), "w");
+                }
+            }
+            if (os == null) {
+                throw new IOException("无法打开图片输出流：" + fileName);
+            }
+            os.write(bytes);
+            os.flush();
+        } finally {
+            if (os != null) {
+                try {
+                    os.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    private static byte[] readStreamBytes(InputStream is) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buf = new byte[16384];
+        int n;
+        while ((n = is.read(buf)) != -1) {
+            baos.write(buf, 0, n);
+        }
+        return baos.toByteArray();
     }
 
     private DocumentFile ensureSafDir(
@@ -1795,6 +2518,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(WebDavPlugin.class);
         registerPlugin(LanServerPlugin.class);
+        registerPlugin(WifiSyncPlugin.class);
         registerPlugin(ReaderNativePlugin.class);
         registerPlugin(LocalStoragePlugin.class);
         super.onCreate(savedInstanceState);
@@ -1986,10 +2710,1051 @@ public class MainActivity extends BridgeActivity {
 }
 `;
 
+  const wifiSyncPluginJava = `package com.feiartical.app;
+
+import android.content.Context;
+import android.net.wifi.WifiManager;
+import android.os.Build;
+import android.util.Base64;
+import com.getcapacitor.JSArray;
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.HttpURLConnection;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.InterfaceAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import javax.crypto.Cipher;
+import javax.crypto.Mac;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+@CapacitorPlugin(name = "WifiSyncNative")
+public class WifiSyncPlugin extends Plugin {
+    private static final int DEFAULT_SYNC_PORT = 48765;
+    private static final int DISCOVERY_UDP_PORT = 48766;
+    private static final int MAX_RPC_BODY_BYTES = 40 * 1024 * 1024;
+    private static final int GCM_IV_LEN = 12;
+    private static final int GCM_TAG_BITS = 128;
+
+    private static class ServerSession {
+        final byte[] sessionKey;
+        final long expiresAt;
+
+        ServerSession(byte[] sessionKey, long expiresAt) {
+            this.sessionKey = sessionKey;
+            this.expiresAt = expiresAt;
+        }
+    }
+
+    private static class ClientSession {
+        final String host;
+        final int port;
+        final String token;
+        final byte[] sessionKey;
+        final String peerName;
+
+        ClientSession(String host, int port, String token, byte[] sessionKey, String peerName) {
+            this.host = host;
+            this.port = port;
+            this.token = token;
+            this.sessionKey = sessionKey;
+            this.peerName = peerName;
+        }
+    }
+
+    private static class PendingJsRequest {
+        final CountDownLatch latch = new CountDownLatch(1);
+        volatile boolean ok = false;
+        volatile String payloadJson = "{}";
+    }
+
+    private static class DiscoveredPeer {
+        final String id;
+        final String name;
+        final String ip;
+        final int port;
+        volatile long lastSeenAt;
+
+        DiscoveredPeer(String id, String name, String ip, int port, long lastSeenAt) {
+            this.id = id;
+            this.name = name;
+            this.ip = ip;
+            this.port = port;
+            this.lastSeenAt = lastSeenAt;
+        }
+    }
+
+    private final ExecutorService serverPool = Executors.newCachedThreadPool();
+    private final ExecutorService clientPool = Executors.newFixedThreadPool(2);
+    private final SecureRandom secureRandom = new SecureRandom();
+    private final String instanceId = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+
+    private final Map<String, Long> serverChallenges = new ConcurrentHashMap<>();
+    private final Map<String, ServerSession> serverSessions = new ConcurrentHashMap<>();
+    private final Map<String, long[]> failedAuthByIp = new ConcurrentHashMap<>();
+    private final Map<String, PendingJsRequest> pendingJsRequests = new ConcurrentHashMap<>();
+    private final Map<String, ClientSession> clientSessions = new ConcurrentHashMap<>();
+    private final Map<String, DiscoveredPeer> discoveredPeers = new ConcurrentHashMap<>();
+
+    private volatile ServerSocket serverSocket;
+    private volatile DatagramSocket discoverySocket;
+    private volatile WifiManager.MulticastLock multicastLock;
+    private volatile boolean running = false;
+    private volatile int activePort = DEFAULT_SYNC_PORT;
+    private volatile String activeIp = "";
+    private volatile String activePassword = "";
+    private volatile String activeDeviceName = "";
+
+    @PluginMethod
+    public void startServer(PluginCall call) {
+        String password = call.getString("password", "");
+        if (password == null || password.isEmpty()) {
+            call.reject("请先在设置中配置加密密码后，再使用 Wi-Fi 同步");
+            return;
+        }
+        int preferredPort = call.getInt("port", DEFAULT_SYNC_PORT);
+        String customName = call.getString("deviceName", "");
+        String resolvedName = (customName != null && !customName.trim().isEmpty())
+            ? customName.trim()
+            : buildDefaultDeviceName();
+
+        this.activePassword = password;
+        this.activeDeviceName = resolvedName;
+
+        if (running && serverSocket != null && !serverSocket.isClosed()) {
+            JSObject res = new JSObject();
+            res.put("running", true);
+            res.put("ip", activeIp);
+            res.put("port", activePort);
+            res.put("deviceName", activeDeviceName);
+            res.put("instanceId", instanceId);
+            call.resolve(res);
+            return;
+        }
+
+        String ip = resolveLanIpv4();
+        if (ip == null || ip.isEmpty()) {
+            call.reject("未检测到局域网 Wi-Fi，请确认设备已连接 Wi-Fi");
+            return;
+        }
+
+        ServerSocket sock = null;
+        int boundPort = preferredPort;
+        for (int p = preferredPort; p <= preferredPort + 10; p++) {
+            try {
+                sock = new ServerSocket(p);
+                boundPort = p;
+                break;
+            } catch (IOException ignored) {
+            }
+        }
+        if (sock == null) {
+            call.reject("无法启动 Wi-Fi 同步端口，请重试");
+            return;
+        }
+
+        this.serverSocket = sock;
+        this.activePort = boundPort;
+        this.activeIp = ip;
+        this.running = true;
+        this.serverChallenges.clear();
+        this.serverSessions.clear();
+        this.failedAuthByIp.clear();
+        this.discoveredPeers.clear();
+
+        final ServerSocket listening = sock;
+        serverPool.execute(() -> {
+            while (running && !listening.isClosed()) {
+                try {
+                    Socket client = listening.accept();
+                    serverPool.execute(() -> handleServerConnection(client));
+                } catch (IOException e) {
+                    if (!running) break;
+                }
+            }
+        });
+
+        startUdpDiscovery();
+
+        JSObject res = new JSObject();
+        res.put("running", true);
+        res.put("ip", activeIp);
+        res.put("port", activePort);
+        res.put("deviceName", activeDeviceName);
+        res.put("instanceId", instanceId);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void stopServer(PluginCall call) {
+        stopInternal();
+        JSObject res = new JSObject();
+        res.put("running", false);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void resolveServerRequest(PluginCall call) {
+        String reqId = call.getString("reqId", "");
+        boolean ok = Boolean.TRUE.equals(call.getBoolean("ok", true));
+        String payloadJson = call.getString("payloadJson", "{}");
+        PendingJsRequest pending = pendingJsRequests.remove(reqId);
+        if (pending != null) {
+            pending.ok = ok;
+            pending.payloadJson = payloadJson != null ? payloadJson : "{}";
+            pending.latch.countDown();
+        }
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void peerConnect(PluginCall call) {
+        final String host = call.getString("host", "").trim();
+        final int port = call.getInt("port", DEFAULT_SYNC_PORT);
+        final String password = call.getString("password", "");
+        if (host.isEmpty() || password == null || password.isEmpty()) {
+            call.reject("缺少对方设备地址或加密密码");
+            return;
+        }
+
+        clientPool.execute(() -> {
+            try {
+                // Step 1: GET /wifi-sync/challenge
+                HttpResult chRes = httpRequest("GET", "http://" + host + ":" + port + "/wifi-sync/challenge", null, null, 8000);
+                if (chRes.status == 429) {
+                    call.reject("密码错误次数过多，对方设备已暂时锁定，请 1 分钟后再试");
+                    return;
+                }
+                if (chRes.status != 200) {
+                    call.reject("无法连接对方设备（HTTP " + chRes.status + "），请确认对方已打开 Wi-Fi 同步");
+                    return;
+                }
+                JSONObject chObj = new JSONObject(new String(chRes.body, StandardCharsets.UTF_8));
+                String serverNonce = chObj.optString("serverNonce", "");
+                String peerName = chObj.optString("deviceName", host);
+                if (serverNonce.isEmpty()) {
+                    call.reject("对方设备握手协议异常");
+                    return;
+                }
+
+                // Step 2: Compute mutual HMAC-SHA256 challenge-response (password never leaves device)
+                String clientNonce = randomHex(16);
+                byte[] authKey = sha256("fei-wifi-auth-v1:" + password);
+                String clientProof = hmacSha256Hex(authKey, "client:" + serverNonce + ":" + clientNonce);
+
+                JSONObject authReq = new JSONObject();
+                authReq.put("serverNonce", serverNonce);
+                authReq.put("clientNonce", clientNonce);
+                authReq.put("clientProof", clientProof);
+
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Content-Type", "application/json; charset=utf-8");
+                HttpResult authRes = httpRequest(
+                    "POST",
+                    "http://" + host + ":" + port + "/wifi-sync/auth",
+                    headers,
+                    authReq.toString().getBytes(StandardCharsets.UTF_8),
+                    8000
+                );
+                if (authRes.status == 429) {
+                    call.reject("密码错误次数过多，对方设备已锁定 1 分钟");
+                    return;
+                }
+                if (authRes.status == 401) {
+                    call.reject("加密密码不一致，请确认两台设备设置了相同的加密密码");
+                    return;
+                }
+                if (authRes.status != 200) {
+                    call.reject("身份验证失败（HTTP " + authRes.status + "）");
+                    return;
+                }
+
+                JSONObject authObj = new JSONObject(new String(authRes.body, StandardCharsets.UTF_8));
+                String token = authObj.optString("token", "");
+                String serverProof = authObj.optString("serverProof", "");
+                String expectedServerProof = hmacSha256Hex(authKey, "server:" + serverNonce + ":" + clientNonce);
+                if (token.isEmpty() || !constantTimeEquals(expectedServerProof, serverProof.toLowerCase(Locale.ROOT))) {
+                    call.reject("对方设备双向身份校验失败，已中止连接");
+                    return;
+                }
+
+                byte[] sessionKey = hmacSha256Raw(authKey, "session:" + serverNonce + ":" + clientNonce);
+                String sessionId = randomHex(12);
+                clientSessions.put(sessionId, new ClientSession(host, port, token, sessionKey, peerName));
+
+                JSObject out = new JSObject();
+                out.put("ok", true);
+                out.put("sessionId", sessionId);
+                out.put("deviceName", peerName);
+                call.resolve(out);
+            } catch (Exception e) {
+                call.reject(e.getMessage() != null ? e.getMessage() : "连接对方设备失败");
+            }
+        });
+    }
+
+    @PluginMethod
+    public void peerRpc(PluginCall call) {
+        final String sessionId = call.getString("sessionId", "");
+        final String action = call.getString("action", "");
+        final String payloadJson = call.getString("payloadJson", "{}");
+        final ClientSession session = clientSessions.get(sessionId);
+        if (session == null) {
+            call.reject("同步会话已失效");
+            return;
+        }
+
+        clientPool.execute(() -> {
+            try {
+                JSONObject env = new JSONObject();
+                env.put("action", action);
+                env.put("payload", payloadJson != null ? payloadJson : "{}");
+                byte[] encrypted = encryptAesGcm(session.sessionKey, env.toString().getBytes(StandardCharsets.UTF_8));
+
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Content-Type", "application/octet-stream");
+                headers.put("X-Wifi-Token", session.token);
+
+                HttpResult res = httpRequest(
+                    "POST",
+                    "http://" + session.host + ":" + session.port + "/wifi-sync/rpc",
+                    headers,
+                    encrypted,
+                    35000
+                );
+                if (res.status != 200) {
+                    call.reject("同步通信失败（HTTP " + res.status + "）");
+                    return;
+                }
+                byte[] plain = decryptAesGcm(session.sessionKey, res.body);
+                JSObject out = new JSObject();
+                out.put("ok", true);
+                out.put("payloadJson", new String(plain, StandardCharsets.UTF_8));
+                call.resolve(out);
+            } catch (Exception e) {
+                call.reject(e.getMessage() != null ? e.getMessage() : "同步数据通信失败");
+            }
+        });
+    }
+
+    @PluginMethod
+    public void peerPullImage(PluginCall call) {
+        final String sessionId = call.getString("sessionId", "");
+        final String relPath = call.getString("relPath", "");
+        final ClientSession session = clientSessions.get(sessionId);
+        if (session == null || relPath == null || relPath.isEmpty()) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            call.resolve(err);
+            return;
+        }
+
+        clientPool.execute(() -> {
+            try {
+                byte[] encPath = encryptAesGcm(session.sessionKey, relPath.getBytes(StandardCharsets.UTF_8));
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Content-Type", "application/octet-stream");
+                headers.put("X-Wifi-Token", session.token);
+
+                HttpResult res = httpRequest(
+                    "POST",
+                    "http://" + session.host + ":" + session.port + "/wifi-sync/image/get",
+                    headers,
+                    encPath,
+                    30000
+                );
+                if (res.status != 200 || res.body == null || res.body.length == 0) {
+                    JSObject err = new JSObject();
+                    err.put("ok", false);
+                    call.resolve(err);
+                    return;
+                }
+                byte[] plainBytes = decryptAesGcm(session.sessionKey, res.body);
+                boolean saved = LocalStoragePlugin.writeBinaryBytesSync(relPath, plainBytes);
+                JSObject out = new JSObject();
+                out.put("ok", saved);
+                out.put("bytes", plainBytes.length);
+                call.resolve(out);
+            } catch (Exception e) {
+                JSObject err = new JSObject();
+                err.put("ok", false);
+                err.put("error", e.getMessage() != null ? e.getMessage() : "拉取图片失败");
+                call.resolve(err);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void peerPushImage(PluginCall call) {
+        final String sessionId = call.getString("sessionId", "");
+        final String relPath = call.getString("relPath", "");
+        final ClientSession session = clientSessions.get(sessionId);
+        if (session == null || relPath == null || relPath.isEmpty()) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            call.resolve(err);
+            return;
+        }
+
+        clientPool.execute(() -> {
+            try {
+                byte[] rawBytes = LocalStoragePlugin.readBinaryBytesSync(relPath);
+                if (rawBytes == null || rawBytes.length == 0) {
+                    JSObject err = new JSObject();
+                    err.put("ok", false);
+                    call.resolve(err);
+                    return;
+                }
+                byte[] encPath = encryptAesGcm(session.sessionKey, relPath.getBytes(StandardCharsets.UTF_8));
+                byte[] encBody = encryptAesGcm(session.sessionKey, rawBytes);
+
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Content-Type", "application/octet-stream");
+                headers.put("X-Wifi-Token", session.token);
+                headers.put("X-Image-Path", Base64.encodeToString(encPath, Base64.NO_WRAP));
+
+                HttpResult res = httpRequest(
+                    "POST",
+                    "http://" + session.host + ":" + session.port + "/wifi-sync/image/put",
+                    headers,
+                    encBody,
+                    30000
+                );
+                JSObject out = new JSObject();
+                out.put("ok", res.status == 200);
+                out.put("bytes", rawBytes.length);
+                call.resolve(out);
+            } catch (Exception e) {
+                JSObject err = new JSObject();
+                err.put("ok", false);
+                err.put("error", e.getMessage() != null ? e.getMessage() : "发送图片失败");
+                call.resolve(err);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void peerDisconnect(PluginCall call) {
+        String sessionId = call.getString("sessionId", "");
+        if (sessionId != null) {
+            clientSessions.remove(sessionId);
+        }
+        JSObject out = new JSObject();
+        out.put("ok", true);
+        call.resolve(out);
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        stopInternal();
+        clientSessions.clear();
+        super.handleOnDestroy();
+    }
+
+    private void stopInternal() {
+        running = false;
+        activePassword = "";
+        serverChallenges.clear();
+        serverSessions.clear();
+        failedAuthByIp.clear();
+        discoveredPeers.clear();
+        for (PendingJsRequest p : pendingJsRequests.values()) {
+            p.ok = false;
+            p.latch.countDown();
+        }
+        pendingJsRequests.clear();
+
+        ServerSocket s = serverSocket;
+        serverSocket = null;
+        if (s != null) {
+            try { s.close(); } catch (IOException ignored) {}
+        }
+
+        DatagramSocket ds = discoverySocket;
+        discoverySocket = null;
+        if (ds != null) {
+            try { ds.close(); } catch (Exception ignored) {}
+        }
+
+        WifiManager.MulticastLock lock = multicastLock;
+        multicastLock = null;
+        if (lock != null && lock.isHeld()) {
+            try { lock.release(); } catch (Exception ignored) {}
+        }
+    }
+
+    private void startUdpDiscovery() {
+        try {
+            WifiManager wm = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                WifiManager.MulticastLock lock = wm.createMulticastLock("FeiArticalWifiSync");
+                lock.setReferenceCounted(false);
+                lock.acquire();
+                this.multicastLock = lock;
+            }
+        } catch (Exception ignored) {
+        }
+
+        try {
+            DatagramSocket ds = new DatagramSocket(null);
+            ds.setReuseAddress(true);
+            ds.setBroadcast(true);
+            ds.bind(new InetSocketAddress(DISCOVERY_UDP_PORT));
+            ds.setSoTimeout(1500);
+            this.discoverySocket = ds;
+
+            // Listener thread
+            serverPool.execute(() -> {
+                byte[] buf = new byte[1024];
+                while (running && !ds.isClosed()) {
+                    try {
+                        DatagramPacket pkt = new DatagramPacket(buf, buf.length);
+                        ds.receive(pkt);
+                        String text = new String(pkt.getData(), 0, pkt.getLength(), StandardCharsets.UTF_8);
+                        JSONObject obj = new JSONObject(text);
+                        if (!"feiartical".equals(obj.optString("app"))) continue;
+                        String peerId = obj.optString("id", "");
+                        if (peerId.isEmpty() || peerId.equals(instanceId)) continue;
+                        String peerIp = pkt.getAddress() != null ? pkt.getAddress().getHostAddress() : "";
+                        int peerPort = obj.optInt("port", DEFAULT_SYNC_PORT);
+                        String peerName = obj.optString("name", peerIp);
+                        if (peerIp == null || peerIp.isEmpty() || peerIp.equals(activeIp)) continue;
+                        discoveredPeers.put(peerId, new DiscoveredPeer(peerId, peerName, peerIp, peerPort, System.currentTimeMillis()));
+                        emitPeersToJs();
+                    } catch (IOException ignored) {
+                        pruneAndEmitPeers();
+                    } catch (Exception ignored) {
+                    }
+                }
+            });
+
+            // Broadcaster thread
+            serverPool.execute(() -> {
+                while (running && !ds.isClosed()) {
+                    try {
+                        JSONObject beacon = new JSONObject();
+                        beacon.put("app", "feiartical");
+                        beacon.put("v", 1);
+                        beacon.put("id", instanceId);
+                        beacon.put("name", activeDeviceName);
+                        beacon.put("port", activePort);
+                        byte[] payload = beacon.toString().getBytes(StandardCharsets.UTF_8);
+
+                        sendBroadcastPacket(ds, payload, InetAddress.getByName("255.255.255.255"));
+                        for (InetAddress bcast : resolveSubnetBroadcasts()) {
+                            sendBroadcastPacket(ds, payload, bcast);
+                        }
+                        pruneAndEmitPeers();
+                    } catch (Exception ignored) {
+                    }
+                    try {
+                        Thread.sleep(1500);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+            });
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void sendBroadcastPacket(DatagramSocket ds, byte[] data, InetAddress target) {
+        try {
+            DatagramPacket pkt = new DatagramPacket(data, data.length, target, DISCOVERY_UDP_PORT);
+            ds.send(pkt);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void pruneAndEmitPeers() {
+        long now = System.currentTimeMillis();
+        boolean removed = discoveredPeers.entrySet().removeIf(e -> now - e.getValue().lastSeenAt > 6500L);
+        if (removed) {
+            emitPeersToJs();
+        }
+    }
+
+    private void emitPeersToJs() {
+        JSArray arr = new JSArray();
+        for (DiscoveredPeer p : discoveredPeers.values()) {
+            JSObject obj = new JSObject();
+            obj.put("id", p.id);
+            obj.put("name", p.name);
+            obj.put("ip", p.ip);
+            obj.put("port", p.port);
+            arr.put(obj);
+        }
+        JSObject payload = new JSObject();
+        payload.put("peers", arr);
+        notifyListeners("wifiPeers", payload);
+    }
+
+    private void handleServerConnection(Socket client) {
+        try (Socket sock = client) {
+            sock.setSoTimeout(35000);
+            String remoteIp = sock.getInetAddress() != null ? sock.getInetAddress().getHostAddress() : "unknown";
+            InputStream in = new BufferedInputStream(sock.getInputStream());
+            OutputStream out = sock.getOutputStream();
+
+            String headerBlock = readHeaderBlock(in);
+            if (headerBlock == null || headerBlock.isEmpty()) return;
+            String[] lines = headerBlock.split("\\r\\n");
+            if (lines.length == 0) return;
+            String[] reqParts = lines[0].split(" ");
+            if (reqParts.length < 2) return;
+
+            String method = reqParts[0].toUpperCase(Locale.ROOT);
+            String path = reqParts[1];
+            int qIdx = path.indexOf('?');
+            if (qIdx >= 0) path = path.substring(0, qIdx);
+
+            int contentLength = 0;
+            String token = "";
+            String encImagePathB64 = "";
+            for (int i = 1; i < lines.length; i++) {
+                int colon = lines[i].indexOf(':');
+                if (colon > 0) {
+                    String k = lines[i].substring(0, colon).trim().toLowerCase(Locale.ROOT);
+                    String v = lines[i].substring(colon + 1).trim();
+                    if ("content-length".equals(k)) {
+                        try { contentLength = Integer.parseInt(v); } catch (NumberFormatException ignored) {}
+                    } else if ("x-wifi-token".equals(k)) {
+                        token = v;
+                    } else if ("x-image-path".equals(k)) {
+                        encImagePathB64 = v;
+                    }
+                }
+            }
+
+            byte[] reqBytes = new byte[0];
+            if (contentLength > 0 && contentLength <= MAX_RPC_BODY_BYTES) {
+                reqBytes = readExactBytes(in, contentLength);
+            }
+
+            if ("GET".equals(method) && "/wifi-sync/challenge".equals(path)) {
+                if (isIpLockedOut(remoteIp)) {
+                    writeBytesResponse(out, 429, "Too Many Requests", "application/json", "{\\"error\\":\\"locked\\"}".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+                String serverNonce = randomHex(16);
+                long now = System.currentTimeMillis();
+                serverChallenges.entrySet().removeIf(e -> now > e.getValue());
+                serverChallenges.put(serverNonce, now + 90_000L);
+
+                JSONObject resp = new JSONObject();
+                resp.put("serverNonce", serverNonce);
+                resp.put("deviceName", activeDeviceName);
+                resp.put("instanceId", instanceId);
+                resp.put("protocolVersion", 1);
+                writeBytesResponse(out, 200, "OK", "application/json; charset=utf-8", resp.toString().getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+
+            if ("POST".equals(method) && "/wifi-sync/auth".equals(path)) {
+                if (isIpLockedOut(remoteIp)) {
+                    writeBytesResponse(out, 429, "Too Many Requests", "application/json", "{\\"error\\":\\"locked\\"}".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+                JSONObject reqObj = new JSONObject(new String(reqBytes, StandardCharsets.UTF_8));
+                String serverNonce = reqObj.optString("serverNonce", "");
+                String clientNonce = reqObj.optString("clientNonce", "");
+                String clientProof = reqObj.optString("clientProof", "");
+
+                Long exp = serverChallenges.remove(serverNonce);
+                if (exp == null || System.currentTimeMillis() > exp || clientNonce.length() < 16) {
+                    writeBytesResponse(out, 401, "Unauthorized", "application/json", "{\\"error\\":\\"expired\\"}".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+
+                byte[] authKey = sha256("fei-wifi-auth-v1:" + activePassword);
+                String expectedClient = hmacSha256Hex(authKey, "client:" + serverNonce + ":" + clientNonce);
+                if (!constantTimeEquals(expectedClient, clientProof.toLowerCase(Locale.ROOT))) {
+                    recordFailedAuth(remoteIp);
+                    writeBytesResponse(out, 401, "Unauthorized", "application/json", "{\\"error\\":\\"invalid_password\\"}".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+
+                failedAuthByIp.remove(remoteIp);
+                byte[] sessionKey = hmacSha256Raw(authKey, "session:" + serverNonce + ":" + clientNonce);
+                String serverProof = hmacSha256Hex(authKey, "server:" + serverNonce + ":" + clientNonce);
+                String newToken = randomHex(24);
+                long now = System.currentTimeMillis();
+                serverSessions.entrySet().removeIf(e -> now > e.getValue().expiresAt);
+                serverSessions.put(newToken, new ServerSession(sessionKey, now + 30L * 60L * 1000L));
+
+                JSONObject resp = new JSONObject();
+                resp.put("ok", true);
+                resp.put("token", newToken);
+                resp.put("serverProof", serverProof);
+                resp.put("deviceName", activeDeviceName);
+                writeBytesResponse(out, 200, "OK", "application/json; charset=utf-8", resp.toString().getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+
+            ServerSession session = serverSessions.get(token);
+            if (session == null || System.currentTimeMillis() > session.expiresAt) {
+                writeBytesResponse(out, 401, "Unauthorized", "application/json", "{\\"error\\":\\"unauthorized\\"}".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+
+            if ("POST".equals(method) && "/wifi-sync/rpc".equals(path)) {
+                byte[] plainReq = decryptAesGcm(session.sessionKey, reqBytes);
+                JSONObject env = new JSONObject(new String(plainReq, StandardCharsets.UTF_8));
+                String action = env.optString("action", "");
+                String payloadStr = env.optString("payload", "{}");
+
+                String responseJson;
+                if ("listImages".equals(action)) {
+                    List<LocalStoragePlugin.BinaryFileMeta> list = LocalStoragePlugin.listBinaryFilesSync("images");
+                    JSONArray arr = new JSONArray();
+                    for (LocalStoragePlugin.BinaryFileMeta m : list) {
+                        JSONObject item = new JSONObject();
+                        item.put("relPath", m.relPath);
+                        item.put("size", m.size);
+                        item.put("lastModified", m.lastModified);
+                        arr.put(item);
+                    }
+                    JSONObject r = new JSONObject();
+                    r.put("ok", true);
+                    r.put("files", arr);
+                    responseJson = r.toString();
+                } else {
+                    String reqId = randomHex(10);
+                    PendingJsRequest pending = new PendingJsRequest();
+                    pendingJsRequests.put(reqId, pending);
+
+                    JSObject evt = new JSObject();
+                    evt.put("reqId", reqId);
+                    evt.put("action", action);
+                    evt.put("payloadJson", payloadStr);
+                    notifyListeners("wifiServerRequest", evt);
+
+                    boolean done = pending.latch.await(30, TimeUnit.SECONDS);
+                    pendingJsRequests.remove(reqId);
+                    if (!done || !pending.ok) {
+                        writeBytesResponse(out, 500, "Server Error", "text/plain", "js_timeout".getBytes(StandardCharsets.UTF_8));
+                        return;
+                    }
+                    responseJson = pending.payloadJson;
+                }
+
+                byte[] encResp = encryptAesGcm(session.sessionKey, responseJson.getBytes(StandardCharsets.UTF_8));
+                writeBytesResponse(out, 200, "OK", "application/octet-stream", encResp);
+                return;
+            }
+
+            if ("POST".equals(method) && "/wifi-sync/image/get".equals(path)) {
+                byte[] plainPath = decryptAesGcm(session.sessionKey, reqBytes);
+                String relPath = new String(plainPath, StandardCharsets.UTF_8);
+                byte[] imgBytes = LocalStoragePlugin.readBinaryBytesSync(relPath);
+                if (imgBytes == null || imgBytes.length == 0) {
+                    writeBytesResponse(out, 404, "Not Found", "text/plain", "not_found".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+                byte[] encImg = encryptAesGcm(session.sessionKey, imgBytes);
+                writeBytesResponse(out, 200, "OK", "application/octet-stream", encImg);
+                return;
+            }
+
+            if ("POST".equals(method) && "/wifi-sync/image/put".equals(path)) {
+                if (encImagePathB64.isEmpty()) {
+                    writeBytesResponse(out, 400, "Bad Request", "text/plain", "missing_path".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+                byte[] encPathBytes = Base64.decode(encImagePathB64, Base64.DEFAULT);
+                String relPath = new String(decryptAesGcm(session.sessionKey, encPathBytes), StandardCharsets.UTF_8);
+                byte[] imgBytes = decryptAesGcm(session.sessionKey, reqBytes);
+                boolean saved = LocalStoragePlugin.writeBinaryBytesSync(relPath, imgBytes);
+                if (!saved) {
+                    writeBytesResponse(out, 500, "Server Error", "text/plain", "write_failed".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+                JSObject evt = new JSObject();
+                evt.put("relPath", relPath);
+                notifyListeners("wifiImageReceived", evt);
+                byte[] encOk = encryptAesGcm(session.sessionKey, "{\\"ok\\":true}".getBytes(StandardCharsets.UTF_8));
+                writeBytesResponse(out, 200, "OK", "application/octet-stream", encOk);
+                return;
+            }
+
+            writeBytesResponse(out, 404, "Not Found", "text/plain", "not_found".getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean isIpLockedOut(String ip) {
+        long[] info = failedAuthByIp.get(ip);
+        if (info == null) return false;
+        long now = System.currentTimeMillis();
+        if (now - info[1] > 60_000L) {
+            failedAuthByIp.remove(ip);
+            return false;
+        }
+        return info[0] >= 5L;
+    }
+
+    private void recordFailedAuth(String ip) {
+        long now = System.currentTimeMillis();
+        long[] info = failedAuthByIp.get(ip);
+        if (info == null || now - info[1] > 60_000L) {
+            failedAuthByIp.put(ip, new long[] { 1L, now });
+        } else {
+            info[0] += 1L;
+            info[1] = now;
+        }
+    }
+
+    private byte[] encryptAesGcm(byte[] key, byte[] plaintext) throws Exception {
+        byte[] iv = new byte[GCM_IV_LEN];
+        secureRandom.nextBytes(iv);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(GCM_TAG_BITS, iv));
+        byte[] ct = cipher.doFinal(plaintext);
+        byte[] out = new byte[iv.length + ct.length];
+        System.arraycopy(iv, 0, out, 0, iv.length);
+        System.arraycopy(ct, 0, out, iv.length, ct.length);
+        return out;
+    }
+
+    private static byte[] decryptAesGcm(byte[] key, byte[] combined) throws Exception {
+        if (combined == null || combined.length <= GCM_IV_LEN) {
+            throw new IllegalArgumentException("加密数据包损坏");
+        }
+        byte[] iv = new byte[GCM_IV_LEN];
+        System.arraycopy(combined, 0, iv, 0, GCM_IV_LEN);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(GCM_TAG_BITS, iv));
+        return cipher.doFinal(combined, GCM_IV_LEN, combined.length - GCM_IV_LEN);
+    }
+
+    private String randomHex(int byteLen) {
+        byte[] b = new byte[byteLen];
+        secureRandom.nextBytes(b);
+        return toHex(b);
+    }
+
+    private static String toHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+        }
+        return sb.toString();
+    }
+
+    private static byte[] sha256(String input) throws Exception {
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        return md.digest(input.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static byte[] hmacSha256Raw(byte[] key, String message) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(key, "HmacSHA256"));
+        return mac.doFinal(message.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String hmacSha256Hex(byte[] key, String message) throws Exception {
+        return toHex(hmacSha256Raw(key, message));
+    }
+
+    private static boolean constantTimeEquals(String a, String b) {
+        if (a == null || b == null || a.length() != b.length()) return false;
+        int diff = 0;
+        for (int i = 0; i < a.length(); i++) {
+            diff |= a.charAt(i) ^ b.charAt(i);
+        }
+        return diff == 0;
+    }
+
+    private static String buildDefaultDeviceName() {
+        String model = Build.MODEL != null ? Build.MODEL.trim() : "";
+        String brand = Build.BRAND != null ? Build.BRAND.trim() : "";
+        if (model.isEmpty()) return "Android 设备";
+        if (!brand.isEmpty() && !model.toLowerCase(Locale.ROOT).startsWith(brand.toLowerCase(Locale.ROOT))) {
+            return brand + " " + model;
+        }
+        return model;
+    }
+
+    private static class HttpResult {
+        final int status;
+        final byte[] body;
+
+        HttpResult(int status, byte[] body) {
+            this.status = status;
+            this.body = body;
+        }
+    }
+
+    private static HttpResult httpRequest(
+        String method,
+        String urlStr,
+        Map<String, String> headers,
+        byte[] body,
+        int timeoutMs
+    ) throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        conn.setRequestMethod(method);
+        conn.setConnectTimeout(timeoutMs);
+        conn.setReadTimeout(timeoutMs);
+        conn.setUseCaches(false);
+        if (headers != null) {
+            for (Map.Entry<String, String> e : headers.entrySet()) {
+                conn.setRequestProperty(e.getKey(), e.getValue());
+            }
+        }
+        if (body != null) {
+            conn.setDoOutput(true);
+            conn.setFixedLengthStreamingMode(body.length);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body);
+                os.flush();
+            }
+        }
+        int status = conn.getResponseCode();
+        InputStream is = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+        byte[] respBytes = new byte[0];
+        if (is != null) {
+            try (InputStream stream = is) {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = stream.read(buf)) != -1) {
+                    baos.write(buf, 0, n);
+                }
+                respBytes = baos.toByteArray();
+            }
+        }
+        conn.disconnect();
+        return new HttpResult(status, respBytes);
+    }
+
+    private static String readHeaderBlock(InputStream in) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int state = 0;
+        int b;
+        while ((b = in.read()) != -1) {
+            baos.write(b);
+            if (baos.size() > 65536) return null;
+            if (state == 0 && b == '\\r') state = 1;
+            else if (state == 1 && b == '\\n') state = 2;
+            else if (state == 2 && b == '\\r') state = 3;
+            else if (state == 3 && b == '\\n') break;
+            else state = (b == '\\r') ? 1 : 0;
+        }
+        return baos.toString(StandardCharsets.UTF_8.name());
+    }
+
+    private static byte[] readExactBytes(InputStream in, int length) throws IOException {
+        byte[] data = new byte[length];
+        int offset = 0;
+        while (offset < length) {
+            int n = in.read(data, offset, length - offset);
+            if (n < 0) break;
+            offset += n;
+        }
+        return data;
+    }
+
+    private static void writeBytesResponse(OutputStream out, int code, String reason, String contentType, byte[] body)
+        throws IOException {
+        String headers =
+            "HTTP/1.1 " + code + " " + reason + "\\r\\n" +
+            "Content-Type: " + contentType + "\\r\\n" +
+            "Content-Length: " + body.length + "\\r\\n" +
+            "Cache-Control: no-store\\r\\n" +
+            "Connection: close\\r\\n\\r\\n";
+        out.write(headers.getBytes(StandardCharsets.UTF_8));
+        if (body.length > 0) {
+            out.write(body);
+        }
+        out.flush();
+    }
+
+    private static String resolveLanIpv4() {
+        String fallback = null;
+        try {
+            Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
+            if (ifaces == null) return null;
+            for (NetworkInterface nif : Collections.list(ifaces)) {
+                if (!nif.isUp() || nif.isLoopback()) continue;
+                String name = nif.getName().toLowerCase(Locale.ROOT);
+                for (InetAddress addr : Collections.list(nif.getInetAddresses())) {
+                    if (addr.isLoopbackAddress() || !(addr instanceof Inet4Address)) continue;
+                    String ip = addr.getHostAddress();
+                    if (ip == null) continue;
+                    if (name.startsWith("wlan") || name.startsWith("eth") || name.startsWith("ap")) {
+                        return ip;
+                    }
+                    if (fallback == null) {
+                        fallback = ip;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return fallback;
+    }
+
+    private static List<InetAddress> resolveSubnetBroadcasts() {
+        java.util.List<InetAddress> result = new java.util.ArrayList<>();
+        try {
+            Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
+            if (ifaces == null) return result;
+            for (NetworkInterface nif : Collections.list(ifaces)) {
+                if (!nif.isUp() || nif.isLoopback()) continue;
+                for (InterfaceAddress ia : nif.getInterfaceAddresses()) {
+                    InetAddress bcast = ia.getBroadcast();
+                    if (bcast != null && !bcast.isLoopbackAddress()) {
+                        result.add(bcast);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return result;
+    }
+}
+`;
+
   fs.writeFileSync(path.join(javaPkgDir, 'WebDavPlugin.java'), webDavPluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'LanServerPlugin.java'), lanServerPluginJava, 'utf8');
+  fs.writeFileSync(path.join(javaPkgDir, 'WifiSyncPlugin.java'), wifiSyncPluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'ReaderNativePlugin.java'), readerNativePluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'LocalStoragePlugin.java'), localStoragePluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'MainActivity.java'), mainActivityJava, 'utf8');
-  console.log(`Installed native WebDavPlugin, LanServerPlugin, ReaderNativePlugin, LocalStoragePlugin & MainActivity into ${javaPkgDir}`);
+  console.log(`Installed native WebDavPlugin, LanServerPlugin, WifiSyncPlugin, ReaderNativePlugin, LocalStoragePlugin & MainActivity into ${javaPkgDir}`);
 }

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -9,7 +10,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: '12mb' }));
+app.use(express.json({ limit: '64mb' }));
 
 // Validate target WebDAV URL to prevent SSRF to internal networks
 function isAllowedWebDavUrl(rawUrl: string): boolean {
@@ -154,13 +155,40 @@ let lanEnabled = false;
 let lanHtml = '';
 let lanStateJson = JSON.stringify({ folders: [], docs: [] });
 let lanPendingActions: unknown[] = [];
+let lanAuthKey: Buffer | null = null;
+const lanChallenges = new Map<string, number>();
+const lanTokens = new Map<string, number>();
+const lanIpFailures = new Map<string, { count: number; lockUntil: number }>();
+
+function verifyLanToken(req: express.Request): boolean {
+  if (!lanAuthKey) return true;
+  const token = String(req.get('X-Lan-Token') || '').trim();
+  if (!token) return false;
+  const expiresAt = lanTokens.get(token);
+  if (!expiresAt || expiresAt < Date.now()) {
+    lanTokens.delete(token);
+    return false;
+  }
+  return true;
+}
 
 app.post('/api/lan/start', (req, res) => {
-  const { html, stateJson } = req.body as { html?: string; stateJson?: string };
+  const { html, stateJson, password } = req.body as {
+    html?: string;
+    stateJson?: string;
+    password?: string;
+  };
   lanEnabled = true;
   if (typeof html === 'string') lanHtml = html;
   if (typeof stateJson === 'string') lanStateJson = stateJson;
   lanPendingActions = [];
+  lanChallenges.clear();
+  lanTokens.clear();
+  lanIpFailures.clear();
+  lanAuthKey =
+    typeof password === 'string' && password.length > 0
+      ? crypto.createHash('sha256').update(`fei-lan-auth-v1:${password}`, 'utf-8').digest()
+      : null;
   const host = req.get('host') || `localhost:${PORT}`;
   const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
   res.json({ running: true, url: `${proto}://${host}/pc` });
@@ -169,6 +197,10 @@ app.post('/api/lan/start', (req, res) => {
 app.post('/api/lan/stop', (_req, res) => {
   lanEnabled = false;
   lanPendingActions = [];
+  lanAuthKey = null;
+  lanChallenges.clear();
+  lanTokens.clear();
+  lanIpFailures.clear();
   res.json({ running: false });
 });
 
@@ -194,9 +226,70 @@ app.get('/pc', (_req, res) => {
   res.type('text/html; charset=utf-8').send(lanHtml);
 });
 
-app.get('/api/state', (_req, res) => {
+app.get('/api/auth/challenge', (_req, res) => {
   if (!lanEnabled) {
     res.status(503).json({ error: '电脑直连未开启' });
+    return;
+  }
+  if (!lanAuthKey) {
+    res.json({ required: false, nonce: '' });
+    return;
+  }
+  const nonce = crypto.randomBytes(16).toString('hex');
+  lanChallenges.set(nonce, Date.now() + 60_000);
+  res.json({ required: true, nonce });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  if (!lanEnabled) {
+    res.status(503).json({ ok: false, error: '电脑直连未开启' });
+    return;
+  }
+  if (!lanAuthKey) {
+    res.json({ ok: true, token: 'open' });
+    return;
+  }
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  const fail = lanIpFailures.get(ip);
+  if (fail && fail.lockUntil > now) {
+    res.status(429).json({ ok: false, error: '尝试次数过多，请 60 秒后重试' });
+    return;
+  }
+  const { nonce, proof } = (req.body || {}) as { nonce?: string; proof?: string };
+  const exp = typeof nonce === 'string' ? lanChallenges.get(nonce) : undefined;
+  if (typeof nonce === 'string') lanChallenges.delete(nonce);
+  if (!exp || exp < now || typeof proof !== 'string') {
+    res.status(401).json({ ok: false, error: '校验已过期，请重试' });
+    return;
+  }
+  const expected = crypto.createHmac('sha256', lanAuthKey).update(`pc:${nonce}`, 'utf-8').digest('hex');
+  const expectedBuf = Buffer.from(expected, 'utf-8');
+  const actualBuf = Buffer.from(proof.toLowerCase(), 'utf-8');
+  const match =
+    expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf);
+  if (!match) {
+    const nextCount = (fail?.count || 0) + 1;
+    lanIpFailures.set(ip, {
+      count: nextCount >= 5 ? 0 : nextCount,
+      lockUntil: nextCount >= 5 ? now + 60_000 : 0,
+    });
+    res.status(401).json({ ok: false, error: '加密密码错误' });
+    return;
+  }
+  lanIpFailures.delete(ip);
+  const token = crypto.randomBytes(24).toString('hex');
+  lanTokens.set(token, now + 12 * 60 * 60 * 1000);
+  res.json({ ok: true, token });
+});
+
+app.get('/api/state', (req, res) => {
+  if (!lanEnabled) {
+    res.status(503).json({ error: '电脑直连未开启' });
+    return;
+  }
+  if (!verifyLanToken(req)) {
+    res.status(401).json({ error: '请先输入加密密码验证' });
     return;
   }
   res.type('application/json; charset=utf-8').send(lanStateJson);
@@ -205,6 +298,10 @@ app.get('/api/state', (_req, res) => {
 app.post('/api/action', (req, res) => {
   if (!lanEnabled) {
     res.status(503).json({ error: '电脑直连未开启' });
+    return;
+  }
+  if (!verifyLanToken(req)) {
+    res.status(401).json({ error: '请先输入加密密码验证' });
     return;
   }
   lanPendingActions.push(req.body);

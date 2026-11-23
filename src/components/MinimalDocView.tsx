@@ -1,6 +1,7 @@
 import React, {
   forwardRef,
   memo,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -8,11 +9,13 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { CloudDownload, Copy } from 'lucide-react';
+import { CloudDownload, Copy, Wifi, X } from 'lucide-react';
 import { ArticleDoc } from '../types';
 import { extractLookupWord } from '../utils/mdict';
+import { DocImageBlock, DocImagePreviewPayload } from './DocImageBlock';
 import { DocOutlineModal } from './DocOutlineModal';
 import { BlockNode, formatBytes, parseDocumentBlocks, TocItem } from '../utils/textParser';
+import { StorageDirectoryConfig } from '../utils/storage';
 import {
   extractExactVisualLineText,
   findBlocksInClientYRange,
@@ -59,6 +62,8 @@ export interface MinimalDocViewHandle {
 
 interface MinimalDocViewProps {
   doc: ArticleDoc;
+  storageDir: StorageDirectoryConfig;
+  docFolderName?: string | null;
   fontSize?: number;
   autoHyphenate?: boolean;
   hasActiveMdict?: boolean;
@@ -73,6 +78,7 @@ interface MinimalDocViewProps {
   onReadProgressChange?: (progress: number) => void;
   onReadMetricsChange?: (metrics: DocReadMetrics) => void;
   onFetchRemoteBody: () => Promise<void>;
+  onOpenWifiSync: () => void;
 }
 
 interface CopyPopoverState {
@@ -86,6 +92,7 @@ interface VisualLine {
   top: number;
   bottom: number;
   text: string;
+  isMedia?: boolean;
 }
 
 const DOC_LINE_HEIGHT = '1.62';
@@ -176,6 +183,8 @@ function estimateBlockHeight(block: BlockNode, fontSize: number, contentWidth: n
     }
     case 'table':
       return Math.round((block.rows.length + 1) * (fontSize * 1.8 + 16) + 28);
+    case 'image':
+      return 260;
     case 'hr':
       return 48;
   }
@@ -225,6 +234,19 @@ function collectVisualLinesInBand(
           top: r.top + baseOffset,
           bottom: r.bottom + baseOffset,
           text: '',
+        });
+      }
+      continue;
+    }
+
+    if (blockEl.getAttribute('data-image-block') === 'true') {
+      const r = blockEl.getBoundingClientRect();
+      if (r.height > 1 && r.width > 0 && r.bottom >= minClientY && r.top <= maxClientY) {
+        rawRects.push({
+          top: r.top + baseOffset,
+          bottom: r.bottom + baseOffset,
+          text: '',
+          isMedia: true,
         });
       }
       continue;
@@ -325,7 +347,20 @@ function renderInline(raw: string, autoHyphenate = false) {
   });
 }
 
-function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean, autoHyphenate = false) {
+interface BlockRenderContext {
+  storageDir: StorageDirectoryConfig;
+  docFolderName?: string | null;
+  onImageLoaded: () => void;
+  onPreviewImage: (payload: DocImagePreviewPayload) => void;
+}
+
+function renderBlock(
+  block: BlockNode,
+  idx: number,
+  isFirstOverall: boolean,
+  autoHyphenate = false,
+  renderCtx?: BlockRenderContext
+) {
   const offsetAttrs = {
     'data-block-idx': idx,
     'data-start-offset': block.startOffset,
@@ -482,6 +517,20 @@ function renderBlock(block: BlockNode, idx: number, isFirstOverall: boolean, aut
           </table>
         </div>
       );
+    case 'image':
+      return renderCtx ? (
+        <DocImageBlock
+          key={idx}
+          src={block.src}
+          alt={block.alt}
+          storageDir={renderCtx.storageDir}
+          docFolderName={renderCtx.docFolderName}
+          topZero={isFirstOverall}
+          offsetAttrs={offsetAttrs}
+          onImageLoaded={renderCtx.onImageLoaded}
+          onPreview={renderCtx.onPreviewImage}
+        />
+      ) : null;
     case 'hr':
       return (
         <hr
@@ -499,15 +548,29 @@ const DocBlockChunk = memo(function DocBlockChunk({
   startIdx,
   endIdx,
   autoHyphenate,
+  storageDir,
+  docFolderName,
+  onImageLoaded,
+  onPreviewImage,
 }: {
   blocks: BlockNode[];
   startIdx: number;
   endIdx: number;
   autoHyphenate: boolean;
+  storageDir: StorageDirectoryConfig;
+  docFolderName?: string | null;
+  onImageLoaded: () => void;
+  onPreviewImage: (payload: DocImagePreviewPayload) => void;
 }) {
+  const renderCtx: BlockRenderContext = {
+    storageDir,
+    docFolderName,
+    onImageLoaded,
+    onPreviewImage,
+  };
   const nodes: React.ReactNode[] = [];
   for (let i = startIdx; i < endIdx; i++) {
-    nodes.push(renderBlock(blocks[i], i, i === 0, autoHyphenate));
+    nodes.push(renderBlock(blocks[i], i, i === 0, autoHyphenate, renderCtx));
   }
   return <>{nodes}</>;
 });
@@ -522,6 +585,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
   function MinimalDocView(
     {
       doc,
+      storageDir,
+      docFolderName = null,
       fontSize = 16,
       autoHyphenate = true,
       hasActiveMdict = false,
@@ -536,6 +601,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       onReadProgressChange,
       onReadMetricsChange,
       onFetchRemoteBody,
+      onOpenWifiSync,
     },
     ref
   ) {
@@ -551,6 +617,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const [showOutline, setShowOutline] = useState(false);
     const showOutlineRef = useRef(false);
     showOutlineRef.current = showOutline;
+    const [previewImage, setPreviewImage] = useState<DocImagePreviewPayload | null>(null);
     const [copyPopover, setCopyPopover] = useState<CopyPopoverState | null>(null);
     const copyPopoverRef = useRef<CopyPopoverState | null>(null);
     copyPopoverRef.current = copyPopover;
@@ -956,15 +1023,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }
 
       const rawViewBottom = viewTop + viewHeight;
+      const mediaBand = Math.max(72, Math.round(viewHeight * 0.78));
 
-      // Top edge clip: scan only lines touching the top 64px band
+      // Top edge clip: scan lines/media touching the top edge
       let nextTop = 0;
       if (viewTop > 1.5) {
         const topLines = collectVisualLinesInBand(
           el,
           articleEl,
-          Math.max(0, viewTop - 64),
-          viewTop + 72
+          Math.max(0, viewTop - mediaBand),
+          viewTop + mediaBand
         );
         const topCutIdx = topLines.findIndex(
           (line) => line.top < viewTop - 0.5 && line.bottom > viewTop + 0.5
@@ -975,30 +1043,33 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             const nextLineTop =
               topCutIdx + 1 < topLines.length ? topLines[topCutIdx + 1].top : rawViewBottom;
             const safeTopCutY = Math.min(nextLineTop - 0.5, topCutLine.bottom + 1);
-            nextTop = Math.max(0, Math.min(56, Math.ceil(safeTopCutY - viewTop)));
+            const maxMask = topCutLine.isMedia ? Math.max(56, Math.floor(viewHeight * 0.5)) : 56;
+            nextTop = Math.max(0, Math.min(maxMask, Math.ceil(safeTopCutY - viewTop)));
           }
         }
       }
 
-      // Bottom edge clip: scan only lines touching the bottom 64px band
+      // Bottom edge clip: scan lines/media touching the bottom edge
       let nextBottom = 0;
       if (viewTop < maxScroll - 1.5) {
         const bottomLines = collectVisualLinesInBand(
           el,
           articleEl,
-          Math.max(0, rawViewBottom - 72),
-          rawViewBottom + 64
+          Math.max(0, rawViewBottom - mediaBand),
+          rawViewBottom + mediaBand
         );
         const bottomCutIdx = bottomLines.findIndex(
           (line) => line.top < rawViewBottom - 0.5 && line.bottom > rawViewBottom + 0.5
         );
         if (bottomCutIdx !== -1) {
           const bottomCutLine = bottomLines[bottomCutIdx];
-          if (bottomCutLine.top > viewTop + nextTop + 4) {
+          const minRemainingVisible = bottomCutLine.isMedia ? 64 : 4;
+          if (bottomCutLine.top > viewTop + nextTop + minRemainingVisible) {
             const prevLineBottom =
               bottomCutIdx > 0 ? bottomLines[bottomCutIdx - 1].bottom : viewTop;
             const safeBottomCutY = Math.max(prevLineBottom + 0.5, bottomCutLine.top - 1);
-            nextBottom = Math.max(0, Math.min(56, Math.ceil(rawViewBottom - safeBottomCutY)));
+            const maxMask = bottomCutLine.isMedia ? Math.max(56, Math.floor(viewHeight * 0.68)) : 56;
+            nextBottom = Math.max(0, Math.min(maxMask, Math.ceil(rawViewBottom - safeBottomCutY)));
           }
         }
       }
@@ -1019,6 +1090,17 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         reportReadProgress();
       });
     };
+
+    const scheduleEdgeClipUpdateRef = useRef(scheduleEdgeClipUpdate);
+    scheduleEdgeClipUpdateRef.current = scheduleEdgeClipUpdate;
+
+    const handleDocImageLoaded = useCallback(() => {
+      scheduleEdgeClipUpdateRef.current();
+    }, []);
+
+    const handleDocImagePreview = useCallback((payload: DocImagePreviewPayload) => {
+      setPreviewImage(payload);
+    }, []);
 
     const ensureChunkMountedForBlock = (blockIdx: number): boolean => {
       if (!isVirtualized || chunkCount === 0) return false;
@@ -2244,12 +2326,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const currentBottom = currentTop + viewHeight;
       const effectiveTop = currentTop + topClipPxRef.current;
-      // Only scan lines around the top edge and one line above — O(log K) & < 1ms
+      const scanSpan = Math.max(260, Math.round(viewHeight * 0.85));
+      // Scan lines & media blocks around the top edge — O(log K) & < 1ms
       const lines = collectVisualLinesInBand(
         el,
         articleEl,
-        Math.max(0, currentTop - 160),
-        Math.min(currentBottom + 40, currentTop + 260)
+        Math.max(0, currentTop - scanSpan),
+        Math.min(currentBottom + 40, currentTop + scanSpan)
       );
       const EPS = 0.5;
 
@@ -2301,12 +2384,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (currentTop >= maxScroll || viewHeight <= 0) return;
 
       const effectiveBottom = currentTop + viewHeight - bottomClipPxRef.current;
-      // Only scan lines around the bottom edge — O(log K) & < 1ms
+      const scanSpan = Math.max(220, Math.round(viewHeight * 0.85));
+      // Scan lines & media blocks around the bottom edge — O(log K) & < 1ms
       const lines = collectVisualLinesInBand(
         el,
         articleEl,
-        Math.max(0, effectiveBottom - 180),
-        effectiveBottom + 180
+        Math.max(0, effectiveBottom - scanSpan),
+        effectiveBottom + scanSpan
       );
       const EPS = 0.5;
 
@@ -2406,7 +2490,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const target = e.target as HTMLElement | null;
       if (
         target?.closest(
-          'button, a, input, textarea, select, [data-outline-modal="true"], [data-copy-popover="true"]'
+          'button, a, img, input, textarea, select, [data-image-block="true"], [data-image-preview="true"], [data-outline-modal="true"], [data-copy-popover="true"]'
         )
       ) {
         return;
@@ -2583,25 +2667,43 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
               <article ref={articleRef} className="w-full min-w-0 font-doc-body">
                 {doc.syncStatus === 'remote-only' && !content ? (
                   <div className="py-12 text-center space-y-3">
-                    <p className="text-[14px] text-[var(--fei-text-muted)]">
-                      正文位于坚果云（约 {formatBytes(doc.byteSize)}），按需拉取后将缓存在本地。
-                    </p>
-                    {fetchError && (
-                      <p className="text-[13px] text-[var(--fei-text-muted)]">{fetchError}</p>
+                    {doc.cloudBodySynced ? (
+                      <>
+                        <p className="text-[14px] text-[var(--fei-text-muted)]">
+                          正文已存云端（约 {formatBytes(doc.byteSize)}），点击拉取后将缓存在本机。
+                        </p>
+                        {fetchError && (
+                          <p className="text-[13px] text-[var(--fei-text-muted)]">{fetchError}</p>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleFetch}
+                          disabled={fetching}
+                          className={`h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13px] transition-colors ${
+                            fetching
+                              ? 'text-[var(--fei-text-muted)]/65 cursor-wait'
+                              : 'text-[var(--fei-text-primary)] font-medium hover:bg-[var(--fei-bg-selected)] active:bg-[var(--fei-bg-selected)] cursor-pointer'
+                          }`}
+                        >
+                          <CloudDownload className="w-4 h-4" />
+                          <span>{fetching ? '拉取中…' : '从云端拉取正文'}</span>
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-[14px] text-[var(--fei-text-muted)]">
+                          本机暂无此文档正文（约 {formatBytes(doc.byteSize)}），请在相同 Wi-Fi 下通过设备同步获取。
+                        </p>
+                        <button
+                          type="button"
+                          onClick={onOpenWifiSync}
+                          className="h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13px] text-[var(--fei-text-primary)] font-medium hover:bg-[var(--fei-bg-selected)] active:bg-[var(--fei-bg-selected)] transition-colors cursor-pointer"
+                        >
+                          <Wifi className="w-4 h-4" />
+                          <span>打开 Wi-Fi 同步</span>
+                        </button>
+                      </>
                     )}
-                    <button
-                      type="button"
-                      onClick={handleFetch}
-                      disabled={fetching}
-                      className={`h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13px] transition-colors ${
-                        fetching
-                          ? 'text-[var(--fei-text-muted)]/65 cursor-wait'
-                          : 'text-[var(--fei-text-primary)] font-medium hover:bg-[var(--fei-bg-selected)] active:bg-[var(--fei-bg-selected)] cursor-pointer'
-                      }`}
-                    >
-                      <CloudDownload className="w-4 h-4" />
-                      <span>{fetching ? '拉取中…' : '拉取正文'}</span>
-                    </button>
                   </div>
                 ) : (
                   <div
@@ -2642,6 +2744,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                                 startIdx={startIdx}
                                 endIdx={endIdx}
                                 autoHyphenate={autoHyphenate}
+                                storageDir={storageDir}
+                                docFolderName={docFolderName}
+                                onImageLoaded={handleDocImageLoaded}
+                                onPreviewImage={handleDocImagePreview}
                               />
                             </div>
                           );
@@ -2651,7 +2757,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                         )}
                       </>
                     ) : (
-                      blocks.map((b, i) => renderBlock(b, i, i === 0, autoHyphenate))
+                      blocks.map((b, i) =>
+                        renderBlock(b, i, i === 0, autoHyphenate, {
+                          storageDir,
+                          docFolderName,
+                          onImageLoaded: handleDocImageLoaded,
+                          onPreviewImage: handleDocImagePreview,
+                        })
+                      )
                     )}
                   </div>
                 )}
@@ -2719,6 +2832,39 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             onJumpToHeading={handleJumpToHeading}
             onClose={() => setShowOutline(false)}
           />
+        )}
+
+        {previewImage && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="图片预览"
+            data-image-preview="true"
+            onClick={() => setPreviewImage(null)}
+            className="fixed inset-0 z-50 bg-black/85 eink:bg-[var(--fei-bg)] flex flex-col items-center justify-center p-4 select-none"
+          >
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setPreviewImage(null);
+              }}
+              aria-label="关闭图片预览"
+              className="fixed top-[max(1rem,env(safe-area-inset-top))] right-4 z-10 w-10 h-10 rounded-full bg-black/50 eink:bg-[var(--fei-bg-surface)] eink:border eink:border-[var(--fei-border-strong)] text-white eink:text-[var(--fei-text-primary)] inline-flex items-center justify-center cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <img
+              src={previewImage.url}
+              alt={previewImage.alt || ''}
+              className="max-w-full max-h-[86vh] w-auto h-auto object-contain rounded-lg eink:rounded-none"
+            />
+            {previewImage.alt && (
+              <div className="mt-3 max-w-[90vw] text-[13px] text-white/85 eink:text-[var(--fei-text-primary)] text-center truncate">
+                {previewImage.alt}
+              </div>
+            )}
+          </div>
         )}
       </div>
     );

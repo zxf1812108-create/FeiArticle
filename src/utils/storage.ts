@@ -66,6 +66,7 @@ export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {
   username: '',
   password: '',
   encryptionPassword: '',
+  syncShortDocsViaCloud: false,
   settingsUpdatedAt: 0,
   lazyFetch: false,
 };
@@ -279,7 +280,7 @@ export function saveActiveMdictId(dictId: string | null): void {
   }
 }
 
-export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'sync' | 'settings';
+export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'settings';
 export type DocToolbarIconId = 'back' | 'font' | 'whistle';
 
 export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
@@ -287,7 +288,6 @@ export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
   'edit',
   'cut',
   'encrypt',
-  'sync',
   'settings',
 ];
 
@@ -317,53 +317,24 @@ function normalizeToolbarOrder<T extends string>(raw: unknown, defaults: readonl
   return result;
 }
 
-function migrateCollapseToSyncOrder(raw: unknown): { order: TreeToolbarIconId[]; migrated: boolean } {
-  const hadRawArray = Array.isArray(raw);
-  const hadCollapse = hadRawArray && raw.includes('collapse');
-  const hadSync = hadRawArray && raw.includes('sync');
-  const mapped = hadRawArray
-    ? raw.map((item) => (item === 'collapse' && !hadSync ? 'sync' : item))
-    : raw;
-  const normalized = normalizeToolbarOrder(mapped, DEFAULT_TREE_TOOLBAR_ORDER);
-
-  // If neither 'collapse' nor 'sync' existed in a persisted order, place 'sync' directly before 'settings'
-  if (hadRawArray && !hadCollapse && !hadSync) {
-    const syncIdx = normalized.indexOf('sync');
-    const settingsIdx = normalized.indexOf('settings');
-    if (syncIdx !== -1 && settingsIdx !== -1 && syncIdx !== settingsIdx - 1) {
-      normalized.splice(syncIdx, 1);
-      const nextSettingsIdx = normalized.indexOf('settings');
-      normalized.splice(nextSettingsIdx, 0, 'sync');
-    }
-  }
-
-  return { order: normalized, migrated: hadCollapse || (hadRawArray && !hadSync) };
-}
-
 export function loadTreeToolbarOrder(): TreeToolbarIconId[] {
   const rawV2 = localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER);
   if (rawV2) {
     const parsed = safeParse<unknown>(rawV2, null);
-    const { order, migrated } = migrateCollapseToSyncOrder(parsed);
-    if (migrated) {
-      saveTreeToolbarOrder(order);
+    const normalized = normalizeToolbarOrder(parsed, DEFAULT_TREE_TOOLBAR_ORDER);
+    const needsSave =
+      !Array.isArray(parsed) ||
+      parsed.length !== normalized.length ||
+      parsed.some((item, idx) => item !== normalized[idx]);
+    if (needsSave) {
+      saveTreeToolbarOrder(normalized);
     }
-    return order;
+    return normalized;
   }
   const rawLegacy = localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER_LEGACY);
   if (rawLegacy) {
     const parsed = safeParse<unknown>(rawLegacy, null);
-    const hadSettings = Array.isArray(parsed) && parsed.includes('settings');
-    const { order: normalized } = migrateCollapseToSyncOrder(parsed);
-    if (!hadSettings) {
-      const settingsIdx = normalized.indexOf('settings');
-      const syncIdx = normalized.indexOf('sync');
-      if (settingsIdx !== -1 && syncIdx !== -1 && settingsIdx !== syncIdx + 1) {
-        normalized.splice(settingsIdx, 1);
-        const nextSyncIdx = normalized.indexOf('sync');
-        normalized.splice(nextSyncIdx + 1, 0, 'settings');
-      }
-    }
+    const normalized = normalizeToolbarOrder(parsed, DEFAULT_TREE_TOOLBAR_ORDER);
     const editIdx = normalized.indexOf('edit');
     const importIdx = normalized.indexOf('import');
     if (editIdx !== -1 && importIdx !== -1 && editIdx + 1 === importIdx) {

@@ -1,9 +1,18 @@
 import { unzip } from 'fflate';
 
+export interface ExtractedEbookImage {
+  relPath: string;
+  mimeType: string;
+  bytes: Uint8Array;
+}
+
 export interface ParsedEpubDocument {
   title: string;
   content: string;
+  images?: ExtractedEbookImage[];
 }
+
+export type HtmlImageResolver = (el: Element) => { relPath: string; alt: string } | null;
 
 interface ManifestItem {
   id: string;
@@ -19,8 +28,110 @@ interface TocEntry {
   fragment: string | null;
 }
 
+const IMAGE_BINARY_EXT_RE = /\.(jpe?g|png|gif|webp|bmp|svg|avif)$/i;
+
 const SKIP_BINARY_EXT_RE =
-  /\.(jpe?g|png|gif|webp|bmp|ico|svg|avif|tiff?|ttf|otf|woff2?|eot|mp3|m4a|aac|ogg|wav|mp4|webm|mov|avi|pdf|css|js|map)$/i;
+  /\.(ico|tiff?|ttf|otf|woff2?|eot|mp3|m4a|aac|ogg|wav|mp4|webm|mov|avi|pdf|css|js|map)$/i;
+
+export function sanitizeBookImageDirName(rawTitle: string): string {
+  const cleaned = (rawTitle || '')
+    .replace(/[\\/:*?"<>|()\x00-\x1f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+/, '')
+    .replace(/\.+$/, '')
+    .trim();
+  if (!cleaned) return '未命名书籍';
+  return cleaned.length > 60 ? cleaned.slice(0, 60).trim() : cleaned;
+}
+
+export function detectImageInfoFromBytes(
+  bytes: Uint8Array,
+  hintPath?: string
+): { ext: string; mimeType: string } | null {
+  if (!bytes || bytes.length < 4) return null;
+
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return { ext: '.jpg', mimeType: 'image/jpeg' };
+  }
+  // PNG: 89 50 4E 47
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return { ext: '.png', mimeType: 'image/png' };
+  }
+  // GIF: GIF8
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) {
+    return { ext: '.gif', mimeType: 'image/gif' };
+  }
+  // WebP: RIFF....WEBP
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return { ext: '.webp', mimeType: 'image/webp' };
+  }
+  // BMP: BM
+  if (bytes[0] === 0x42 && bytes[1] === 0x4d) {
+    return { ext: '.bmp', mimeType: 'image/bmp' };
+  }
+  // AVIF: ....ftypavif / ftypavis
+  if (bytes.length >= 12 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
+    const brand = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]);
+    if (brand === 'avif' || brand === 'avis') {
+      return { ext: '.avif', mimeType: 'image/avif' };
+    }
+  }
+  // SVG text check
+  const headLen = Math.min(bytes.length, 512);
+  let headStr = '';
+  for (let i = 0; i < headLen; i++) {
+    headStr += String.fromCharCode(bytes[i]);
+  }
+  if (/<svg\b/i.test(headStr)) {
+    return { ext: '.svg', mimeType: 'image/svg+xml' };
+  }
+
+  // Fallback to explicit image extension on hintPath
+  if (hintPath) {
+    const lower = hintPath.toLowerCase();
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return { ext: '.jpg', mimeType: 'image/jpeg' };
+    if (lower.endsWith('.png')) return { ext: '.png', mimeType: 'image/png' };
+    if (lower.endsWith('.gif')) return { ext: '.gif', mimeType: 'image/gif' };
+    if (lower.endsWith('.webp')) return { ext: '.webp', mimeType: 'image/webp' };
+    if (lower.endsWith('.bmp')) return { ext: '.bmp', mimeType: 'image/bmp' };
+    if (lower.endsWith('.svg')) return { ext: '.svg', mimeType: 'image/svg+xml' };
+    if (lower.endsWith('.avif')) return { ext: '.avif', mimeType: 'image/avif' };
+  }
+
+  return null;
+}
+
+export function formatMarkdownImage(alt: string, relPath: string): string {
+  const cleanAlt = (alt || '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[\[\]]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const safePath = (relPath || '').trim();
+  return `![${cleanAlt}](${safePath})`;
+}
+
+function getElementImageSrcAttr(el: Element): string {
+  return (
+    el.getAttribute('src') ||
+    el.getAttribute('href') ||
+    el.getAttribute('xlink:href') ||
+    el.getAttributeNS?.('http://www.w3.org/1999/xlink', 'href') ||
+    el.getAttribute('data-src') ||
+    ''
+  ).trim();
+}
 
 const GENERIC_TITLE_CLASS_RE =
   /(?:^|[-_\s])(chapter|chap|part|section|title|heading|subtitle|headline|h[1-6])(?:$|[-_\s\d])/i;
@@ -330,7 +441,11 @@ function hasInlineItalicStyle(el: Element): boolean {
   return /font-style\s*:\s*(italic|oblique)/.test(style);
 }
 
-function serializeInlineChildren(parent: Node, stripFormatting = false): string {
+function serializeInlineChildren(
+  parent: Node,
+  stripFormatting = false,
+  imageResolver?: HtmlImageResolver
+): string {
   let out = '';
 
   const walk = (node: Node) => {
@@ -351,11 +466,32 @@ function serializeInlineChildren(parent: Node, stripFormatting = false): string 
       tag === 'script' ||
       tag === 'style' ||
       tag === 'noscript' ||
-      tag === 'svg' ||
       tag === 'rt' ||
-      tag === 'rp' ||
-      tag === 'img'
+      tag === 'rp'
     ) {
+      return;
+    }
+
+    if (tag === 'img') {
+      if (!stripFormatting && imageResolver) {
+        const resolved = imageResolver(el);
+        if (resolved) {
+          out += `\n${formatMarkdownImage(resolved.alt, resolved.relPath)}\n`;
+        }
+      }
+      return;
+    }
+
+    if (tag === 'svg') {
+      if (!stripFormatting && imageResolver) {
+        const svgImages = getElementsByLocalName(el, 'image');
+        for (const svgImg of svgImages) {
+          const resolved = imageResolver(svgImg);
+          if (resolved) {
+            out += `\n${formatMarkdownImage(resolved.alt, resolved.relPath)}\n`;
+          }
+        }
+      }
       return;
     }
 
@@ -371,19 +507,19 @@ function serializeInlineChildren(parent: Node, stripFormatting = false): string 
     }
 
     if (tag === 'strong' || tag === 'b') {
-      const inner = serializeInlineChildren(el, stripFormatting);
+      const inner = serializeInlineChildren(el, stripFormatting, imageResolver);
       out += stripFormatting ? inner : wrapInlineMarker(inner, '**');
       return;
     }
 
     if (tag === 'em' || tag === 'i' || tag === 'cite' || tag === 'var' || tag === 'dfn') {
-      const inner = serializeInlineChildren(el, stripFormatting);
+      const inner = serializeInlineChildren(el, stripFormatting, imageResolver);
       out += stripFormatting ? inner : wrapInlineMarker(inner, '*');
       return;
     }
 
     if (tag === 'span' || tag === 'font') {
-      const inner = serializeInlineChildren(el, stripFormatting);
+      const inner = serializeInlineChildren(el, stripFormatting, imageResolver);
       if (stripFormatting) {
         out += inner;
       } else if (hasInlineBoldStyle(el)) {
@@ -559,7 +695,8 @@ function isPureTocNavDocument(doc: Document): boolean {
 
 function convertSpineDocumentToMarkdown(
   htmlText: string,
-  fileTocEntries: TocEntry[]
+  fileTocEntries: TocEntry[],
+  imageResolver?: HtmlImageResolver
 ): string {
   const doc = parseXhtmlDocument(htmlText);
   const body = doc.body;
@@ -669,9 +806,31 @@ function convertSpineDocumentToMarkdown(
       tag === 'title' ||
       tag === 'meta' ||
       tag === 'link' ||
-      tag === 'noscript' ||
-      tag === 'svg'
+      tag === 'noscript'
     ) {
+      return;
+    }
+
+    if (tag === 'img') {
+      if (imageResolver) {
+        const resolved = imageResolver(el);
+        if (resolved) {
+          blocks.push(formatMarkdownImage(resolved.alt, resolved.relPath));
+        }
+      }
+      return;
+    }
+
+    if (tag === 'svg') {
+      if (imageResolver) {
+        const svgImages = getElementsByLocalName(el, 'image');
+        for (const svgImg of svgImages) {
+          const resolved = imageResolver(svgImg);
+          if (resolved) {
+            blocks.push(formatMarkdownImage(resolved.alt, resolved.relPath));
+          }
+        }
+      }
       return;
     }
 
@@ -686,7 +845,17 @@ function convertSpineDocumentToMarkdown(
       if (matchedFragmentToc && elId) emittedFragmentIds.add(elId);
       const level = Number.parseInt(tag.slice(1), 10);
       const text = serializeInlineChildren(el, true);
-      pushHeading(level, text);
+      if (text) {
+        pushHeading(level, text);
+      } else if (imageResolver) {
+        const imgs = Array.from(el.querySelectorAll('img'));
+        for (const imgEl of imgs) {
+          const resolved = imageResolver(imgEl);
+          if (resolved) {
+            blocks.push(formatMarkdownImage(resolved.alt, resolved.relPath));
+          }
+        }
+      }
       return;
     }
 
@@ -800,7 +969,7 @@ function convertSpineDocumentToMarkdown(
           return;
         }
       }
-      const inline = serializeInlineChildren(el, false);
+      const inline = serializeInlineChildren(el, false, imageResolver);
       if (inline) pushParagraphLines(inline);
       return;
     }
@@ -830,7 +999,7 @@ function convertSpineDocumentToMarkdown(
           wrapper.appendChild(n.cloneNode(true));
         }
         inlineBuffer = [];
-        const txt = serializeInlineChildren(wrapper, false);
+        const txt = serializeInlineChildren(wrapper, false, imageResolver);
         if (txt) pushParagraphLines(txt);
       };
 
@@ -850,7 +1019,7 @@ function convertSpineDocumentToMarkdown(
       return;
     }
 
-    const leafInline = serializeInlineChildren(el, false);
+    const leafInline = serializeInlineChildren(el, false, imageResolver);
     if (leafInline) {
       const leafPlain = cleanBlockLine(serializeInlineChildren(el, true));
       if (
@@ -885,18 +1054,26 @@ function convertSpineDocumentToMarkdown(
   return blocks.join('\n\n').trim();
 }
 
-export function convertHtmlToMarkdown(htmlText: string): string {
-  return convertSpineDocumentToMarkdown(htmlText, []);
+export function convertHtmlToMarkdown(
+  htmlText: string,
+  imageResolver?: HtmlImageResolver
+): string {
+  return convertSpineDocumentToMarkdown(htmlText, [], imageResolver);
 }
 
-export function unzipFiltered(bytes: Uint8Array): Promise<Record<string, Uint8Array>> {
+export function unzipFiltered(
+  bytes: Uint8Array,
+  includeImages = false
+): Promise<Record<string, Uint8Array>> {
   return new Promise((resolve, reject) => {
     unzip(
       bytes,
       {
         filter(file) {
           if (file.name.endsWith('/')) return false;
-          return !SKIP_BINARY_EXT_RE.test(file.name);
+          if (SKIP_BINARY_EXT_RE.test(file.name)) return false;
+          if (!includeImages && IMAGE_BINARY_EXT_RE.test(file.name)) return false;
+          return true;
         },
       },
       (err, data) => {
@@ -921,7 +1098,7 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubDocument> {
 
   let entries: Record<string, Uint8Array>;
   try {
-    entries = await unzipFiltered(bytes);
+    entries = await unzipFiltered(bytes, true);
   } catch {
     throw new Error(`无法解压「${file.name}」，请确认 EPUB 文件完整未损坏`);
   }
@@ -950,8 +1127,54 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubDocument> {
 
   const fallbackTitle = file.name.replace(/\.epub$/i, '').trim() || '导入文档';
 
+  const createImageCollector = (resolvedBookTitle: string) => {
+    const dirName = sanitizeBookImageDirName(resolvedBookTitle);
+    const extractedImages: ExtractedEbookImage[] = [];
+    const zipPathToRelPath = new Map<string, string>();
+    let imgSeq = 0;
+
+    const registerZipImage = (zipPath: string, preferredBaseName?: string): string | null => {
+      const normKey = normalizeZipPath(zipPath).toLowerCase();
+      const existing = zipPathToRelPath.get(normKey);
+      if (existing) return existing;
+      const imgBytes = getBytes(zipPath);
+      if (!imgBytes || imgBytes.length === 0) return null;
+      const info = detectImageInfoFromBytes(imgBytes, zipPath);
+      if (!info) return null;
+      const fileName = preferredBaseName
+        ? `${preferredBaseName}${info.ext}`
+        : `${String(++imgSeq).padStart(3, '0')}${info.ext}`;
+      const relPath = `images/${dirName}/${fileName}`;
+      zipPathToRelPath.set(normKey, relPath);
+      extractedImages.push({ relPath, mimeType: info.mimeType, bytes: imgBytes });
+      return relPath;
+    };
+
+    const makeChapterResolver = (chapterPath: string): HtmlImageResolver => (el: Element) => {
+      const rawSrc = getElementImageSrcAttr(el);
+      if (!rawSrc) return null;
+      const alt = (el.getAttribute('alt') || el.getAttribute('title') || '').trim();
+      if (/^https?:\/\//i.test(rawSrc)) {
+        return { relPath: rawSrc, alt };
+      }
+      if (/^data:image\//i.test(rawSrc)) {
+        return { relPath: rawSrc, alt };
+      }
+      if (/^[a-z][a-z0-9+.-]*:/i.test(rawSrc)) {
+        return null;
+      }
+      const { filePath } = resolveRelativePath(chapterPath, rawSrc);
+      const relPath = registerZipImage(filePath);
+      if (!relPath) return null;
+      return { relPath, alt };
+    };
+
+    return { extractedImages, zipPathToRelPath, registerZipImage, makeChapterResolver };
+  };
+
   // Fallback for non-standard EPUB missing OPF: parse all HTML/XHTML files in path order
   if (!opfPath || !getBytes(opfPath)) {
+    const collector = createImageCollector(fallbackTitle);
     const htmlPaths = listPaths()
       .filter((p) => /\.(xhtml|html|htm)$/i.test(p))
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
@@ -959,14 +1182,22 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubDocument> {
     for (const p of htmlPaths) {
       const b = getBytes(p);
       if (!b) continue;
-      const md = convertSpineDocumentToMarkdown(decodeBytesSmart(b), []);
+      const md = convertSpineDocumentToMarkdown(
+        decodeBytesSmart(b),
+        [],
+        collector.makeChapterResolver(p)
+      );
       if (md) sections.push(md);
     }
     const combined = sections.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
     if (!combined) {
       throw new Error(`「${file.name}」中未提取到可读文本内容`);
     }
-    return { title: fallbackTitle, content: combined };
+    return {
+      title: fallbackTitle,
+      content: combined,
+      images: collector.extractedImages.length > 0 ? collector.extractedImages : undefined,
+    };
   }
 
   const opfXml = decodeBytesSmart(getBytes(opfPath)!);
@@ -1068,7 +1299,8 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubDocument> {
     }
   }
 
-  // 6. Convert each spine chapter document into structured Markdown
+  // 6. Convert each spine chapter document into structured Markdown and extract embedded images
+  const collector = createImageCollector(bookTitle);
   const sections: string[] = [];
   for (const item of spineItems) {
     if (
@@ -1096,9 +1328,44 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubDocument> {
     }
 
     const fileTocs = tocByFile.get(item.href.toLowerCase()) || [];
-    const md = convertSpineDocumentToMarkdown(chapterHtml, fileTocs);
+    const md = convertSpineDocumentToMarkdown(
+      chapterHtml,
+      fileTocs,
+      collector.makeChapterResolver(item.href)
+    );
     if (md) {
       sections.push(md);
+    }
+  }
+
+  // If the OPF declares a cover image that wasn't already referenced in the spine HTML, prepend it
+  let coverHref: string | null = null;
+  for (const item of manifestById.values()) {
+    if (item.properties.includes('cover-image')) {
+      coverHref = item.href;
+      break;
+    }
+  }
+  if (!coverHref) {
+    const metaEls = getElementsByLocalName(metadataRoot, 'meta');
+    for (const metaEl of metaEls) {
+      if ((metaEl.getAttribute('name') || '').toLowerCase() === 'cover') {
+        const coverId = (metaEl.getAttribute('content') || '').trim();
+        const coverItem = coverId ? manifestById.get(coverId) : undefined;
+        if (coverItem) {
+          coverHref = coverItem.href;
+          break;
+        }
+      }
+    }
+  }
+  if (coverHref) {
+    const normCoverKey = normalizeZipPath(coverHref).toLowerCase();
+    if (!collector.zipPathToRelPath.has(normCoverKey)) {
+      const relPath = collector.registerZipImage(coverHref, 'cover');
+      if (relPath) {
+        sections.unshift(formatMarkdownImage('封面', relPath));
+      }
     }
   }
 
@@ -1116,5 +1383,6 @@ export async function parseEpubFile(file: File): Promise<ParsedEpubDocument> {
   return {
     title: bookTitle,
     content,
+    images: collector.extractedImages.length > 0 ? collector.extractedImages : undefined,
   };
 }

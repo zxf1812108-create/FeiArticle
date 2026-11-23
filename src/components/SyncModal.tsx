@@ -14,6 +14,7 @@ import {
   Sun,
   Trash2,
   Upload,
+  Wifi,
   X,
 } from 'lucide-react';
 import { MdictDictionarySummary, WebDavConfig, WhistleSensitivity } from '../types';
@@ -35,6 +36,7 @@ interface SyncModalProps {
   lanLoading: boolean;
   onToggleLan: (next: boolean) => void;
   onCopyLanUrl: (url: string) => void;
+  onOpenWifiSync: () => void;
   dictionaries: MdictDictionarySummary[];
   activeDictId: string | null;
   onImportDictFiles: (files: FileList) => Promise<void>;
@@ -58,6 +60,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   lanLoading,
   onToggleLan,
   onCopyLanUrl,
+  onOpenWifiSync,
   dictionaries,
   activeDictId,
   onImportDictFiles,
@@ -70,6 +73,9 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const [baseUrl, setBaseUrl] = useState(config.baseUrl || DEFAULT_JIANGUOYUN_URL);
   const [username, setUsername] = useState(config.username || '');
   const [password, setPassword] = useState(config.password || '');
+  const [syncShortDocsViaCloud, setSyncShortDocsViaCloud] = useState(
+    Boolean(config.syncShortDocsViaCloud)
+  );
 
   const [encryptionPassword, setEncryptionPassword] = useState(config.encryptionPassword || '');
   const [confirmPassword, setConfirmPassword] = useState(config.encryptionPassword || '');
@@ -237,6 +243,9 @@ export const SyncModal: React.FC<SyncModalProps> = ({
       normalizeWebDavBaseUrl(config.baseUrl || DEFAULT_JIANGUOYUN_URL) !== normalizedUrl ||
       (config.username || '').trim() !== trimmedUser;
 
+    const syncedSettingChanged =
+      Boolean(config.syncShortDocsViaCloud) !== Boolean(syncShortDocsViaCloud);
+
     onSaveConfig({
       ...config,
       provider: 'jianguoyun',
@@ -244,8 +253,9 @@ export const SyncModal: React.FC<SyncModalProps> = ({
       username: trimmedUser,
       password: trimmedPass,
       encryptionPassword,
+      syncShortDocsViaCloud,
       lastManifestEtag: endpointChanged ? undefined : config.lastManifestEtag,
-      settingsUpdatedAt: Date.now(),
+      settingsUpdatedAt: syncedSettingChanged ? Date.now() : (config.settingsUpdatedAt || 0),
       enabled: Boolean(trimmedUser && trimmedPass),
     });
     onClose();
@@ -460,6 +470,37 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                   )}
                 </button>
               </div>
+
+              <div className="px-3.5 py-2.5 flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12.5px] text-[var(--fei-text-primary)]">
+                    短文云端兜底（≤ 200 KB）
+                  </div>
+                  <div className="text-[11px] leading-snug text-[var(--fei-text-muted)] mt-0.5">
+                    坚果云每 60 秒同步目录与进度；开启后 ≤ 200 KB 短文正文及坚果云 inbox 投递短文同步到云端
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={syncShortDocsViaCloud}
+                  aria-label="切换短文云端兜底"
+                  onClick={() => setSyncShortDocsViaCloud((v) => !v)}
+                  className={`relative inline-flex h-[22px] w-[40px] shrink-0 items-center rounded-full border transition-colors duration-150 cursor-pointer ${
+                    syncShortDocsViaCloud
+                      ? 'bg-[var(--fei-switch-track-on)] border-[var(--fei-switch-track-on)]'
+                      : 'bg-[var(--fei-switch-track-off)] border-[var(--fei-border-strong)]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-[16px] w-[16px] rounded-full transition-transform duration-150 ${
+                      syncShortDocsViaCloud
+                        ? 'translate-x-[20px] bg-[var(--fei-switch-thumb-on)]'
+                        : 'translate-x-[2px] bg-[var(--fei-switch-thumb-off)]'
+                    }`}
+                  />
+                </button>
+              </div>
             </div>
           </section>
 
@@ -527,11 +568,39 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               </div>
             </div>
 
+            <p className="px-0.5 text-[11.5px] leading-relaxed text-[var(--fei-text-muted)]">
+              仅保存在本机，绝不上传云端；用于加密文档、Wi-Fi 设备同步及电脑直连验证
+            </p>
+
             {errorMsg && (
               <p className="px-0.5 text-[12px] text-[var(--fei-text-muted)]">
                 {errorMsg}
               </p>
             )}
+          </section>
+
+          {/* 区域二点五：Wi-Fi 设备同步 */}
+          <section className="space-y-2">
+            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] px-3.5 py-2.5 flex items-center justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 text-[13.5px] font-medium text-[var(--fei-text-primary)]">
+                  <Wifi className="w-3.5 h-3.5 shrink-0" strokeWidth={1.8} />
+                  <span>Wi-Fi 设备同步</span>
+                </div>
+                <div className="text-[11.5px] leading-snug text-[var(--fei-text-muted)] mt-0.5">
+                  {config.encryptionPassword
+                    ? '同 Wi-Fi 互传文档正文与插图（已加密就绪）'
+                    : '需先保存加密密码后才可开启设备互传'}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenWifiSync}
+                className="px-2.5 py-1.5 rounded-lg border border-[var(--fei-border)] bg-[var(--fei-bg-surface)] text-[12px] font-medium text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors cursor-pointer"
+              >
+                打开同步
+              </button>
+            </div>
           </section>
 
           {/* 区域三：电脑直连（同飞记局域网直连） */}
@@ -581,7 +650,8 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                     </button>
                   </div>
                   <p className="text-[11.5px] leading-relaxed text-[var(--fei-text-muted)]">
-                    手机与电脑连入同一 Wi-Fi，在电脑浏览器打开上方地址即可管理文档
+                    手机与电脑连入同一 Wi-Fi，在电脑浏览器打开上方地址即可管理文档或传书
+                    {config.encryptionPassword ? '（需输入加密密码验证）' : ''}
                   </p>
                 </div>
               )}

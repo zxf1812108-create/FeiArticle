@@ -82,6 +82,7 @@ function extractPathName(rawHref: string): string {
 export interface RemoteInboxFile {
   name: string;
   relPath: string;
+  size?: number;
 }
 
 const SUPPORTED_TEXT_EXT_RE = /\.(txt|md|markdown|text)$/i;
@@ -135,9 +136,15 @@ export function parseWebDavInboxXml(xml: string, inboxDirUrl: string): RemoteInb
     if (seenNames.has(decodedName)) continue;
     seenNames.add(decodedName);
 
+    const lenMatch = block.match(
+      /<(?:[a-zA-Z0-9_-]+:)?getcontentlength\b[^>]*>\s*(\d+)\s*<\/(?:[a-zA-Z0-9_-]+:)?getcontentlength>/i
+    );
+    const parsedSize = lenMatch ? Number.parseInt(lenMatch[1], 10) : undefined;
+
     files.push({
       name: decodedName,
       relPath: `${INBOX_FOLDER_NAME}/${encodeURIComponent(decodedName)}`,
+      size: typeof parsedSize === 'number' && Number.isFinite(parsedSize) ? parsedSize : undefined,
     });
   }
 

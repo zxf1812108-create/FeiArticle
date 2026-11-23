@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import { Check, Download, FileText, Folder, Plus, X } from 'lucide-react';
 import { FolderNode } from '../types';
 import {
+  ExtractedEbookImage,
   isEbookFile,
   isSupportedImportFile,
   parseEbookFile,
@@ -14,8 +15,14 @@ interface ImportModalProps {
   defaultFolderId: string | null;
   onCreateFolder: (name: string) => FolderNode | null;
   onImportDocs: (
-    items: Array<{ title: string; content: string; folderId: string | null; format?: 'txt' | 'md' }>
-  ) => void;
+    items: Array<{
+      title: string;
+      content: string;
+      folderId: string | null;
+      format?: 'txt' | 'md';
+      images?: ExtractedEbookImage[];
+    }>
+  ) => void | Promise<void>;
   onClose: () => void;
 }
 
@@ -77,6 +84,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
         content: string;
         folderId: string | null;
         format: 'txt';
+        images?: ExtractedEbookImage[];
       }> = [];
       const failedMessages: string[] = [];
 
@@ -89,6 +97,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
               content: ebookDoc.content,
               folderId: effectiveFolderId,
               format: 'txt',
+              images: ebookDoc.images,
             });
           } catch (err) {
             failedMessages.push(
@@ -103,7 +112,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
       }
 
       if (parsed.length > 0) {
-        onImportDocs(parsed);
+        await onImportDocs(parsed);
         if (failedMessages.length === 0) {
           onClose();
         } else {
