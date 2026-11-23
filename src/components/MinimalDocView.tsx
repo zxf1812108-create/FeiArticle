@@ -26,6 +26,12 @@ import {
   VolumeKeyDirection,
 } from '../utils/readerNative';
 import { hyphenateEnglishWords } from '../utils/hyphenate';
+import {
+  DomRangePoints,
+  expandRangeToFullSentences,
+  getSentenceRangeAtPoint,
+  unionDomRanges,
+} from '../utils/sentenceSelection';
 
 export interface DocViewStateSnapshot {
   mode: 'read';
@@ -575,6 +581,24 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const clearSelectionTimerRef = useRef<number | null>(null);
     const lastReportedProgressRef = useRef<number>(-1);
     const lastReportedPageKeyRef = useRef<string>('');
+    const gestureActiveRef = useRef(false);
+    const gestureHadSelectionOnPressRef = useRef(false);
+    const gesturePressStartRangeRef = useRef<{
+      startContainer: Node;
+      startOffset: number;
+      endContainer: Node;
+      endOffset: number;
+    } | null>(null);
+    const gestureInitialRangeRef = useRef<{
+      startContainer: Node;
+      startOffset: number;
+      endContainer: Node;
+      endOffset: number;
+    } | null>(null);
+    const anchorSentenceRangeRef = useRef<DomRangePoints | null>(null);
+    const sentenceSnapActiveRef = useRef(false);
+    const lastSnappedRangeRef = useRef<DomRangePoints | null>(null);
+    const isApplyingSentenceSnapRef = useRef(false);
 
     const hasActiveMdictRef = useRef(hasActiveMdict);
     hasActiveMdictRef.current = hasActiveMdict;
@@ -1606,16 +1630,146 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     }, [isMdictPopupOpen, isMdictLookupPending, showOutline]);
 
     useEffect(() => {
+      const captureRangeSnap = (range: Range) => ({
+        startContainer: range.startContainer,
+        startOffset: range.startOffset,
+        endContainer: range.endContainer,
+        endOffset: range.endOffset,
+      });
+
+      const rangeMatchesSnap = (
+        range: Range,
+        snap: {
+          startContainer: Node;
+          startOffset: number;
+          endContainer: Node;
+          endOffset: number;
+        } | null
+      ): boolean =>
+        Boolean(
+          snap &&
+            range.startContainer === snap.startContainer &&
+            range.startOffset === snap.startOffset &&
+            range.endContainer === snap.endContainer &&
+            range.endOffset === snap.endOffset
+        );
+
+      const rangeMatchesDomPoints = (range: Range, pts: DomRangePoints | null): boolean =>
+        Boolean(
+          pts &&
+            range.startContainer === pts.start.node &&
+            range.startOffset === pts.start.offset &&
+            range.endContainer === pts.end.node &&
+            range.endOffset === pts.end.offset
+        );
+
+      const isSelectionBackward = (sel: Selection): boolean => {
+        if (!sel.anchorNode || !sel.focusNode) return false;
+        if (sel.anchorNode === sel.focusNode) {
+          return sel.anchorOffset > sel.focusOffset;
+        }
+        return Boolean(
+          sel.anchorNode.compareDocumentPosition(sel.focusNode) &
+            Node.DOCUMENT_POSITION_PRECEDING
+        );
+      };
+
+      const applySnappedSelection = (
+        sel: Selection,
+        target: DomRangePoints,
+        backward: boolean
+      ): boolean => {
+        if (sel.rangeCount > 0 && rangeMatchesDomPoints(sel.getRangeAt(0), target)) {
+          lastSnappedRangeRef.current = target;
+          return false;
+        }
+        isApplyingSentenceSnapRef.current = true;
+        lastSnappedRangeRef.current = target;
+        try {
+          if (typeof sel.setBaseAndExtent === 'function') {
+            const base = backward ? target.end : target.start;
+            const extent = backward ? target.start : target.end;
+            sel.setBaseAndExtent(base.node, base.offset, extent.node, extent.offset);
+          } else {
+            const nextRange = document.createRange();
+            nextRange.setStart(target.start.node, target.start.offset);
+            nextRange.setEnd(target.end.node, target.end.offset);
+            sel.removeAllRanges();
+            sel.addRange(nextRange);
+          }
+          return true;
+        } catch {
+          return false;
+        } finally {
+          isApplyingSentenceSnapRef.current = false;
+        }
+      };
+
+      const beginSelectionGestureIfIdle = () => {
+        if (gestureActiveRef.current) return;
+        gestureActiveRef.current = true;
+        gestureInitialRangeRef.current = null;
+        anchorSentenceRangeRef.current = null;
+        sentenceSnapActiveRef.current = false;
+
+        const articleEl = articleRef.current;
+        const sel = window.getSelection();
+        if (
+          articleEl &&
+          sel &&
+          !sel.isCollapsed &&
+          sel.rangeCount > 0 &&
+          articleEl.contains(sel.getRangeAt(0).commonAncestorContainer)
+        ) {
+          gestureHadSelectionOnPressRef.current = true;
+          gesturePressStartRangeRef.current = captureRangeSnap(sel.getRangeAt(0));
+        } else {
+          gestureHadSelectionOnPressRef.current = false;
+          gesturePressStartRangeRef.current = null;
+        }
+      };
+
+      const resetSelectionGesture = () => {
+        gestureActiveRef.current = false;
+        gestureHadSelectionOnPressRef.current = false;
+        gesturePressStartRangeRef.current = null;
+        gestureInitialRangeRef.current = null;
+        anchorSentenceRangeRef.current = null;
+        sentenceSnapActiveRef.current = false;
+      };
+
       const handleUserReleased = () => {
         if (isUserPressing()) return;
 
-        // Immediately inspect current selection in case user expanded into a multi-word phrase right before lifting
+        const wasSentenceSnapping = sentenceSnapActiveRef.current;
         const articleEl = articleRef.current;
         const sel = window.getSelection();
+
+        // Final safeguard snap on finger lift in case WebView nudged an endpoint during ACTION_UP
+        if (
+          wasSentenceSnapping &&
+          articleEl &&
+          sel &&
+          !sel.isCollapsed &&
+          sel.rangeCount > 0 &&
+          articleEl.contains(sel.getRangeAt(0).commonAncestorContainer)
+        ) {
+          const finalRange = sel.getRangeAt(0);
+          if (!rangeMatchesDomPoints(finalRange, lastSnappedRangeRef.current)) {
+            const snapped = expandRangeToFullSentences(articleEl, finalRange);
+            if (snapped) {
+              applySnappedSelection(sel, snapped, isSelectionBackward(sel));
+            }
+          }
+        }
+
+        resetSelectionGesture();
+
+        // Immediately inspect current selection in case user expanded into a sentence / multi-word phrase right before lifting
         if (articleEl && sel && !sel.isCollapsed && sel.rangeCount > 0) {
           const range = sel.getRangeAt(0);
           if (articleEl.contains(range.commonAncestorContainer)) {
-            const word = extractLookupWord(sel.toString());
+            const word = wasSentenceSnapping ? null : extractLookupWord(sel.toString());
             if (!word) {
               if (selectionCheckTimerRef.current) {
                 window.clearTimeout(selectionCheckTimerRef.current);
@@ -1678,6 +1832,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const unsubscribeNativeTouch = subscribeNativeTouchState((pressed) => {
         nativeTouchActiveRef.current = pressed;
         if (pressed) {
+          beginSelectionGestureIfIdle();
           cancelPendingSelectionClear();
         } else {
           // Physical finger lifted (ACTION_UP/ACTION_CANCEL); also clear any stale DOM touch flag left by WebView touchcancel
@@ -1691,6 +1846,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           e.target instanceof Element && Boolean(e.target.closest('[data-mdict-popup="true"]'));
         domTouchActiveRef.current = e.touches.length > 0;
         if (domTouchActiveRef.current) {
+          beginSelectionGestureIfIdle();
           cancelPendingSelectionClear();
         }
       };
@@ -1711,6 +1867,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         pressStartedInsidePopupRef.current =
           e.target instanceof Element && Boolean(e.target.closest('[data-mdict-popup="true"]'));
         domMouseActiveRef.current = true;
+        beginSelectionGestureIfIdle();
         cancelPendingSelectionClear();
       };
 
@@ -1725,20 +1882,89 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         domTouchActiveRef.current = false;
         domMouseActiveRef.current = false;
         pressStartedInsidePopupRef.current = false;
+        resetSelectionGesture();
       };
 
       const handleSelectionChange = () => {
+        if (isApplyingSentenceSnapRef.current) return;
+
         const activeEl = document.activeElement as HTMLElement | null;
         if (activeEl?.closest('[data-mdict-popup="true"]')) return;
 
         const sel = window.getSelection();
-        if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !sel.toString().trim()) {
+          lastSnappedRangeRef.current = null;
+          gestureInitialRangeRef.current = null;
+          anchorSentenceRangeRef.current = null;
+          sentenceSnapActiveRef.current = false;
           if (selectionCheckTimerRef.current) {
             window.clearTimeout(selectionCheckTimerRef.current);
             selectionCheckTimerRef.current = null;
           }
           setCopyPopover((prev) => (prev === null ? prev : null));
           return;
+        }
+
+        const articleEl = articleRef.current;
+        const range = sel.getRangeAt(0);
+        const insideArticle = Boolean(
+          articleEl &&
+            articleEl.contains(range.startContainer) &&
+            articleEl.contains(range.endContainer)
+        );
+
+        // Sentence-level selection expansion when user drags finger/pointer or selection handles
+        if (
+          insideArticle &&
+          articleEl &&
+          isUserPressing() &&
+          !pressStartedInsidePopupRef.current &&
+          !rangeMatchesDomPoints(range, lastSnappedRangeRef.current)
+        ) {
+          if (!gestureHadSelectionOnPressRef.current) {
+            // Fresh press: keep initial word selection intact (for single-word MDict lookup),
+            // and snap to full sentences as soon as finger/pointer moves to expand selection.
+            if (!gestureInitialRangeRef.current) {
+              gestureInitialRangeRef.current = captureRangeSnap(range);
+              anchorSentenceRangeRef.current = expandRangeToFullSentences(articleEl, range);
+            } else if (!rangeMatchesSnap(range, gestureInitialRangeRef.current)) {
+              sentenceSnapActiveRef.current = true;
+              const backward = isSelectionBackward(sel);
+              let target: DomRangePoints | null = null;
+              if (
+                anchorSentenceRangeRef.current &&
+                sel.focusNode &&
+                articleEl.contains(sel.focusNode)
+              ) {
+                const focusSentence = getSentenceRangeAtPoint(
+                  articleEl,
+                  sel.focusNode,
+                  sel.focusOffset,
+                  backward ? 'next' : 'prev'
+                );
+                if (focusSentence) {
+                  target = unionDomRanges(anchorSentenceRangeRef.current, focusSentence);
+                }
+              }
+              if (!target) {
+                target = expandRangeToFullSentences(articleEl, range);
+              }
+              if (target) {
+                applySnappedSelection(sel, target, backward);
+              }
+            }
+          } else if (
+            !gesturePressStartRangeRef.current ||
+            !rangeMatchesSnap(range, gesturePressStartRangeRef.current)
+          ) {
+            // Existing selection adjusted via handles: snap adjusted endpoints to full sentences
+            sentenceSnapActiveRef.current = true;
+            const backward = isSelectionBackward(sel);
+            const target = expandRangeToFullSentences(articleEl, range);
+            if (target) {
+              applySnappedSelection(sel, target, backward);
+            }
+          }
         }
 
         // Hide floating Copy popover while actively dragging/adjusting selection handles
@@ -1754,9 +1980,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
 
         // If user dragged selection into a sentence / non-lookup text, immediately close popup and keep selection
-        const articleEl = articleRef.current;
-        if (articleEl && sel.rangeCount > 0 && articleEl.contains(sel.getRangeAt(0).commonAncestorContainer)) {
-          if (!extractLookupWord(sel.toString())) {
+        if (insideArticle) {
+          if (sentenceSnapActiveRef.current || !extractLookupWord(sel.toString())) {
             if (selectionCheckTimerRef.current) {
               window.clearTimeout(selectionCheckTimerRef.current);
               selectionCheckTimerRef.current = null;
