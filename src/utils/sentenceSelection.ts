@@ -579,3 +579,186 @@ export function domRangePointsEqual(a: DomRangePoints | null, b: DomRangePoints 
     a.end.offset === b.end.offset
   );
 }
+
+function distancePointToRect(px: number, py: number, rect: DOMRect): number {
+  const dx = px < rect.left ? rect.left - px : px > rect.right ? px - rect.right : 0;
+  const dy = py < rect.top ? rect.top - py : py > rect.bottom ? py - rect.bottom : 0;
+  return Math.hypot(dx, dy);
+}
+
+function probeCaretPoint(x: number, y: number): { node: Node; offset: number } | null {
+  const doc = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    caretPositionFromPoint?: (
+      x: number,
+      y: number
+    ) => { offsetNode: Node; offset: number } | null;
+  };
+  if (typeof doc.caretRangeFromPoint === 'function') {
+    const r = doc.caretRangeFromPoint(x, y);
+    if (r) {
+      return { node: r.startContainer, offset: r.startOffset };
+    }
+  }
+  if (typeof doc.caretPositionFromPoint === 'function') {
+    const pos = doc.caretPositionFromPoint(x, y);
+    if (pos && pos.offsetNode) {
+      return { node: pos.offsetNode, offset: pos.offset };
+    }
+  }
+  return null;
+}
+
+function getSentenceRangeInBlockByCoords(
+  blockEl: HTMLElement,
+  clientX: number,
+  clientY: number
+): DomRangePoints | null {
+  const { text, segments } = collectBlockTextSegments(blockEl);
+  if (segments.length === 0) return null;
+
+  const spans = splitTextIntoSentences(text);
+  if (spans.length === 0) return null;
+
+  const blockRect = blockEl.getBoundingClientRect();
+  if (clientY < blockRect.top) {
+    const first = spans[0];
+    const start = resolveFlatOffsetToDomPoint(segments, first.start, 'start');
+    const end = resolveFlatOffsetToDomPoint(segments, first.end, 'end');
+    return start && end ? { start, end } : null;
+  }
+  if (clientY > blockRect.bottom) {
+    const last = spans[spans.length - 1];
+    const start = resolveFlatOffsetToDomPoint(segments, last.start, 'start');
+    const end = resolveFlatOffsetToDomPoint(segments, last.end, 'end');
+    return start && end ? { start, end } : null;
+  }
+
+  let bestRange: DomRangePoints | null = null;
+  let bestDist = Infinity;
+
+  for (const span of spans) {
+    const start = resolveFlatOffsetToDomPoint(segments, span.start, 'start');
+    const end = resolveFlatOffsetToDomPoint(segments, span.end, 'end');
+    if (!start || !end) continue;
+    try {
+      const r = document.createRange();
+      r.setStart(start.node, start.offset);
+      r.setEnd(end.node, end.offset);
+      const rects = r.getClientRects();
+      for (let i = 0; i < rects.length; i++) {
+        const rect = rects[i];
+        if (rect.width <= 0 && rect.height <= 0) continue;
+        // Weight vertical distance slightly higher than horizontal distance so lines stay stable
+        const dx =
+          clientX < rect.left
+            ? rect.left - clientX
+            : clientX > rect.right
+              ? clientX - rect.right
+              : 0;
+        const dy =
+          clientY < rect.top
+            ? rect.top - clientY
+            : clientY > rect.bottom
+              ? clientY - rect.bottom
+              : 0;
+        const score = dy * 2.5 + dx;
+        if (score < bestDist) {
+          bestDist = score;
+          bestRange = { start, end };
+          if (score === 0) return bestRange;
+        }
+      }
+    } catch {
+      // ignore invalid range
+    }
+  }
+
+  return bestRange;
+}
+
+/**
+ * Resolve the full sentence directly beneath viewport coordinates `(clientX, clientY)`.
+ * Uses native caret hit-testing first, then falls back cleanly to the closest visible block
+ * and sentence rect so dragging across margins or inter-paragraph gaps never stalls.
+ */
+export function getSentenceRangeAtViewportPoint(
+  articleEl: HTMLElement,
+  clientX: number,
+  clientY: number
+): DomRangePoints | null {
+  const articleRect = articleEl.getBoundingClientRect();
+  if (articleRect.width <= 0 || articleRect.height <= 0) return null;
+
+  const clampedX = Math.max(
+    articleRect.left + 4,
+    Math.min(articleRect.right - 4, clientX)
+  );
+  const clampedY = Math.max(
+    articleRect.top + 4,
+    Math.min(articleRect.bottom - 4, clientY)
+  );
+
+  // Fast path: direct caret hit-test on a text node inside articleEl
+  const caret = probeCaretPoint(clampedX, clampedY);
+  if (
+    caret &&
+    caret.node.nodeType === Node.TEXT_NODE &&
+    articleEl.contains(caret.node)
+  ) {
+    try {
+      const checkRange = document.createRange();
+      const textNode = caret.node as Text;
+      const len = textNode.data.length;
+      if (len > 0) {
+        const idx = Math.min(len - 1, Math.max(0, caret.offset));
+        checkRange.setStart(textNode, idx);
+        checkRange.setEnd(textNode, Math.min(len, idx + 1));
+        const charRect = checkRange.getBoundingClientRect();
+        if (
+          charRect.height > 0 &&
+          distancePointToRect(clampedX, clampedY, charRect) <= Math.max(36, charRect.height * 1.6)
+        ) {
+          const hit = getSentenceRangeAtPoint(articleEl, textNode, caret.offset, 'next');
+          if (hit) return hit;
+        }
+      }
+    } catch {
+      // Fall through to block/sentence rect scan
+    }
+  }
+
+  // Fallback path: find the vertically closest block inside articleEl and pick its closest sentence
+  const blockNodes = articleEl.querySelectorAll<HTMLElement>('[data-block-idx]');
+  let closestBlock: HTMLElement | null = null;
+  let closestVertDist = Infinity;
+
+  for (let i = 0; i < blockNodes.length; i++) {
+    const el = blockNodes[i];
+    const rect = el.getBoundingClientRect();
+    if (rect.height <= 0) continue;
+    if (clampedY >= rect.top && clampedY <= rect.bottom) {
+      closestBlock = el;
+      closestVertDist = 0;
+      break;
+    }
+    const vertDist = clampedY < rect.top ? rect.top - clampedY : clampedY - rect.bottom;
+    if (vertDist < closestVertDist) {
+      closestVertDist = vertDist;
+      closestBlock = el;
+    }
+  }
+
+  if (closestBlock) {
+    const byCoords = getSentenceRangeInBlockByCoords(closestBlock, clampedX, clampedY);
+    if (byCoords) return byCoords;
+  }
+
+  // Final fallback: if caret hit an element inside articleEl, resolve via that caret
+  if (caret && articleEl.contains(caret.node)) {
+    return getSentenceRangeAtPoint(articleEl, caret.node, caret.offset, 'next');
+  }
+
+  return null;
+}
+

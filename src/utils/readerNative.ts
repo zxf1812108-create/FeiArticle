@@ -8,6 +8,11 @@ export interface NativeInputLongPressEvent {
   y?: number;
 }
 
+export interface NativeTouchPoint {
+  x: number;
+  y: number;
+}
+
 interface ReaderNativePlugin {
   setVolumeKeyIntercept(options: { enabled: boolean }): Promise<void>;
   setTouchStateTracking(options: { enabled: boolean }): Promise<{ pressed: boolean }>;
@@ -20,7 +25,11 @@ interface ReaderNativePlugin {
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'touchState',
-    listenerFunc: (event: { pressed: boolean }) => void
+    listenerFunc: (event: { pressed: boolean; x?: number; y?: number }) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'touchMove',
+    listenerFunc: (event: { x?: number; y?: number }) => void
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'inputLongPress',
@@ -139,7 +148,7 @@ export function subscribeNativeVolumeKeys(
 }
 
 export function subscribeNativeTouchState(
-  onPressedChange: (pressed: boolean) => void
+  onPressedChange: (pressed: boolean, point?: NativeTouchPoint) => void
 ): () => void {
   if (!hasReaderNative()) return () => {};
   let disposed = false;
@@ -156,7 +165,14 @@ export function subscribeNativeTouchState(
   ReaderNative.addListener('touchState', (event) => {
     if (disposed) return;
     if (typeof event?.pressed === 'boolean') {
-      onPressedChange(event.pressed);
+      const point =
+        typeof event.x === 'number' &&
+        Number.isFinite(event.x) &&
+        typeof event.y === 'number' &&
+        Number.isFinite(event.y)
+          ? { x: event.x, y: event.y }
+          : undefined;
+      onPressedChange(event.pressed, point);
     }
   })
     .then((h) => {
@@ -175,5 +191,41 @@ export function subscribeNativeTouchState(
       handle = null;
     }
     ReaderNative.setTouchStateTracking({ enabled: false }).catch(() => {});
+  };
+}
+
+export function subscribeNativeTouchMove(
+  onMove: (point: NativeTouchPoint) => void
+): () => void {
+  if (!hasReaderNative()) return () => {};
+  let disposed = false;
+  let handle: PluginListenerHandle | null = null;
+
+  ReaderNative.addListener('touchMove', (event) => {
+    if (disposed) return;
+    if (
+      typeof event?.x === 'number' &&
+      Number.isFinite(event.x) &&
+      typeof event?.y === 'number' &&
+      Number.isFinite(event.y)
+    ) {
+      onMove({ x: event.x, y: event.y });
+    }
+  })
+    .then((h) => {
+      if (disposed) {
+        h.remove().catch(() => {});
+      } else {
+        handle = h;
+      }
+    })
+    .catch(() => {});
+
+  return () => {
+    disposed = true;
+    if (handle) {
+      handle.remove().catch(() => {});
+      handle = null;
+    }
   };
 }

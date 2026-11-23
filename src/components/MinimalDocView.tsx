@@ -20,16 +20,20 @@ import {
   resolveReadViewportCharOffset,
 } from '../utils/docAnchor';
 import {
+  NativeTouchPoint,
   setNativeVolumeKeyIntercept,
+  subscribeNativeTouchMove,
   subscribeNativeTouchState,
   subscribeNativeVolumeKeys,
   VolumeKeyDirection,
 } from '../utils/readerNative';
 import { hyphenateEnglishWords } from '../utils/hyphenate';
 import {
+  compareDomPoints,
   DomRangePoints,
   expandRangeToFullSentences,
   getSentenceRangeAtPoint,
+  getSentenceRangeAtViewportPoint,
   unionDomRanges,
 } from '../utils/sentenceSelection';
 
@@ -596,6 +600,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       endOffset: number;
     } | null>(null);
     const anchorSentenceRangeRef = useRef<DomRangePoints | null>(null);
+    const handleFixedSentenceRef = useRef<DomRangePoints | null>(null);
+    const pressDownPointRef = useRef<NativeTouchPoint | null>(null);
     const sentenceSnapActiveRef = useRef(false);
     const lastSnappedRangeRef = useRef<DomRangePoints | null>(null);
     const isApplyingSentenceSnapRef = useRef(false);
@@ -1705,11 +1711,56 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
       };
 
-      const beginSelectionGestureIfIdle = () => {
-        if (gestureActiveRef.current) return;
+      const computeHandleFixedSentence = (
+        articleEl: HTMLElement,
+        range: Range,
+        point: NativeTouchPoint | null
+      ): DomRangePoints | null => {
+        if (!point) return null;
+        const rects = range.getClientRects();
+        if (rects.length === 0) return null;
+        const firstRect = rects[0];
+        const lastRect = rects[rects.length - 1];
+        const distStart = Math.hypot(point.x - firstRect.left, point.y - firstRect.bottom);
+        const distEnd = Math.hypot(point.x - lastRect.right, point.y - lastRect.bottom);
+        if (Math.min(distStart, distEnd) > 60) return null;
+        if (distStart < distEnd) {
+          // User grabbed the start handle -> end sentence stays fixed
+          return getSentenceRangeAtPoint(articleEl, range.endContainer, range.endOffset, 'prev');
+        }
+        // User grabbed the end handle -> start sentence stays fixed
+        return getSentenceRangeAtPoint(articleEl, range.startContainer, range.startOffset, 'next');
+      };
+
+      const beginSelectionGestureIfIdle = (point?: NativeTouchPoint) => {
+        if (gestureActiveRef.current) {
+          if (point && !pressDownPointRef.current) {
+            pressDownPointRef.current = point;
+            const articleEl = articleRef.current;
+            const sel = window.getSelection();
+            if (
+              gestureHadSelectionOnPressRef.current &&
+              !handleFixedSentenceRef.current &&
+              articleEl &&
+              sel &&
+              !sel.isCollapsed &&
+              sel.rangeCount > 0 &&
+              articleEl.contains(sel.getRangeAt(0).commonAncestorContainer)
+            ) {
+              handleFixedSentenceRef.current = computeHandleFixedSentence(
+                articleEl,
+                sel.getRangeAt(0),
+                point
+              );
+            }
+          }
+          return;
+        }
         gestureActiveRef.current = true;
+        pressDownPointRef.current = point ?? null;
         gestureInitialRangeRef.current = null;
         anchorSentenceRangeRef.current = null;
+        handleFixedSentenceRef.current = null;
         sentenceSnapActiveRef.current = false;
 
         const articleEl = articleRef.current;
@@ -1721,8 +1772,14 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           sel.rangeCount > 0 &&
           articleEl.contains(sel.getRangeAt(0).commonAncestorContainer)
         ) {
+          const existingRange = sel.getRangeAt(0);
           gestureHadSelectionOnPressRef.current = true;
-          gesturePressStartRangeRef.current = captureRangeSnap(sel.getRangeAt(0));
+          gesturePressStartRangeRef.current = captureRangeSnap(existingRange);
+          handleFixedSentenceRef.current = computeHandleFixedSentence(
+            articleEl,
+            existingRange,
+            point ?? null
+          );
         } else {
           gestureHadSelectionOnPressRef.current = false;
           gesturePressStartRangeRef.current = null;
@@ -1731,34 +1788,108 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const resetSelectionGesture = () => {
         gestureActiveRef.current = false;
+        pressDownPointRef.current = null;
         gestureHadSelectionOnPressRef.current = false;
         gesturePressStartRangeRef.current = null;
         gestureInitialRangeRef.current = null;
         anchorSentenceRangeRef.current = null;
+        handleFixedSentenceRef.current = null;
         sentenceSnapActiveRef.current = false;
       };
 
-      const handleUserReleased = () => {
+      const dismissMdictForSentenceDrag = () => {
+        if (selectionCheckTimerRef.current) {
+          window.clearTimeout(selectionCheckTimerRef.current);
+          selectionCheckTimerRef.current = null;
+        }
+        if (isMdictPopupOpenRef.current || isMdictLookupPendingRef.current) {
+          onClearMdictLookupRef.current?.();
+        }
+        setCopyPopover((prev) => (prev === null ? prev : null));
+      };
+
+      const updateSentenceSelectionFromCoords = (clientX: number, clientY: number) => {
+        if (!isUserPressing() || pressStartedInsidePopupRef.current) return;
+        const articleEl = articleRef.current;
+        const sel = window.getSelection();
+        if (!articleEl || !sel) return;
+
+        // Case 1: Fresh long-press-and-drag (anchorSentenceRangeRef captured on initial word selection)
+        if (!gestureHadSelectionOnPressRef.current) {
+          const anchorSentence = anchorSentenceRangeRef.current;
+          if (!anchorSentence) return;
+
+          if (!sentenceSnapActiveRef.current) {
+            const downPt = pressDownPointRef.current;
+            if (!downPt || Math.hypot(clientX - downPt.x, clientY - downPt.y) < 10) {
+              return;
+            }
+            sentenceSnapActiveRef.current = true;
+          }
+
+          dismissMdictForSentenceDrag();
+          const focusSentence = getSentenceRangeAtViewportPoint(articleEl, clientX, clientY);
+          if (!focusSentence) return;
+          const target = unionDomRanges(anchorSentence, focusSentence);
+          const backward = compareDomPoints(focusSentence.start, anchorSentence.start) < 0;
+          applySnappedSelection(sel, target, backward);
+          return;
+        }
+
+        // Case 2: Dragging a selection handle on an existing selection
+        const fixedSentence = handleFixedSentenceRef.current;
+        if (!fixedSentence) return;
+
+        if (!sentenceSnapActiveRef.current) {
+          const downPt = pressDownPointRef.current;
+          if (downPt && Math.hypot(clientX - downPt.x, clientY - downPt.y) < 8) {
+            return;
+          }
+          sentenceSnapActiveRef.current = true;
+        }
+
+        dismissMdictForSentenceDrag();
+        const focusSentence = getSentenceRangeAtViewportPoint(articleEl, clientX, clientY);
+        if (!focusSentence) return;
+        const target = unionDomRanges(fixedSentence, focusSentence);
+        const backward = compareDomPoints(focusSentence.start, fixedSentence.start) < 0;
+        applySnappedSelection(sel, target, backward);
+      };
+
+      const handleUserReleased = (releasePoint?: NativeTouchPoint) => {
         if (isUserPressing()) return;
 
         const wasSentenceSnapping = sentenceSnapActiveRef.current;
         const articleEl = articleRef.current;
         const sel = window.getSelection();
 
-        // Final safeguard snap on finger lift in case WebView nudged an endpoint during ACTION_UP
-        if (
-          wasSentenceSnapping &&
-          articleEl &&
-          sel &&
-          !sel.isCollapsed &&
-          sel.rangeCount > 0 &&
-          articleEl.contains(sel.getRangeAt(0).commonAncestorContainer)
-        ) {
-          const finalRange = sel.getRangeAt(0);
-          if (!rangeMatchesDomPoints(finalRange, lastSnappedRangeRef.current)) {
-            const snapped = expandRangeToFullSentences(articleEl, finalRange);
-            if (snapped) {
-              applySnappedSelection(sel, snapped, isSelectionBackward(sel));
+        // Final safeguard snap on finger lift using the exact release point or current selection
+        if (wasSentenceSnapping && articleEl && sel) {
+          const fixedBase = gestureHadSelectionOnPressRef.current
+            ? handleFixedSentenceRef.current
+            : anchorSentenceRangeRef.current;
+          if (releasePoint && fixedBase) {
+            const focusSentence = getSentenceRangeAtViewportPoint(
+              articleEl,
+              releasePoint.x,
+              releasePoint.y
+            );
+            if (focusSentence) {
+              const target = unionDomRanges(fixedBase, focusSentence);
+              const backward = compareDomPoints(focusSentence.start, fixedBase.start) < 0;
+              applySnappedSelection(sel, target, backward);
+            }
+          } else if (
+            !sel.isCollapsed &&
+            sel.rangeCount > 0 &&
+            articleEl.contains(sel.getRangeAt(0).commonAncestorContainer)
+          ) {
+            const finalRange = sel.getRangeAt(0);
+            if (!rangeMatchesDomPoints(finalRange, lastSnappedRangeRef.current)) {
+              const snapped = expandRangeToFullSentences(articleEl, finalRange);
+              if (snapped) {
+                applySnappedSelection(sel, snapped, isSelectionBackward(sel));
+              }
             }
           }
         }
@@ -1829,16 +1960,23 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
       };
 
-      const unsubscribeNativeTouch = subscribeNativeTouchState((pressed) => {
+      const unsubscribeNativeTouch = subscribeNativeTouchState((pressed, point) => {
         nativeTouchActiveRef.current = pressed;
         if (pressed) {
-          beginSelectionGestureIfIdle();
+          beginSelectionGestureIfIdle(point);
           cancelPendingSelectionClear();
         } else {
           // Physical finger lifted (ACTION_UP/ACTION_CANCEL); also clear any stale DOM touch flag left by WebView touchcancel
           domTouchActiveRef.current = false;
-          handleUserReleased();
+          handleUserReleased(point);
         }
+      });
+
+      // Live Android native touchMove coordinates keep expanding selection across unlimited sentences
+      // even after WebView fires touchcancel or aborts native long-press-drag on programmatic selection snap
+      const unsubscribeNativeTouchMove = subscribeNativeTouchMove((point) => {
+        if (!nativeTouchActiveRef.current) return;
+        updateSentenceSelectionFromCoords(point.x, point.y);
       });
 
       const onTouchStartGlobal = (e: TouchEvent) => {
@@ -1846,9 +1984,17 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           e.target instanceof Element && Boolean(e.target.closest('[data-mdict-popup="true"]'));
         domTouchActiveRef.current = e.touches.length > 0;
         if (domTouchActiveRef.current) {
-          beginSelectionGestureIfIdle();
+          const t = e.touches[0];
+          beginSelectionGestureIfIdle(t ? { x: t.clientX, y: t.clientY } : undefined);
           cancelPendingSelectionClear();
         }
+      };
+
+      const onTouchMoveGlobal = (e: TouchEvent) => {
+        if (!domTouchActiveRef.current || e.touches.length !== 1) return;
+        const t = e.touches[0];
+        if (!t) return;
+        updateSentenceSelectionFromCoords(t.clientX, t.clientY);
       };
 
       // IMPORTANT: Do NOT listen to touchcancel/pointercancel as "finger lifted".
@@ -1858,7 +2004,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         domTouchActiveRef.current = e.touches.length > 0;
         if (!domTouchActiveRef.current) {
           nativeTouchActiveRef.current = false;
-          handleUserReleased();
+          const t = e.changedTouches[0];
+          handleUserReleased(t ? { x: t.clientX, y: t.clientY } : undefined);
         }
       };
 
@@ -1867,14 +2014,19 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         pressStartedInsidePopupRef.current =
           e.target instanceof Element && Boolean(e.target.closest('[data-mdict-popup="true"]'));
         domMouseActiveRef.current = true;
-        beginSelectionGestureIfIdle();
+        beginSelectionGestureIfIdle({ x: e.clientX, y: e.clientY });
         cancelPendingSelectionClear();
+      };
+
+      const onPointerMoveGlobal = (e: PointerEvent) => {
+        if (e.pointerType === 'touch' || !domMouseActiveRef.current) return;
+        updateSentenceSelectionFromCoords(e.clientX, e.clientY);
       };
 
       const onPointerUpGlobal = (e: PointerEvent) => {
         if (e.pointerType === 'touch') return;
         domMouseActiveRef.current = false;
-        handleUserReleased();
+        handleUserReleased({ x: e.clientX, y: e.clientY });
       };
 
       const onWindowBlur = () => {
@@ -1957,8 +2109,32 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             !gesturePressStartRangeRef.current ||
             !rangeMatchesSnap(range, gesturePressStartRangeRef.current)
           ) {
-            // Existing selection adjusted via handles: snap adjusted endpoints to full sentences
+            // Existing selection adjusted via handles: lock fixed opposite sentence and snap to full sentences
             sentenceSnapActiveRef.current = true;
+            if (!handleFixedSentenceRef.current && gesturePressStartRangeRef.current) {
+              const prev = gesturePressStartRangeRef.current;
+              const startUnchanged =
+                range.startContainer === prev.startContainer &&
+                range.startOffset === prev.startOffset;
+              const endUnchanged =
+                range.endContainer === prev.endContainer &&
+                range.endOffset === prev.endOffset;
+              if (startUnchanged && !endUnchanged) {
+                handleFixedSentenceRef.current = getSentenceRangeAtPoint(
+                  articleEl,
+                  range.startContainer,
+                  range.startOffset,
+                  'next'
+                );
+              } else if (endUnchanged && !startUnchanged) {
+                handleFixedSentenceRef.current = getSentenceRangeAtPoint(
+                  articleEl,
+                  range.endContainer,
+                  range.endOffset,
+                  'prev'
+                );
+              }
+            }
             const backward = isSelectionBackward(sel);
             const target = expandRangeToFullSentences(articleEl, range);
             if (target) {
@@ -2000,16 +2176,21 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       };
 
       window.addEventListener('touchstart', onTouchStartGlobal, { capture: true, passive: true });
+      window.addEventListener('touchmove', onTouchMoveGlobal, { capture: true, passive: true });
       window.addEventListener('touchend', onTouchEndGlobal, { capture: true, passive: true });
       window.addEventListener('pointerdown', onPointerDownGlobal, true);
+      window.addEventListener('pointermove', onPointerMoveGlobal, true);
       window.addEventListener('pointerup', onPointerUpGlobal, true);
       window.addEventListener('blur', onWindowBlur);
       document.addEventListener('selectionchange', handleSelectionChange);
       return () => {
         unsubscribeNativeTouch();
+        unsubscribeNativeTouchMove();
         window.removeEventListener('touchstart', onTouchStartGlobal, true);
+        window.removeEventListener('touchmove', onTouchMoveGlobal, true);
         window.removeEventListener('touchend', onTouchEndGlobal, true);
         window.removeEventListener('pointerdown', onPointerDownGlobal, true);
+        window.removeEventListener('pointermove', onPointerMoveGlobal, true);
         window.removeEventListener('pointerup', onPointerUpGlobal, true);
         window.removeEventListener('blur', onWindowBlur);
         document.removeEventListener('selectionchange', handleSelectionChange);

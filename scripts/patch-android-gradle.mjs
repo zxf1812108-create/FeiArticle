@@ -640,7 +640,7 @@ public class ReaderNativePlugin extends Plugin {
         instance.notifyListeners("volumeKey", payload);
     }
 
-    public static void dispatchTouchState(boolean pressed) {
+    public static void dispatchTouchState(boolean pressed, float cssX, float cssY, boolean hasCoords) {
         if (isScreenTouched == pressed) return;
         isScreenTouched = pressed;
         if (!touchStateTrackingEnabled) return;
@@ -648,7 +648,25 @@ public class ReaderNativePlugin extends Plugin {
         if (instance == null) return;
         JSObject payload = new JSObject();
         payload.put("pressed", pressed);
+        if (hasCoords) {
+            payload.put("x", cssX);
+            payload.put("y", cssY);
+        }
         instance.notifyListeners("touchState", payload);
+    }
+
+    public static void dispatchTouchState(boolean pressed) {
+        dispatchTouchState(pressed, 0f, 0f, false);
+    }
+
+    public static void dispatchTouchMove(float cssX, float cssY) {
+        if (!touchStateTrackingEnabled || !isScreenTouched) return;
+        ReaderNativePlugin instance = activeInstance;
+        if (instance == null) return;
+        JSObject payload = new JSObject();
+        payload.put("x", cssX);
+        payload.put("y", cssY);
+        instance.notifyListeners("touchMove", payload);
     }
 
     public static void dispatchInputActionMode() {
@@ -1670,24 +1688,33 @@ public class MainActivity extends BridgeActivity {
     private boolean nativePressActive = false;
     private float nativePressRawX = 0f;
     private float nativePressRawY = 0f;
+    private long lastTouchMoveDispatchMs = 0L;
+    private float lastTouchMoveCssX = -1f;
+    private float lastTouchMoveCssY = -1f;
+
+    private float[] rawToWebViewCss(float rawX, float rawY) {
+        float density = getResources().getDisplayMetrics().density;
+        if (density <= 0f) density = 1f;
+        float cssX = rawX / density;
+        float cssY = rawY / density;
+        if (getBridge() != null && getBridge().getWebView() != null) {
+            WebView webView = getBridge().getWebView();
+            int[] loc = new int[2];
+            webView.getLocationOnScreen(loc);
+            cssX = (rawX - loc[0]) / density;
+            cssY = (rawY - loc[1]) / density;
+        }
+        return new float[]{cssX, cssY};
+    }
+
     private final Runnable nativeLongPressRunnable = new Runnable() {
         @Override
         public void run() {
             if (!nativePressActive) return;
             nativePressActive = false;
             if (!ReaderNativePlugin.inputPasteTrackingEnabled) return;
-            float density = getResources().getDisplayMetrics().density;
-            if (density <= 0f) density = 1f;
-            float cssX = nativePressRawX / density;
-            float cssY = nativePressRawY / density;
-            if (getBridge() != null && getBridge().getWebView() != null) {
-                WebView webView = getBridge().getWebView();
-                int[] loc = new int[2];
-                webView.getLocationOnScreen(loc);
-                cssX = (nativePressRawX - loc[0]) / density;
-                cssY = (nativePressRawY - loc[1]) / density;
-            }
-            ReaderNativePlugin.dispatchNativeLongPress(cssX, cssY);
+            float[] css = rawToWebViewCss(nativePressRawX, nativePressRawY);
+            ReaderNativePlugin.dispatchNativeLongPress(css[0], css[1]);
         }
     };
 
@@ -1851,7 +1878,11 @@ public class MainActivity extends BridgeActivity {
         if (ev != null) {
             int action = ev.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
-                ReaderNativePlugin.dispatchTouchState(true);
+                float[] css = rawToWebViewCss(ev.getRawX(), ev.getRawY());
+                lastTouchMoveDispatchMs = System.currentTimeMillis();
+                lastTouchMoveCssX = css[0];
+                lastTouchMoveCssY = css[1];
+                ReaderNativePlugin.dispatchTouchState(true, css[0], css[1], true);
                 cancelNativeLongPress();
                 if (ReaderNativePlugin.inputPasteTrackingEnabled) {
                     nativePressActive = true;
@@ -1871,9 +1902,24 @@ public class MainActivity extends BridgeActivity {
                         cancelNativeLongPress();
                     }
                 }
+                if (ReaderNativePlugin.touchStateTrackingEnabled && ev.getPointerCount() == 1) {
+                    long nowMs = System.currentTimeMillis();
+                    if (nowMs - lastTouchMoveDispatchMs >= 24L) {
+                        float[] css = rawToWebViewCss(ev.getRawX(), ev.getRawY());
+                        float dCssX = css[0] - lastTouchMoveCssX;
+                        float dCssY = css[1] - lastTouchMoveCssY;
+                        if (dCssX * dCssX + dCssY * dCssY >= 9f) {
+                            lastTouchMoveDispatchMs = nowMs;
+                            lastTouchMoveCssX = css[0];
+                            lastTouchMoveCssY = css[1];
+                            ReaderNativePlugin.dispatchTouchMove(css[0], css[1]);
+                        }
+                    }
+                }
             } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 cancelNativeLongPress();
-                ReaderNativePlugin.dispatchTouchState(false);
+                float[] css = rawToWebViewCss(ev.getRawX(), ev.getRawY());
+                ReaderNativePlugin.dispatchTouchState(false, css[0], css[1], true);
             }
         }
         return super.dispatchTouchEvent(ev);
