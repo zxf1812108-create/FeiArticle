@@ -112,6 +112,7 @@ export interface WebDavConfig {
   settingsUpdatedAt?: number;
   lazyFetch: boolean; // On-demand body fetch to save download quota
   lastManifestEtag?: string;
+  lastAutoManifestEtag?: string;
   lastSyncedAt?: number;
 }
 

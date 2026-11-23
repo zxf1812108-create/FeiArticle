@@ -594,7 +594,11 @@ export async function runIncrementalWebDavSync(
       folders: localFolders,
       docs: localDocs,
       treeState: localTreeState,
-      config: { ...config, lastSyncedAt: Date.now() },
+      config: {
+        ...config,
+        lastAutoManifestEtag: config.lastManifestEtag || config.lastAutoManifestEtag,
+        lastSyncedAt: Date.now(),
+      },
       quotaDelta: {
         uploadBytes: 0,
         downloadBytes,
@@ -1083,6 +1087,7 @@ export async function runIncrementalWebDavSync(
     config: {
       ...mergedConfig,
       lastManifestEtag: newEtag,
+      lastAutoManifestEtag: newEtag,
       lastSyncedAt: Date.now(),
     },
     quotaDelta: {
@@ -1102,6 +1107,485 @@ export async function runIncrementalWebDavSync(
       downloadBytes,
       status: 'success',
     },
+  };
+}
+
+export interface AutoSyncOutcome {
+  folders: FolderNode[];
+  docs: ArticleDoc[];
+  treeState: SyncedTreeState;
+  config: WebDavConfig;
+  quotaDelta: {
+    uploadBytes: number;
+    downloadBytes: number;
+    requestCount: number;
+    skippedByEtag304: number;
+    skippedByHashMatch: number;
+  };
+  pulledProgressDocIds: Record<string, number>;
+  didPush: boolean;
+  didPull: boolean;
+  wasRateLimited?: boolean;
+}
+
+function getEffectiveProgressTs(
+  lastReadAt: number | null | undefined,
+  readProgress: number | undefined,
+  lastCharOffset: number | undefined,
+  fallbackUpdatedAt: number
+): number {
+  if (typeof lastReadAt === 'number' && Number.isFinite(lastReadAt) && lastReadAt > 0) {
+    return lastReadAt;
+  }
+  if ((lastCharOffset ?? 0) > 0 || (readProgress ?? 0) > 0) {
+    return fallbackUpdatedAt;
+  }
+  return 0;
+}
+
+function tagsEqual(a?: string[], b?: string[]): boolean {
+  const arrA = a || [];
+  const arrB = b || [];
+  if (arrA.length !== arrB.length) return false;
+  for (let i = 0; i < arrA.length; i++) {
+    if (arrA[i] !== arrB[i]) return false;
+  }
+  return true;
+}
+
+function catalogFieldsDiffer(localDoc: ArticleDoc, remoteEntry: ManifestDocEntry): boolean {
+  return (
+    localDoc.title !== remoteEntry.title ||
+    (localDoc.folderId ?? null) !== (remoteEntry.folderId ?? null) ||
+    localDoc.order !== remoteEntry.order ||
+    Boolean(localDoc.starred) !== Boolean(remoteEntry.starred) ||
+    Boolean(localDoc.deleted) !== Boolean(remoteEntry.deleted) ||
+    (localDoc.deletedAt ?? undefined) !== (remoteEntry.deletedAt ?? undefined) ||
+    (localDoc.deletedByFolderId ?? undefined) !== (remoteEntry.deletedByFolderId ?? undefined) ||
+    !tagsEqual(localDoc.tags, remoteEntry.tags)
+  );
+}
+
+function progressFieldsDiffer(localDoc: ArticleDoc, remoteEntry: ManifestDocEntry): boolean {
+  return (
+    Math.round(localDoc.readProgress ?? 0) !== Math.round(remoteEntry.readProgress ?? 0) ||
+    Math.round(localDoc.lastCharOffset ?? 0) !== Math.round(remoteEntry.lastCharOffset ?? 0) ||
+    Math.round(localDoc.lastScrollTop ?? 0) !== Math.round(remoteEntry.lastScrollTop ?? 0) ||
+    (localDoc.lastMode ?? 'read') !== (remoteEntry.lastMode ?? 'read')
+  );
+}
+
+function folderFieldsDiffer(a: FolderNode, b: FolderNode): boolean {
+  return (
+    a.name !== b.name ||
+    a.order !== b.order ||
+    Boolean(a.deleted) !== Boolean(b.deleted) ||
+    (a.deletedAt ?? undefined) !== (b.deletedAt ?? undefined)
+  );
+}
+
+/**
+ * Ultra-lightweight automatic background sync for Jianguoyun free-tier quota conservation:
+ * - Syncs ONLY directory structure (folders, treeState, catalog metadata of existing docs) & reading progress.
+ * - NEVER uploads or downloads document body files (docs/*.txt / docs/*.md) and NEVER scans inbox/.
+ * - Strict Option 1 isolation:
+ *   - Upload: newly imported local docs not yet in cloud manifest are NOT published until Manual Sync uploads their bodies.
+ *   - Download: newly uploaded remote docs not yet on this device are NOT added as empty stubs locally (preserved intact in
+ *     remote manifest so Manual Sync downloads their full bodies later).
+ * - Uses an isolated `lastAutoManifestEtag` so Manual Sync's `lastManifestEtag` is never prematurely invalidated/masked.
+ */
+export async function runAutoMetadataProgressSync(
+  rawConfig: WebDavConfig,
+  localFolders: FolderNode[],
+  localDocs: ArticleDoc[],
+  localTreeState: SyncedTreeState,
+  hasLocalChanges: boolean,
+  purgedRecords?: PurgedSyncRecords
+): Promise<AutoSyncOutcome> {
+  const syncNow = Date.now();
+  const config: WebDavConfig = {
+    ...rawConfig,
+    baseUrl: normalizeWebDavBaseUrl(rawConfig.baseUrl),
+    username: rawConfig.username.trim(),
+    password: rawConfig.password.trim(),
+  };
+
+  let uploadBytes = 0;
+  let downloadBytes = 0;
+  let requestCount = 0;
+  let skippedByEtag304 = 0;
+  let skippedByHashMatch = 0;
+
+  // Step 1: Fetch _manifest.json
+  // Pull-only checks send If-None-Match (304 = 0 bytes); push checks fetch full manifest so remote-only books are preserved
+  requestCount++;
+  const manifestRes = await callWebDav(config, 'GET', MANIFEST_PATH, {
+    ifNoneMatch: hasLocalChanges ? undefined : config.lastAutoManifestEtag,
+  });
+
+  if (manifestRes.status === 429 || manifestRes.status === 503) {
+    return {
+      folders: localFolders,
+      docs: localDocs,
+      treeState: localTreeState,
+      config,
+      quotaDelta: {
+        uploadBytes: 0,
+        downloadBytes: 0,
+        requestCount,
+        skippedByEtag304: 0,
+        skippedByHashMatch: 0,
+      },
+      pulledProgressDocIds: {},
+      didPush: false,
+      didPull: false,
+      wasRateLimited: true,
+    };
+  }
+
+  if (manifestRes.status === 304 && !hasLocalChanges) {
+    skippedByEtag304++;
+    return {
+      folders: localFolders,
+      docs: localDocs,
+      treeState: localTreeState,
+      config,
+      quotaDelta: {
+        uploadBytes: 0,
+        downloadBytes: 0,
+        requestCount,
+        skippedByEtag304,
+        skippedByHashMatch: localDocs.length,
+      },
+      pulledProgressDocIds: {},
+      didPush: false,
+      didPull: false,
+    };
+  }
+
+  let remoteManifest: RemoteManifest | null = null;
+  let nextAutoEtag = config.lastAutoManifestEtag;
+
+  if (manifestRes.status === 404 || manifestRes.status === 409) {
+    if (!hasLocalChanges) {
+      return {
+        folders: localFolders,
+        docs: localDocs,
+        treeState: localTreeState,
+        config,
+        quotaDelta: {
+          uploadBytes: 0,
+          downloadBytes: 0,
+          requestCount,
+          skippedByEtag304: 0,
+          skippedByHashMatch: 0,
+        },
+        pulledProgressDocIds: {},
+        didPush: false,
+        didPull: false,
+      };
+    }
+    const ensured = await ensureRemoteDirectories(config);
+    requestCount += ensured.requests;
+    if (ensured.authFailedStatus) {
+      throw new Error(
+        formatSyncHttpError('自动同步创建远端目录失败', {
+          ok: false,
+          status: ensured.authFailedStatus,
+        })
+      );
+    }
+  } else if (manifestRes.ok && manifestRes.body) {
+    downloadBytes += manifestRes.bytesTransferred || getByteSize(manifestRes.body);
+    nextAutoEtag = manifestRes.etag || nextAutoEtag;
+    try {
+      remoteManifest = JSON.parse(manifestRes.body) as RemoteManifest;
+    } catch {
+      remoteManifest = null;
+    }
+  } else if (!manifestRes.ok) {
+    throw new Error(formatSyncHttpError('自动同步拉取索引失败', manifestRes));
+  }
+
+  let mergedConfig: WebDavConfig = { ...config };
+  let needManifestPush = false;
+  let didPull = false;
+  let didPush = false;
+  const pulledProgressDocIds: Record<string, number> = {};
+
+  // Step 2: Merge sync settings (LWW)
+  const remoteSettings = remoteManifest?.syncSettings;
+  const localSettingsTs = config.settingsUpdatedAt || 0;
+  if (remoteSettings && remoteSettings.updatedAt > localSettingsTs) {
+    mergedConfig = {
+      ...mergedConfig,
+      provider: 'jianguoyun',
+      baseUrl: normalizeWebDavBaseUrl(remoteSettings.baseUrl || mergedConfig.baseUrl),
+      username: (remoteSettings.username || mergedConfig.username).trim(),
+      password: (remoteSettings.password || mergedConfig.password).trim(),
+      encryptionPassword: remoteSettings.encryptionPassword ?? mergedConfig.encryptionPassword ?? '',
+      settingsUpdatedAt: remoteSettings.updatedAt,
+      enabled: Boolean(
+        (remoteSettings.username || mergedConfig.username) &&
+          (remoteSettings.password || mergedConfig.password)
+      ),
+    };
+    didPull = true;
+  } else if (localSettingsTs > (remoteSettings?.updatedAt || 0)) {
+    needManifestPush = true;
+  }
+
+  // Step 3: Merge folders (LWW by updatedAt)
+  const remoteFolderMap = new Map<string, FolderNode>();
+  if (remoteManifest?.folders) {
+    for (const rf of remoteManifest.folders) {
+      remoteFolderMap.set(rf.id, rf);
+    }
+  }
+  const folderMap = new Map<string, FolderNode>();
+  for (const lf of localFolders) {
+    folderMap.set(lf.id, lf);
+    const rf = remoteFolderMap.get(lf.id);
+    if (!rf) {
+      needManifestPush = true;
+    } else if (lf.updatedAt > rf.updatedAt && folderFieldsDiffer(lf, rf)) {
+      needManifestPush = true;
+    }
+  }
+  if (remoteManifest?.folders) {
+    for (const rf of remoteManifest.folders) {
+      const purgedAt = purgedRecords?.folders?.[rf.id];
+      if ((purgedAt && purgedAt >= rf.updatedAt) || isTrashExpired(rf, syncNow)) {
+        needManifestPush = true;
+        continue;
+      }
+      const lf = folderMap.get(rf.id);
+      if (!lf) {
+        folderMap.set(rf.id, { ...rf, parentId: null });
+        didPull = true;
+      } else if (rf.updatedAt > lf.updatedAt) {
+        if (folderFieldsDiffer(lf, rf)) {
+          didPull = true;
+        }
+        folderMap.set(rf.id, { ...rf, parentId: null });
+      }
+    }
+  }
+  const mergedFolders = Array.from(folderMap.values());
+
+  // Step 4: Merge directory tree state (LWW by updatedAt)
+  let mergedTreeState: SyncedTreeState = localTreeState;
+  const remoteTree = remoteManifest?.treeState;
+  if (remoteTree && remoteTree.updatedAt > localTreeState.updatedAt) {
+    mergedTreeState = {
+      collapsedIds: Array.isArray(remoteTree.collapsedIds) ? remoteTree.collapsedIds : [],
+      activeTarget: remoteTree.activeTarget ?? null,
+      scrollTop: typeof remoteTree.scrollTop === 'number' ? remoteTree.scrollTop : 0,
+      updatedAt: remoteTree.updatedAt,
+    };
+    didPull = true;
+  } else if (localTreeState.updatedAt > (remoteTree?.updatedAt || 0)) {
+    needManifestPush = true;
+  }
+
+  // Step 5: Merge existing docs' catalog metadata & reading progress (Strict Option 1: zero body transfers, zero ghost docs)
+  // Start remote docs map from the exact remote snapshot so un-pulled remote new books stay 100% preserved!
+  const nextRemoteDocs: Record<string, ManifestDocEntry> = {
+    ...(remoteManifest?.docs || {}),
+  };
+
+  const mergedDocs: ArticleDoc[] = localDocs.map((localDoc) => {
+    if (isDocBodyMissing(localDoc)) {
+      return localDoc;
+    }
+    const remoteEntry = remoteManifest?.docs?.[localDoc.id];
+    // Upload isolation: do NOT publish newly imported local docs whose bodies haven't been synced yet
+    if (!remoteEntry) {
+      return localDoc;
+    }
+
+    skippedByHashMatch++;
+    const sameBody =
+      remoteEntry.contentHash === localDoc.contentHash &&
+      Boolean(remoteEntry.encrypted) === Boolean(localDoc.encrypted);
+
+    let nextLocal: ArticleDoc = { ...localDoc };
+    const nextRemoteEntry: ManifestDocEntry = { ...remoteEntry };
+    let pushedThisDocMetaOrProgress = false;
+
+    // 5a. Reading progress merge (independent per-book LWW by lastReadAt)
+    const localProgressTs = getEffectiveProgressTs(
+      localDoc.lastReadAt,
+      localDoc.readProgress,
+      localDoc.lastCharOffset,
+      localDoc.updatedAt
+    );
+    const remoteProgressTs = getEffectiveProgressTs(
+      remoteEntry.lastReadAt,
+      remoteEntry.readProgress,
+      remoteEntry.lastCharOffset,
+      remoteEntry.updatedAt
+    );
+
+    if (progressFieldsDiffer(localDoc, remoteEntry)) {
+      if (remoteProgressTs > localProgressTs) {
+        const pulledOffset = Math.max(0, Math.round(remoteEntry.lastCharOffset ?? 0));
+        nextLocal = {
+          ...nextLocal,
+          readProgress: remoteEntry.readProgress,
+          lastCharOffset: pulledOffset,
+          lastScrollTop: Math.max(0, Math.round(remoteEntry.lastScrollTop ?? 0)),
+          lastMode: remoteEntry.lastMode ?? nextLocal.lastMode ?? 'read',
+          lastReadAt: remoteEntry.lastReadAt ?? remoteProgressTs,
+        };
+        pulledProgressDocIds[localDoc.id] = pulledOffset;
+        didPull = true;
+      } else if (localProgressTs > remoteProgressTs) {
+        nextRemoteEntry.readProgress = localDoc.readProgress;
+        nextRemoteEntry.lastCharOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
+        nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
+        nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
+        nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? localProgressTs;
+        pushedThisDocMetaOrProgress = true;
+        needManifestPush = true;
+      }
+    }
+
+    // 5b. Catalog metadata merge (title, folderId, order, starred, tags, soft-delete)
+    if (catalogFieldsDiffer(localDoc, remoteEntry)) {
+      if (remoteEntry.updatedAt > localDoc.updatedAt) {
+        nextLocal = {
+          ...nextLocal,
+          title: remoteEntry.title,
+          folderId: remoteEntry.folderId,
+          order: remoteEntry.order,
+          starred: remoteEntry.starred,
+          tags: remoteEntry.tags,
+          deleted: remoteEntry.deleted,
+          deletedAt: remoteEntry.deletedAt,
+          deletedByFolderId: remoteEntry.deletedByFolderId,
+          // Only advance updatedAt when body hashes match, so Manual Sync still detects remote body edits
+          updatedAt: sameBody ? remoteEntry.updatedAt : localDoc.updatedAt,
+          syncStatus: sameBody ? 'synced' : localDoc.syncStatus,
+        };
+        didPull = true;
+      } else if (localDoc.updatedAt > remoteEntry.updatedAt) {
+        nextRemoteEntry.title = localDoc.title;
+        nextRemoteEntry.folderId = localDoc.folderId;
+        nextRemoteEntry.order = localDoc.order;
+        nextRemoteEntry.starred = localDoc.starred;
+        nextRemoteEntry.tags = localDoc.tags;
+        nextRemoteEntry.deleted = localDoc.deleted;
+        nextRemoteEntry.deletedAt = localDoc.deletedAt;
+        nextRemoteEntry.deletedByFolderId = localDoc.deletedByFolderId;
+        pushedThisDocMetaOrProgress = true;
+        needManifestPush = true;
+      }
+    }
+
+    if (pushedThisDocMetaOrProgress) {
+      if (sameBody) {
+        const mergedTs = Math.max(
+          remoteEntry.updatedAt,
+          localDoc.updatedAt,
+          localProgressTs
+        );
+        nextRemoteEntry.updatedAt = mergedTs;
+        nextLocal = {
+          ...nextLocal,
+          updatedAt: mergedTs,
+          syncStatus: 'synced',
+        };
+      } else {
+        // Keep remote updatedAt <= localDoc.updatedAt and preserve dirty status so Manual Sync uploads edited body
+        nextRemoteEntry.updatedAt = Math.min(
+          localDoc.updatedAt,
+          Math.max(remoteEntry.updatedAt, localProgressTs)
+        );
+      }
+      nextRemoteDocs[localDoc.id] = nextRemoteEntry;
+    }
+
+    return nextLocal;
+  });
+
+  // Step 6: Push updated _manifest.json ONLY when metadata/folders/progress actually changed
+  const canBootstrapEmptyManifest =
+    remoteManifest === null && (mergedFolders.length > 0 || mergedTreeState.updatedAt > 0);
+  if (needManifestPush && (remoteManifest !== null || canBootstrapEmptyManifest)) {
+    const nextManifest: RemoteManifest = {
+      version: 2,
+      updatedAt: Date.now(),
+      folders: mergedFolders,
+      docs: nextRemoteDocs,
+      treeState: mergedTreeState,
+      syncSettings: {
+        provider: 'jianguoyun',
+        baseUrl: normalizeWebDavBaseUrl(mergedConfig.baseUrl),
+        username: mergedConfig.username.trim(),
+        password: mergedConfig.password.trim(),
+        encryptionPassword: mergedConfig.encryptionPassword || '',
+        updatedAt: mergedConfig.settingsUpdatedAt || 0,
+      },
+    };
+    const manifestJson = JSON.stringify(nextManifest);
+    requestCount++;
+    let putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
+    if (putManifest.status === 429 || putManifest.status === 503) {
+      return {
+        folders: mergedFolders,
+        docs: mergedDocs,
+        treeState: mergedTreeState,
+        config: {
+          ...mergedConfig,
+          lastAutoManifestEtag: nextAutoEtag,
+        },
+        quotaDelta: {
+          uploadBytes,
+          downloadBytes,
+          requestCount,
+          skippedByEtag304,
+          skippedByHashMatch,
+        },
+        pulledProgressDocIds,
+        didPush: false,
+        didPull,
+        wasRateLimited: true,
+      };
+    }
+    if (!putManifest.ok && (putManifest.status === 404 || putManifest.status === 409)) {
+      const ensured = await ensureRemoteDirectories(config);
+      requestCount += ensured.requests;
+      requestCount++;
+      putManifest = await callWebDav(config, 'PUT', MANIFEST_PATH, { body: manifestJson });
+    }
+    if (!putManifest.ok) {
+      throw new Error(formatSyncHttpError('自动同步更新索引失败', putManifest));
+    }
+    uploadBytes += getByteSize(manifestJson);
+    nextAutoEtag = putManifest.etag || nextAutoEtag;
+    didPush = true;
+  }
+
+  return {
+    folders: mergedFolders,
+    docs: mergedDocs,
+    treeState: mergedTreeState,
+    config: {
+      ...mergedConfig,
+      // Keep Manual Sync's lastManifestEtag completely untouched so Manual Sync never skips remote new books!
+      lastAutoManifestEtag: nextAutoEtag,
+    },
+    quotaDelta: {
+      uploadBytes,
+      downloadBytes,
+      requestCount,
+      skippedByEtag304,
+      skippedByHashMatch,
+    },
+    pulledProgressDocIds,
+    didPush,
+    didPull,
   };
 }
 

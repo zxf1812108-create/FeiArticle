@@ -123,6 +123,7 @@ import {
 import { purgeExpiredTrash } from './utils/trash';
 import {
   fetchRemoteDocBody,
+  runAutoMetadataProgressSync,
   runIncrementalWebDavSync,
 } from './utils/webdavSync';
 import {
@@ -135,6 +136,11 @@ import {
 import { formatMicErrorMessage, WhistleDetector } from './utils/whistleDetector';
 
 type MainView = 'tree' | 'doc';
+
+const AUTO_PROGRESS_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const AUTO_CATALOG_DEBOUNCE_MS = 5000;
+const AUTO_PULL_COOLDOWN_MS = 15_000;
+const AUTO_SYNC_BACKOFF_STEPS_MS = [30_000, 60_000, 180_000, 300_000];
 
 // Insert-below icon depicting placing the cut folder/article beneath the currently selected row
 const InsertBelowIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
@@ -210,8 +216,8 @@ export default function App() {
     if (!Number.isFinite(raw)) return DEFAULT_READER_SETTINGS.fontSize;
     return Math.min(MAX_DOC_FONT_SIZE, Math.max(MIN_DOC_FONT_SIZE, Math.round(raw)));
   });
-  const [autoHyphenate, setAutoHyphenate] = useState<boolean>(() =>
-    Boolean(loadReaderSettings().autoHyphenate)
+  const [autoHyphenate, setAutoHyphenate] = useState<boolean>(
+    () => loadReaderSettings().autoHyphenate ?? true
   );
   const [progressDisplayMode, setProgressDisplayMode] = useState<'percent' | 'pages'>(() =>
     loadReaderSettings().progressDisplayMode === 'pages' ? 'pages' : 'percent'
@@ -264,6 +270,33 @@ export default function App() {
   docsRef.current = docs;
   const foldersRef = useRef<FolderNode[]>(folders);
   foldersRef.current = folders;
+  const webDavConfigRef = useRef<WebDavConfig>(webDavConfig);
+  webDavConfigRef.current = webDavConfig;
+  const purgedRecordsRef = useRef<PurgedSyncRecords>(purgedRecords);
+  purgedRecordsRef.current = purgedRecords;
+  const mainViewRef = useRef<MainView>(mainView);
+  mainViewRef.current = mainView;
+  const selectedDocIdRef = useRef<string | null>(selectedDocId);
+  selectedDocIdRef.current = selectedDocId;
+  const collapsedFolderIdsRef = useRef<string[]>(collapsedFolderIds);
+  collapsedFolderIdsRef.current = collapsedFolderIds;
+  const activeTargetRef = useRef<TreeSelection | null>(activeTarget);
+  activeTargetRef.current = activeTarget;
+  const treeScrollTopRef = useRef<number>(treeScrollTop);
+  treeScrollTopRef.current = treeScrollTop;
+  const treeStateUpdatedAtRef = useRef<number>(treeStateUpdatedAt);
+  treeStateUpdatedAtRef.current = treeStateUpdatedAt;
+  const foldersDirtyRef = useRef<boolean>(foldersDirty);
+  foldersDirtyRef.current = foldersDirty;
+  const isManualSyncingRef = useRef(false);
+  const activeAutoSyncPromiseRef = useRef<Promise<void> | null>(null);
+  const autoProgressDirtyRef = useRef(false);
+  const autoCatalogDirtyRef = useRef(false);
+  const autoMutationSeqRef = useRef(0);
+  const autoCatalogDebounceTimerRef = useRef<number | null>(null);
+  const lastAutoPullAtRef = useRef(0);
+  const autoSyncFailCountRef = useRef(0);
+  const autoSyncBackoffUntilRef = useRef(0);
   const storageDirRef = useRef<StorageDirectoryConfig>(storageDir);
   storageDirRef.current = storageDir;
   const localFsTimerRef = useRef<number | null>(null);
@@ -754,6 +787,7 @@ export default function App() {
     };
     setFolders((prev) => [...prev, next]);
     setFoldersDirty(true);
+    markAutoCatalogDirty();
     return next;
   };
 
@@ -769,6 +803,7 @@ export default function App() {
       prev.map((f) => (f.id === folderId ? { ...f, name: trimmed, updatedAt: Date.now() } : f))
     );
     setFoldersDirty(true);
+    markAutoCatalogDirty();
   };
 
   const handleRenameDoc = (docId: string, title: string) => {
@@ -781,6 +816,7 @@ export default function App() {
           : d
       )
     );
+    markAutoCatalogDirty();
   };
 
   const handleToolbarEditClick = () => {
@@ -821,6 +857,7 @@ export default function App() {
       if (cutItem?.kind === 'doc' && cutItem.id === payload.id) {
         setCutItem(null);
       }
+      markAutoCatalogDirty();
       return;
     }
 
@@ -856,6 +893,7 @@ export default function App() {
       )
     );
     setFoldersDirty(true);
+    markAutoCatalogDirty();
     setCollapsedFolderIds((prev) => prev.filter((id) => id !== folderId));
 
     if (selectedDocId && docIdsInFolder.has(selectedDocId)) {
@@ -910,6 +948,7 @@ export default function App() {
       )
     );
     setFoldersDirty(true);
+    markAutoCatalogDirty();
   };
 
   const handleRestoreDocFromTrash = (docId: string) => {
@@ -932,6 +971,7 @@ export default function App() {
         };
       })
     );
+    markAutoCatalogDirty();
   };
 
   const handleEmptyTrash = () => {
@@ -966,6 +1006,7 @@ export default function App() {
     );
     setTreeStateUpdatedAt(Date.now());
     setFoldersDirty(true);
+    markAutoCatalogDirty();
   };
 
   const handleExpandFolder = (id: string) => {
@@ -973,6 +1014,7 @@ export default function App() {
     setCollapsedFolderIds((prev) => prev.filter((item) => item !== id));
     setTreeStateUpdatedAt(Date.now());
     setFoldersDirty(true);
+    markAutoCatalogDirty();
   };
 
   const handleTreeScrollTopChange = (nextScrollTop: number) => {
@@ -1041,6 +1083,7 @@ export default function App() {
       }));
     });
     setFoldersDirty(true);
+    markAutoCatalogDirty();
   };
 
   // Article Drag-to-Reorder / Move across folders
@@ -1099,6 +1142,7 @@ export default function App() {
         return d;
       });
     });
+    markAutoCatalogDirty();
   };
 
   // Bottom Toolbar: Selection, Cut, Paste & Encrypt Handlers
@@ -1336,21 +1380,24 @@ export default function App() {
       return;
     }
     const now = Date.now();
-    setDocs((prev) =>
-      prev.map((d) =>
-        d.id === docId
-          ? {
-              ...d,
-              lastMode: state.mode,
-              lastScrollTop: nextScroll,
-              lastCharOffset: nextCharOffset,
-              readProgress: nextProgress,
-              updatedAt: now,
-            }
-          : d
-      )
+    const nextDocs = docsRef.current.map((d) =>
+      d.id === docId
+        ? {
+            ...d,
+            lastMode: state.mode,
+            lastScrollTop: nextScroll,
+            lastCharOffset: nextCharOffset,
+            readProgress: nextProgress,
+            lastReadAt: now,
+            updatedAt: now,
+          }
+        : d
     );
+    docsRef.current = nextDocs;
+    setDocs(nextDocs);
     setFoldersDirty(true);
+    autoProgressDirtyRef.current = true;
+    autoMutationSeqRef.current++;
   };
 
   const handleOpenDoc = (docId: string) => {
@@ -1361,9 +1408,8 @@ export default function App() {
     setSelectedDocId(docId);
     setLiveReadProgress(target?.readProgress ?? 0);
     setMainView('doc');
-    setDocs((prev) =>
-      prev.map((d) => (d.id === docId ? { ...d, lastReadAt: Date.now() } : d))
-    );
+    // Pull any newer reading progress / directory changes silently (304 = 0 bytes if unchanged)
+    void runSilentAutoSyncRef.current({ forcePullCheck: true });
   };
 
   const handleExitDocToTree = () => {
@@ -1377,6 +1423,9 @@ export default function App() {
     setShowFontSizeBar(false);
     setWhistleEnabled(false);
     setMainView('tree');
+    if (autoProgressDirtyRef.current || autoCatalogDirtyRef.current) {
+      void runSilentAutoSyncRef.current({ bypassThrottle: true });
+    }
   };
 
   const handleChangeFontSize = (nextSize: number) => {
@@ -1806,26 +1855,290 @@ export default function App() {
     }
   };
 
+  const runSilentAutoSync = async (options?: {
+    forcePullCheck?: boolean;
+    bypassThrottle?: boolean;
+  }) => {
+    const cfg = webDavConfigRef.current;
+    if (!cfg.username.trim() || !cfg.password.trim()) return;
+    if (isManualSyncingRef.current || activeAutoSyncPromiseRef.current) return;
+
+    const now = Date.now();
+    if (now < autoSyncBackoffUntilRef.current) return;
+
+    const hasLocalChanges = autoProgressDirtyRef.current || autoCatalogDirtyRef.current;
+    if (!hasLocalChanges && !options?.forcePullCheck) return;
+
+    if (
+      !hasLocalChanges &&
+      !options?.bypassThrottle &&
+      now - lastAutoPullAtRef.current < AUTO_PULL_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    const seqBefore = autoMutationSeqRef.current;
+    const currentTreeScroll =
+      mainViewRef.current === 'tree'
+        ? treeViewRef.current?.getScrollTop() ?? treeScrollTopRef.current
+        : treeScrollTopRef.current;
+    const localTreeState: SyncedTreeState = {
+      collapsedIds: collapsedFolderIdsRef.current,
+      activeTarget: activeTargetRef.current,
+      scrollTop: currentTreeScroll,
+      updatedAt: treeStateUpdatedAtRef.current,
+    };
+
+    const task = (async () => {
+      try {
+        const outcome = await runAutoMetadataProgressSync(
+          cfg,
+          foldersRef.current,
+          docsRef.current,
+          localTreeState,
+          hasLocalChanges,
+          purgedRecordsRef.current
+        );
+        applyQuotaDelta(outcome.quotaDelta);
+
+        if (outcome.wasRateLimited) {
+          const stepIdx = Math.min(
+            autoSyncFailCountRef.current,
+            AUTO_SYNC_BACKOFF_STEPS_MS.length - 1
+          );
+          autoSyncFailCountRef.current++;
+          autoSyncBackoffUntilRef.current = Date.now() + AUTO_SYNC_BACKOFF_STEPS_MS[stepIdx];
+          return;
+        }
+
+        autoSyncFailCountRef.current = 0;
+        autoSyncBackoffUntilRef.current = 0;
+        lastAutoPullAtRef.current = Date.now();
+
+        setWebDavConfig((prev) => ({
+          ...prev,
+          baseUrl: outcome.config.baseUrl,
+          username: outcome.config.username,
+          password: outcome.config.password,
+          encryptionPassword: outcome.config.encryptionPassword,
+          settingsUpdatedAt: outcome.config.settingsUpdatedAt,
+          enabled: outcome.config.enabled,
+          // Preserve Manual Sync's lastManifestEtag untouched; update only auto-sync ETag
+          lastAutoManifestEtag: outcome.config.lastAutoManifestEtag,
+        }));
+
+        if (outcome.didPull) {
+          const outcomeFolderMap = new Map(
+            outcome.folders.map((f) => [f.id, { ...f, parentId: null }])
+          );
+          setFolders((prev) => {
+            const merged = new Map<string, FolderNode>();
+            for (const f of prev) merged.set(f.id, f);
+            for (const [id, rf] of outcomeFolderMap) {
+              const lf = merged.get(id);
+              if (!lf || rf.updatedAt > lf.updatedAt) {
+                merged.set(id, rf);
+              }
+            }
+            return Array.from(merged.values());
+          });
+
+          if (outcome.treeState.updatedAt > treeStateUpdatedAtRef.current) {
+            setCollapsedFolderIds(outcome.treeState.collapsedIds);
+            setActiveTarget(outcome.treeState.activeTarget);
+            setTreeScrollTop(outcome.treeState.scrollTop);
+            setTreeStateUpdatedAt(outcome.treeState.updatedAt);
+          }
+        }
+
+        if (outcome.didPull || outcome.didPush) {
+          const noConcurrentMutation = autoMutationSeqRef.current === seqBefore;
+          const outcomeDocMap = new Map(outcome.docs.map((d) => [d.id, d]));
+          setDocs((prev) =>
+            prev.map((curr) => {
+              const next = outcomeDocMap.get(curr.id);
+              if (!next) return curr;
+              if (noConcurrentMutation) return next;
+              const currProgressTs = curr.lastReadAt ?? 0;
+              const nextProgressTs = next.lastReadAt ?? 0;
+              const useNextProgress = nextProgressTs > currProgressTs;
+              const useNextCatalog = next.updatedAt > curr.updatedAt;
+              if (!useNextProgress && !useNextCatalog) return curr;
+              return {
+                ...curr,
+                ...(useNextCatalog
+                  ? {
+                      title: next.title,
+                      folderId: next.folderId,
+                      order: next.order,
+                      starred: next.starred,
+                      tags: next.tags,
+                      deleted: next.deleted,
+                      deletedAt: next.deletedAt,
+                      deletedByFolderId: next.deletedByFolderId,
+                      updatedAt: next.updatedAt,
+                      syncStatus: next.syncStatus,
+                    }
+                  : {}),
+                ...(useNextProgress
+                  ? {
+                      readProgress: next.readProgress,
+                      lastCharOffset: next.lastCharOffset,
+                      lastScrollTop: next.lastScrollTop,
+                      lastMode: next.lastMode,
+                      lastReadAt: next.lastReadAt,
+                    }
+                  : {}),
+              };
+            })
+          );
+
+          const openDocId = selectedDocIdRef.current;
+          if (
+            mainViewRef.current === 'doc' &&
+            openDocId &&
+            Object.prototype.hasOwnProperty.call(outcome.pulledProgressDocIds, openDocId) &&
+            autoMutationSeqRef.current === seqBefore
+          ) {
+            const pulledOffset = outcome.pulledProgressDocIds[openDocId];
+            const pulledDoc = outcomeDocMap.get(openDocId);
+            if (pulledDoc) {
+              setLiveReadProgress(pulledDoc.readProgress);
+            }
+            docViewRef.current?.jumpToCharOffset(pulledOffset);
+          }
+        }
+
+        if (autoMutationSeqRef.current === seqBefore) {
+          autoProgressDirtyRef.current = false;
+          autoCatalogDirtyRef.current = false;
+        }
+      } catch {
+        // Silent exponential backoff on network/transient errors — never interrupt reading
+        const stepIdx = Math.min(
+          autoSyncFailCountRef.current,
+          AUTO_SYNC_BACKOFF_STEPS_MS.length - 1
+        );
+        autoSyncFailCountRef.current++;
+        autoSyncBackoffUntilRef.current = Date.now() + AUTO_SYNC_BACKOFF_STEPS_MS[stepIdx];
+      } finally {
+        activeAutoSyncPromiseRef.current = null;
+      }
+    })();
+
+    activeAutoSyncPromiseRef.current = task;
+    await task;
+  };
+
+  const runSilentAutoSyncRef = useRef(runSilentAutoSync);
+  runSilentAutoSyncRef.current = runSilentAutoSync;
+
+  const markAutoCatalogDirty = (triggerDebounce = true) => {
+    autoCatalogDirtyRef.current = true;
+    autoMutationSeqRef.current++;
+    if (!triggerDebounce) return;
+    const cfg = webDavConfigRef.current;
+    if (!cfg.username.trim() || !cfg.password.trim()) return;
+    if (autoCatalogDebounceTimerRef.current !== null) {
+      window.clearTimeout(autoCatalogDebounceTimerRef.current);
+    }
+    autoCatalogDebounceTimerRef.current = window.setTimeout(() => {
+      autoCatalogDebounceTimerRef.current = null;
+      if (autoCatalogDirtyRef.current || autoProgressDirtyRef.current) {
+        void runSilentAutoSyncRef.current({ bypassThrottle: true });
+      }
+    }, AUTO_CATALOG_DEBOUNCE_MS);
+  };
+
+  // Auto-sync Trigger 1: Every 5 minutes while reading (0 requests if no page turn/change occurred)
+  const webDavConfigured = Boolean(webDavConfig.username.trim() && webDavConfig.password.trim());
+  useEffect(() => {
+    if (!webDavConfigured || mainView !== 'doc') return;
+    const timer = window.setInterval(() => {
+      const openDocId = selectedDocIdRef.current;
+      if (openDocId && docViewRef.current) {
+        const captured = docViewRef.current.flushAndCaptureViewState();
+        handleUpdateDocViewState(openDocId, captured);
+      }
+      if (autoProgressDirtyRef.current || autoCatalogDirtyRef.current) {
+        void runSilentAutoSyncRef.current({ bypassThrottle: true });
+      }
+    }, AUTO_PROGRESS_SYNC_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [webDavConfigured, mainView]);
+
+  // Auto-sync Trigger 2: Startup light pull + foreground/background lifecycle sync
+  useEffect(() => {
+    if (!webDavConfigured) return;
+    void runSilentAutoSyncRef.current({ forcePullCheck: true });
+
+    const flushAndPushIfDirty = () => {
+      if (mainViewRef.current === 'doc' && selectedDocIdRef.current && docViewRef.current) {
+        const captured = docViewRef.current.flushAndCaptureViewState();
+        handleUpdateDocViewState(selectedDocIdRef.current, captured);
+      }
+      if (autoProgressDirtyRef.current || autoCatalogDirtyRef.current) {
+        void runSilentAutoSyncRef.current({ bypassThrottle: true });
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushAndPushIfDirty();
+      } else if (document.visibilityState === 'visible') {
+        void runSilentAutoSyncRef.current({ forcePullCheck: true });
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('pagehide', flushAndPushIfDirty);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('pagehide', flushAndPushIfDirty);
+    };
+  }, [webDavConfigured]);
+
+  useEffect(() => {
+    return () => {
+      if (autoCatalogDebounceTimerRef.current !== null) {
+        window.clearTimeout(autoCatalogDebounceTimerRef.current);
+        autoCatalogDebounceTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const handleRunLiveSync = async () => {
+    if (isManualSyncingRef.current) return;
+    isManualSyncingRef.current = true;
     setIsSyncing(true);
     try {
+      if (autoCatalogDebounceTimerRef.current !== null) {
+        window.clearTimeout(autoCatalogDebounceTimerRef.current);
+        autoCatalogDebounceTimerRef.current = null;
+      }
+      // Wait for any in-flight silent auto-sync to complete before running full manual sync
+      if (activeAutoSyncPromiseRef.current) {
+        await activeAutoSyncPromiseRef.current;
+      }
       const currentTreeScroll =
-        mainView === 'tree'
-          ? treeViewRef.current?.getScrollTop() ?? treeScrollTop
-          : treeScrollTop;
+        mainViewRef.current === 'tree'
+          ? treeViewRef.current?.getScrollTop() ?? treeScrollTopRef.current
+          : treeScrollTopRef.current;
       const localTreeState: SyncedTreeState = {
-        collapsedIds: collapsedFolderIds,
-        activeTarget,
+        collapsedIds: collapsedFolderIdsRef.current,
+        activeTarget: activeTargetRef.current,
         scrollTop: currentTreeScroll,
-        updatedAt: treeStateUpdatedAt,
+        updatedAt: treeStateUpdatedAtRef.current,
       };
       const outcome = await runIncrementalWebDavSync(
-        webDavConfig,
-        folders,
-        docs,
+        webDavConfigRef.current,
+        foldersRef.current,
+        docsRef.current,
         localTreeState,
-        foldersDirty,
-        purgedRecords
+        foldersDirtyRef.current,
+        purgedRecordsRef.current
       );
       setFolders(outcome.folders.map((f) => ({ ...f, parentId: null })));
       setDocs(outcome.docs);
@@ -1834,6 +2147,11 @@ export default function App() {
       setTreeScrollTop(outcome.treeState.scrollTop);
       setTreeStateUpdatedAt(outcome.treeState.updatedAt);
       setFoldersDirty(false);
+      autoProgressDirtyRef.current = false;
+      autoCatalogDirtyRef.current = false;
+      autoSyncFailCountRef.current = 0;
+      autoSyncBackoffUntilRef.current = 0;
+      lastAutoPullAtRef.current = Date.now();
       setPurgedRecords({ docs: {}, docFormats: {}, folders: {} });
       setWebDavConfig(outcome.config);
       applyQuotaDelta(outcome.quotaDelta);
@@ -1857,6 +2175,7 @@ export default function App() {
       );
       throw err;
     } finally {
+      isManualSyncingRef.current = false;
       setIsSyncing(false);
     }
   };

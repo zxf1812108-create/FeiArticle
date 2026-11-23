@@ -54,7 +54,7 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   width: 'medium',
   paper: 'white',
   indentFirstLine: false,
-  autoHyphenate: false,
+  autoHyphenate: true,
   progressDisplayMode: 'percent',
   whistleSensitivity: 'medium',
 };

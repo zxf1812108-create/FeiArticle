@@ -44,6 +44,7 @@ export interface MinimalDocViewHandle {
   captureTypographyAnchor: () => void;
   flushAndCaptureViewState: () => DocViewStateSnapshot;
   turnPageDown: () => void;
+  jumpToCharOffset: (charOffset: number) => void;
 }
 
 interface MinimalDocViewProps {
@@ -512,7 +513,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     {
       doc,
       fontSize = 16,
-      autoHyphenate = false,
+      autoHyphenate = true,
       hasActiveMdict = false,
       isMdictPopupOpen = false,
       isMdictLookupPending = false,
@@ -1288,6 +1289,26 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return;
         }
         performPageDownRef.current();
+      },
+      jumpToCharOffset(charOffset: number) {
+        const clamped = Math.max(0, Math.min(contentRef.current.length, Math.round(charOffset)));
+        if (clamped > 0) {
+          scrollReadToCharOffset(clamped);
+          pendingTypographyAnchorRef.current = { kind: 'read', charOffset: clamped };
+          typographyLockUntilRef.current = Date.now() + 1500;
+        } else {
+          const targetEl = scrollRef.current;
+          if (targetEl) {
+            lastProgrammaticScrollAtRef.current = performance.now();
+            targetEl.scrollTop = 0;
+            lastProgrammaticScrollTopRef.current = 0;
+            if (isVirtualized) {
+              syncMountedWindowToScroll(0, targetEl.clientHeight);
+            }
+            updateEdgeClips();
+          }
+        }
+        reportReadProgress();
       },
     }));
 
