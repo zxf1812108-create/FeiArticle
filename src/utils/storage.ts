@@ -70,7 +70,7 @@ export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {
   password: '',
   encryptionPassword: '',
   settingsUpdatedAt: 0,
-  lazyFetch: true,
+  lazyFetch: false,
 };
 
 function safeParse<T>(raw: string | null, fallback: T): T {
@@ -126,6 +126,7 @@ export function loadWebDavConfig(): WebDavConfig {
   return {
     ...DEFAULT_WEBDAV_CONFIG,
     ...safeParse<Partial<WebDavConfig>>(localStorage.getItem(KEYS.WEBDAV), {}),
+    lazyFetch: false,
   };
 }
 

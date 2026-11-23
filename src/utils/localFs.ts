@@ -84,7 +84,7 @@ const WEB_FS_ROOT_KEY = 'root_dir_handle';
 
 interface SyncedManifestState {
   folderPaths: Record<string, string>;
-  docFiles: Record<string, { relPath: string; contentHash: string }>;
+  docFiles: Record<string, { relPath: string; contentHash: string; writtenBytes?: number }>;
   indexSig: string;
 }
 
@@ -789,7 +789,12 @@ function buildDesiredWorkspaceLayout(
   }
 
   const activeDocs = docs
-    .filter((d) => !d.deleted && d.syncStatus !== 'remote-only')
+    .filter(
+      (d) =>
+        !d.deleted &&
+        d.syncStatus !== 'remote-only' &&
+        !(d.content.length === 0 && d.byteSize > 0)
+    )
     .slice()
     .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 
@@ -864,11 +869,13 @@ export function syncWorkspaceToLocalFs(
       const docObj = docById.get(docId);
       if (!docObj) continue;
 
+      const actualBytes = getByteSize(docObj.content);
       const needsWrite =
         forceFull ||
         !prevEntry ||
         prevEntry.relPath !== meta.relPath ||
-        prevEntry.contentHash !== meta.contentHash;
+        prevEntry.contentHash !== meta.contentHash ||
+        prevEntry.writtenBytes !== actualBytes;
 
       if (needsWrite) {
         ops.push({
@@ -936,10 +943,17 @@ export function syncWorkspaceToLocalFs(
       const nextManifest: SyncedManifestState = {
         folderPaths,
         docFiles: Object.fromEntries(
-          Object.entries(docFiles).map(([id, m]) => [
-            id,
-            { relPath: m.relPath, contentHash: m.contentHash },
-          ])
+          Object.entries(docFiles).map(([id, m]) => {
+            const docObj = docById.get(id);
+            return [
+              id,
+              {
+                relPath: m.relPath,
+                contentHash: m.contentHash,
+                writtenBytes: docObj ? getByteSize(docObj.content) : 0,
+              },
+            ];
+          })
         ),
         indexSig: indexSigPayload,
       };
@@ -1477,10 +1491,17 @@ export function checkAndPullExternalLocalFsChanges(
       const nextManifest: SyncedManifestState = {
         folderPaths: updatedLayout.folderPaths,
         docFiles: Object.fromEntries(
-          Object.entries(updatedLayout.docFiles).map(([id, m]) => [
-            id,
-            { relPath: m.relPath, contentHash: m.contentHash },
-          ])
+          Object.entries(updatedLayout.docFiles).map(([id, m]) => {
+            const docObj = docById.get(id);
+            return [
+              id,
+              {
+                relPath: m.relPath,
+                contentHash: m.contentHash,
+                writtenBytes: docObj ? getByteSize(docObj.content) : 0,
+              },
+            ];
+          })
         ),
         indexSig: JSON.stringify({
           folderPaths: updatedLayout.folderPaths,

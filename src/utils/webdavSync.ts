@@ -55,6 +55,18 @@ export const DEFAULT_JIANGUOYUN_URL = 'https://dav.jianguoyun.com/dav/FeiArtical
 const MANIFEST_PATH = '_manifest.json';
 const DOCS_DIR = 'docs/';
 const INBOX_DIR = `${INBOX_FOLDER_NAME}/`;
+const EMPTY_CONTENT_SHA256 =
+  'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+function isDocBodyMissing(doc: ArticleDoc): boolean {
+  if (doc.deleted) return false;
+  if (doc.syncStatus === 'remote-only') return true;
+  if (doc.content.length > 0) return false;
+  return (
+    doc.byteSize > 0 ||
+    (Boolean(doc.contentHash) && doc.contentHash !== EMPTY_CONTENT_SHA256)
+  );
+}
 
 /**
  * Normalize user-entered WebDAV URL:
@@ -496,12 +508,13 @@ export async function runIncrementalWebDavSync(
   let skippedByEtag304 = 0;
   let skippedByHashMatch = 0;
 
-  const dirtyDocs = localDocs.filter((d) => d.syncStatus === 'dirty');
+  const dirtyDocs = localDocs.filter((d) => d.syncStatus === 'dirty' && !isDocBodyMissing(d));
+  const hasMissingLocalBodies = localDocs.some(isDocBodyMissing);
 
-  // Step 1: Conditional fetch _manifest.json
+  // Step 1: Conditional fetch _manifest.json (bypass 304 when local docs have missing bodies to self-heal)
   requestCount++;
   const manifestRes = await callWebDav(config, 'GET', MANIFEST_PATH, {
-    ifNoneMatch: config.lastManifestEtag,
+    ifNoneMatch: hasMissingLocalBodies ? undefined : config.lastManifestEtag,
   });
 
   if (manifestRes.status === 401 || manifestRes.status === 403) {
@@ -571,6 +584,7 @@ export async function runIncrementalWebDavSync(
   if (
     wasEtag304 &&
     dirtyDocs.length === 0 &&
+    !hasMissingLocalBodies &&
     !metaDirty &&
     inboxFiles.length === 0 &&
     !hasExpiredLocalTrash &&
@@ -666,8 +680,11 @@ export async function runIncrementalWebDavSync(
   let pulledCount = 0;
   let lazyQueuedCount = 0;
 
-  // 5a. Push locally dirty or unindexed documents
+  // 5a. Push locally dirty or unindexed documents (never overwrite remote with an un-fetched empty stub)
   for (const doc of localDocs) {
+    if (isDocBodyMissing(doc)) {
+      continue;
+    }
     const remoteEntry = remoteManifest?.docs?.[doc.id];
     const hashDiffers = !remoteEntry || remoteEntry.contentHash !== doc.contentHash;
     const encryptionDiffers = Boolean(remoteEntry?.encrypted) !== Boolean(doc.encrypted);
@@ -738,8 +755,18 @@ export async function runIncrementalWebDavSync(
         continue;
       }
       const localDoc = mergedDocsMap.get(id);
-      if (!localDoc || rEntry.updatedAt > localDoc.updatedAt) {
-        const hashMatchesLocal = localDoc && localDoc.contentHash === rEntry.contentHash;
+      const remoteHasBody =
+        !rEntry.deleted &&
+        (rEntry.byteSize > 0 ||
+          (Boolean(rEntry.contentHash) && rEntry.contentHash !== EMPTY_CONTENT_SHA256));
+      const localHasValidBody =
+        Boolean(localDoc) &&
+        !isDocBodyMissing(localDoc!) &&
+        (localDoc!.content.length > 0 || !remoteHasBody);
+      const needsBodyRepair = Boolean(localDoc) && !localHasValidBody && remoteHasBody;
+
+      if (!localDoc || rEntry.updatedAt > localDoc.updatedAt || needsBodyRepair) {
+        const hashMatchesLocal = localHasValidBody && localDoc!.contentHash === rEntry.contentHash;
         if (hashMatchesLocal || rEntry.deleted) {
           skippedByHashMatch++;
           mergedDocsMap.set(id, {
@@ -845,6 +872,35 @@ export async function runIncrementalWebDavSync(
               highlights: localDoc?.highlights || [],
               byteSize: getByteSize(plainContent),
               syncStatus: 'synced',
+            });
+          } else {
+            // Keep as remote-only stub if download failed transiently so localFs never writes a 0KB file
+            lazyQueuedCount++;
+            mergedDocsMap.set(id, {
+              id: rEntry.id,
+              title: rEntry.title,
+              folderId: rEntry.folderId,
+              order: rEntry.order,
+              content: '',
+              contentHash: rEntry.contentHash,
+              excerpt: rEntry.encrypted ? '' : rEntry.excerpt,
+              tags: rEntry.tags,
+              starred: rEntry.starred,
+              readProgress: rEntry.readProgress,
+              lastReadAt: rEntry.lastReadAt ?? localDoc?.lastReadAt ?? null,
+              lastMode: rEntry.lastMode ?? localDoc?.lastMode ?? 'read',
+              lastScrollTop: rEntry.lastScrollTop ?? localDoc?.lastScrollTop ?? 0,
+              lastCharOffset: rEntry.lastCharOffset ?? localDoc?.lastCharOffset ?? 0,
+              encrypted: Boolean(rEntry.encrypted),
+              format: rEntry.format ?? localDoc?.format ?? 'txt',
+              createdAt: rEntry.createdAt,
+              updatedAt: rEntry.updatedAt,
+              deleted: rEntry.deleted,
+              deletedAt: rEntry.deletedAt,
+              deletedByFolderId: rEntry.deletedByFolderId,
+              highlights: localDoc?.highlights || [],
+              byteSize: rEntry.byteSize,
+              syncStatus: 'remote-only',
             });
           }
         }
