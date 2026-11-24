@@ -270,6 +270,103 @@ function getScrollableTargetRect(targetEl: HTMLElement): DOMRect | null {
   return null;
 }
 
+const NAMED_HTML_ENTITIES: Record<string, string> = {
+  lt: '<',
+  gt: '>',
+  amp: '&',
+  quot: '"',
+  apos: "'",
+  nbsp: '\u00A0',
+  ensp: '\u2002',
+  emsp: '\u2003',
+  thinsp: '\u2009',
+  ndash: '–',
+  mdash: '—',
+  hellip: '…',
+  lsquo: '‘',
+  rsquo: '’',
+  ldquo: '“',
+  rdquo: '”',
+  middot: '·',
+  bull: '•',
+  lsaquo: '‹',
+  rsaquo: '›',
+  laquo: '«',
+  raquo: '»',
+  copy: '©',
+  reg: '®',
+  trade: '™',
+  times: '×',
+  divide: '÷',
+  plusmn: '±',
+};
+
+const RESIDUAL_ENTITY_RE =
+  /&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|[a-zA-Z][a-zA-Z0-9]{1,10});/g;
+
+function decodeResidualEntitiesInText(text: string): string {
+  if (!text.includes('&')) return text;
+  let current = text;
+  // Resolve double/triple-encoded entities (e.g. &amp;lt; -> &lt; -> <) safely in text nodes
+  for (let pass = 0; pass < 3; pass++) {
+    if (!current.includes('&')) break;
+    let next = current.replace(RESIDUAL_ENTITY_RE, (full, body: string) => {
+      if (body.startsWith('#x') || body.startsWith('#X')) {
+        const cp = parseInt(body.slice(2), 16);
+        if (
+          Number.isFinite(cp) &&
+          cp >= 0x20 &&
+          cp <= 0x10ffff &&
+          !(cp >= 0xd800 && cp <= 0xdfff)
+        ) {
+          return String.fromCodePoint(cp);
+        }
+        return full;
+      }
+      if (body.startsWith('#')) {
+        const cp = parseInt(body.slice(1), 10);
+        if (
+          Number.isFinite(cp) &&
+          cp >= 0x20 &&
+          cp <= 0x10ffff &&
+          !(cp >= 0xd800 && cp <= 0xdfff)
+        ) {
+          return String.fromCodePoint(cp);
+        }
+        return full;
+      }
+      const mapped = NAMED_HTML_ENTITIES[body.toLowerCase()];
+      return mapped !== undefined ? mapped : full;
+    });
+    // Also repair malformed semicolon-less &lt / &gt (e.g. &lt名&gt) when not followed by alphanumerics
+    next = next.replace(/&(lt|gt)(?=[^a-zA-Z0-9;]|$)/gi, (_, name: string) =>
+      name.toLowerCase() === 'lt' ? '<' : '>'
+    );
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+function decodeResidualEntitiesInBody(body: HTMLElement): void {
+  if (!(body.textContent || '').includes('&')) return;
+  const walker = body.ownerDocument.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const parentTag = (node.parentElement?.tagName || '').toUpperCase();
+    if (parentTag !== 'STYLE' && parentTag !== 'SCRIPT') {
+      const raw = node.nodeValue || '';
+      if (raw.includes('&')) {
+        const decoded = decodeResidualEntitiesInText(raw);
+        if (decoded !== raw) {
+          node.nodeValue = decoded;
+        }
+      }
+    }
+    node = walker.nextNode();
+  }
+}
+
 function sanitizeMdictEntryHtml(rawHtml: string): string {
   if (typeof DOMParser === 'undefined') return '';
   const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
@@ -334,6 +431,7 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
     }
   });
 
+  decodeResidualEntitiesInBody(doc.body);
   removeBackToTopElements(doc.body);
 
   return doc.body.innerHTML;
@@ -683,7 +781,23 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const [bottomClipPx, setBottomClipPx] = useState(0);
     const topClipPxRef = useRef(0);
     const bottomClipPxRef = useRef(0);
-    const [bottomSpacerPx, setBottomSpacerPx] = useState(0);
+    const bottomSpacerRef = useRef<HTMLDivElement>(null);
+    const bottomSpacerHeightRef = useRef(0);
+
+    const setSpacerHeightSync = useCallback((px: number) => {
+      const clamped = Math.max(0, Math.round(px));
+      if (bottomSpacerHeightRef.current === clamped) return;
+      bottomSpacerHeightRef.current = clamped;
+      if (bottomSpacerRef.current) {
+        bottomSpacerRef.current.style.height = `${clamped}px`;
+      }
+    }, []);
+
+    const getNaturalMaxScroll = useCallback((el: HTMLElement): number => {
+      const currentSpacer = bottomSpacerHeightRef.current;
+      const naturalScrollHeight = Math.max(el.clientHeight, el.scrollHeight - currentSpacer);
+      return Math.max(0, naturalScrollHeight - el.clientHeight);
+    }, []);
 
     // Uniform definition text size, slightly smaller than the current document font size
     const popupFontSize = Math.max(12, Math.round(fontSize - 2));
@@ -737,7 +851,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         bottomClipPxRef.current = 0;
         setTopClipPx((prev) => (prev === 0 ? prev : 0));
         setBottomClipPx((prev) => (prev === 0 ? prev : 0));
-        setBottomSpacerPx((prev) => (prev === 0 ? prev : 0));
+        setSpacerHeightSync(0);
         return;
       }
 
@@ -750,27 +864,33 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         bottomClipPxRef.current = 0;
         setTopClipPx((prev) => (prev === 0 ? prev : 0));
         setBottomClipPx((prev) => (prev === 0 ? prev : 0));
-        setBottomSpacerPx((prev) => (prev === 0 ? prev : 0));
+        setSpacerHeightSync(0);
         return;
       }
 
       const lastLineBottom = lines[lines.length - 1].bottom;
       const overflows = lastLineBottom > viewHeight - 1;
-      const desiredSpacer = overflows
-        ? Math.max(0, Math.round(viewHeight - Math.max(28, popupFontSize * 2.2)))
-        : 0;
-      setBottomSpacerPx((prev) => (Math.abs(prev - desiredSpacer) <= 2 ? prev : desiredSpacer));
-
-      const viewTop = el.scrollTop;
-      const rawViewBottom = viewTop + viewHeight;
 
       if (!overflows) {
+        setSpacerHeightSync(0);
         topClipPxRef.current = 0;
         bottomClipPxRef.current = 0;
         setTopClipPx((prev) => (prev === 0 ? prev : 0));
         setBottomClipPx((prev) => (prev === 0 ? prev : 0));
         return;
       }
+
+      // Never retain more bottom spacer than the current paged scroll position actually requires
+      if (bottomSpacerHeightRef.current > 0) {
+        const naturalMax = getNaturalMaxScroll(el);
+        const needed = Math.max(0, Math.ceil(el.scrollTop - naturalMax));
+        if (needed < bottomSpacerHeightRef.current) {
+          setSpacerHeightSync(needed);
+        }
+      }
+
+      const viewTop = el.scrollTop;
+      const rawViewBottom = viewTop + viewHeight;
 
       // Mask any partially clipped line at the top edge
       let nextTop = 0;
@@ -810,7 +930,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       bottomClipPxRef.current = nextBottom;
       setTopClipPx((prev) => (prev === nextTop ? prev : nextTop));
       setBottomClipPx((prev) => (prev === nextBottom ? prev : nextBottom));
-    }, [popupFontSize]);
+    }, [getNaturalMaxScroll, setSpacerHeightSync]);
 
     const scheduleEdgeClipUpdate = useCallback(() => {
       if (clipRafRef.current !== null) {
@@ -821,6 +941,18 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         updatePopupEdgeClips();
       });
     }, [updatePopupEdgeClips]);
+
+    const handleBodyScroll = useCallback(() => {
+      const el = bodyScrollRef.current;
+      if (el && bottomSpacerHeightRef.current > 0) {
+        const naturalMax = getNaturalMaxScroll(el);
+        const neededForCurrentPos = Math.max(0, Math.ceil(el.scrollTop - naturalMax));
+        if (neededForCurrentPos < bottomSpacerHeightRef.current) {
+          setSpacerHeightSync(neededForCurrentPos);
+        }
+      }
+      scheduleEdgeClipUpdate();
+    }, [getNaturalMaxScroll, setSpacerHeightSync, scheduleEdgeClipUpdate]);
 
     const runOverflowAutoExpandCheck = useCallback(() => {
       if (isExpandedRef.current || manualExpandToggledRef.current || loadingRef.current) {
@@ -877,6 +1009,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
 
         const cleaned = anchorId.replace(/^#+/, '').trim();
         if (!cleaned) {
+          setSpacerHeightSync(0);
           scrollEl.scrollTop = 0;
           updatePopupEdgeClips();
           return true;
@@ -888,6 +1021,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
 
         if (!targetEl) {
           if (cleaned.toLowerCase() === 'top' || cleaned.toLowerCase() === '_top') {
+            setSpacerHeightSync(0);
             scrollEl.scrollTop = 0;
             updatePopupEdgeClips();
             return true;
@@ -908,13 +1042,25 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         if (!targetRect) return false;
 
         const containerRect = scrollEl.getBoundingClientRect();
-        const maxScroll = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
-        const desiredTop = scrollEl.scrollTop + (targetRect.top - containerRect.top) - 6;
-        scrollEl.scrollTop = Math.max(0, Math.min(maxScroll, Math.floor(desiredTop)));
+        const naturalMax = getNaturalMaxScroll(scrollEl);
+        if (naturalMax <= 0) {
+          setSpacerHeightSync(0);
+          scrollEl.scrollTop = 0;
+          updatePopupEdgeClips();
+          return true;
+        }
+
+        const desiredTop = Math.max(
+          0,
+          Math.floor(scrollEl.scrollTop + (targetRect.top - containerRect.top) - 6)
+        );
+        const neededSpacer = Math.max(0, Math.ceil(desiredTop - naturalMax));
+        setSpacerHeightSync(neededSpacer);
+        scrollEl.scrollTop = desiredTop;
         updatePopupEdgeClips();
         return true;
       },
-      [updatePopupEdgeClips]
+      [getNaturalMaxScroll, setSpacerHeightSync, updatePopupEdgeClips]
     );
 
     const handleLookupWordWithAnchor = useCallback(
@@ -958,6 +1104,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         pendingAnchorRef.current = null;
         const raf = window.requestAnimationFrame(() => {
           if (!scrollToAnchor(pendingAnchor)) {
+            setSpacerHeightSync(0);
             if (bodyScrollRef.current) {
               bodyScrollRef.current.scrollTop = 0;
             }
@@ -966,11 +1113,12 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         });
         return () => window.cancelAnimationFrame(raf);
       }
+      setSpacerHeightSync(0);
       if (bodyScrollRef.current) {
         bodyScrollRef.current.scrollTop = 0;
       }
       scheduleEdgeClipUpdate();
-    }, [queryWord, result, scheduleEdgeClipUpdate, scrollToAnchor]);
+    }, [queryWord, result, scheduleEdgeClipUpdate, scrollToAnchor, setSpacerHeightSync]);
 
     useLayoutEffect(() => {
       updatePopupEdgeClips();
@@ -1021,9 +1169,12 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         targetScrollTop = Math.max(0, currentTop - Math.max(40, viewHeight - popupFontSize * 2));
       }
 
+      const naturalMax = getNaturalMaxScroll(el);
+      const neededSpacer = Math.max(0, Math.ceil(targetScrollTop - naturalMax));
       el.scrollTop = targetScrollTop;
+      setSpacerHeightSync(neededSpacer);
       updatePopupEdgeClips();
-    }, [popupFontSize, updatePopupEdgeClips]);
+    }, [getNaturalMaxScroll, popupFontSize, setSpacerHeightSync, updatePopupEdgeClips]);
 
     const performPopupPageDown = useCallback(() => {
       const el = bodyScrollRef.current;
@@ -1032,8 +1183,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
 
       const viewHeight = el.clientHeight;
       const currentTop = el.scrollTop;
-      const maxScroll = Math.max(0, el.scrollHeight - viewHeight);
-      if (viewHeight <= 0 || currentTop >= maxScroll - 1) return;
+      if (viewHeight <= 0) return;
 
       const effectiveBottom = currentTop + viewHeight - bottomClipPxRef.current;
       const lines = collectPopupVisualLines(el, contentEl, shadowRootRef.current);
@@ -1049,18 +1199,27 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       const prevComplete = firstIncompleteIdx > 0 ? lines[firstIncompleteIdx - 1] : null;
       const minSafeTop = prevComplete ? Math.ceil(prevComplete.bottom) : 0;
       const desiredTop = Math.floor(firstIncomplete.top) - 4;
-      let targetScrollTop = Math.min(maxScroll, Math.max(minSafeTop, desiredTop));
+      let targetScrollTop = Math.max(minSafeTop, desiredTop);
 
       if (targetScrollTop <= currentTop) {
-        targetScrollTop = Math.min(
-          maxScroll,
-          currentTop + Math.max(40, viewHeight - popupFontSize * 2)
-        );
+        targetScrollTop = currentTop + Math.max(40, viewHeight - popupFontSize * 2);
       }
+
+      const naturalMax = getNaturalMaxScroll(el);
+      const lastLine = lines[lines.length - 1];
+      const maxPagedTop = Math.max(naturalMax, Math.floor(lastLine.top) - 4);
+      targetScrollTop = Math.min(maxPagedTop, targetScrollTop);
+
+      if (targetScrollTop <= currentTop + 0.5) {
+        return;
+      }
+
+      const neededSpacer = Math.max(0, Math.ceil(targetScrollTop - naturalMax));
+      setSpacerHeightSync(neededSpacer);
 
       el.scrollTop = targetScrollTop;
       updatePopupEdgeClips();
-    }, [popupFontSize, updatePopupEdgeClips]);
+    }, [getNaturalMaxScroll, popupFontSize, setSpacerHeightSync, updatePopupEdgeClips]);
 
     useImperativeHandle(
       ref,
@@ -1256,8 +1415,8 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
               }}
               onPointerDown={handleBodyPointerDown}
               onClick={handleBodyClick}
-              onScroll={scheduleEdgeClipUpdate}
-              className="flex-1 min-h-0 overflow-y-auto px-3.5 py-2.5 bg-[var(--fei-popup-bg)] cursor-pointer"
+              onScroll={handleBodyScroll}
+              className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3.5 py-2.5 bg-[var(--fei-popup-bg)] cursor-pointer"
             >
               <div ref={bodyContentRef}>
                 {loading ? (
@@ -1290,9 +1449,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                 ) : null}
               </div>
 
-              {bottomSpacerPx > 0 && (
-                <div aria-hidden="true" style={{ height: `${bottomSpacerPx}px` }} />
-              )}
+              <div ref={bottomSpacerRef} aria-hidden="true" style={{ height: '0px' }} />
             </div>
 
             {topClipPx > 0 && (
