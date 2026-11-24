@@ -31,6 +31,7 @@ export type TreeSelection =
 export interface MinimalTreeViewHandle {
   getScrollTop: () => number;
   startRenameTarget: (target: TreeSelection) => 'ok' | 'inbox' | 'missing';
+  flushRename: () => void;
 }
 
 interface MinimalTreeViewProps {
@@ -45,7 +46,7 @@ interface MinimalTreeViewProps {
   onExpandFolder: (id: string) => void;
   onScrollTopChange: (scrollTop: number) => void;
   onSelectTarget: (target: TreeSelection) => void;
-  onOpenDoc: (docId: string) => void;
+  onOpenDoc?: (docId: string) => void;
   onCancelCut: () => void;
   onCreateFolder: (name: string) => void;
   onRenameFolder: (folderId: string, name: string) => void;
@@ -88,7 +89,6 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
       onExpandFolder,
       onScrollTopChange,
       onSelectTarget,
-      onOpenDoc,
       onCancelCut,
       onCreateFolder,
       onRenameFolder,
@@ -129,6 +129,11 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
   const [newFolderName, setNewFolderName] = useState('');
   const [editingItem, setEditingItem] = useState<TreeSelection | null>(null);
   const [editingName, setEditingName] = useState('');
+  const editingItemRef = useRef<TreeSelection | null>(null);
+  editingItemRef.current = editingItem;
+  const editingNameRef = useRef('');
+  editingNameRef.current = editingName;
+  const lastSelectedAtRef = useRef<{ key: string; time: number } | null>(null);
   const editingActiveRef = useRef(false);
   editingActiveRef.current = Boolean(editingItem || addingFolder);
 
@@ -173,6 +178,11 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
       setEditingItem(target);
       setEditingName(doc.title || '');
       return 'ok';
+    },
+    flushRename() {
+      const current = editingItemRef.current;
+      if (!current) return;
+      commitRename(current);
     },
   }));
 
@@ -397,7 +407,10 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
   };
 
   const commitRename = (target: TreeSelection) => {
-    const trimmed = editingName.trim();
+    const active = editingItemRef.current;
+    if (!active || active.kind !== target.kind || active.id !== target.id) return;
+    editingItemRef.current = null;
+    const trimmed = editingNameRef.current.trim();
     if (trimmed) {
       if (target.kind === 'folder') {
         onRenameFolder(target.id, trimmed);
@@ -638,6 +651,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
             onKeyDown={(e) => {
               if (e.key === 'Enter') commitRename({ kind: 'doc', id: doc.id });
               if (e.key === 'Escape') {
+                editingItemRef.current = null;
                 setEditingItem(null);
                 setEditingName('');
               }
@@ -653,10 +667,17 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                 onSelectTarget({ kind: 'doc', id: doc.id });
                 return;
               }
-              // First click selects the document; second click on an already-selected document opens it
+              const key = `doc:${doc.id}`;
+              // Clicking an already-selected document enters inline title editing (with rapid-tap guard)
               if (isTarget) {
-                onOpenDoc(doc.id);
+                const last = lastSelectedAtRef.current;
+                if (last && last.key === key && performance.now() - last.time < 300) {
+                  return;
+                }
+                setEditingItem({ kind: 'doc', id: doc.id });
+                setEditingName(doc.title || '');
               } else {
+                lastSelectedAtRef.current = { key, time: performance.now() };
                 onSelectTarget({ kind: 'doc', id: doc.id });
               }
             }}
@@ -774,7 +795,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                     toggleExpand(INBOX_FOLDER_ID);
                   }}
                   aria-label={isInboxExpanded ? '收起 inbox' : '展开 inbox'}
-                  className="w-6 h-8 flex items-center justify-center text-[var(--fei-text-muted)] shrink-0"
+                  className="w-9 h-9 -ml-1 flex items-center justify-center text-[var(--fei-text-muted)] shrink-0"
                 >
                   {isInboxExpanded ? (
                     <ChevronDown className="w-4 h-4" />
@@ -862,7 +883,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                     toggleExpand(folder.id);
                   }}
                   aria-label={isExpanded ? '收起目录' : '展开目录'}
-                  className="w-6 h-8 flex items-center justify-center text-[var(--fei-text-muted)] shrink-0"
+                  className="w-9 h-9 -ml-1 flex items-center justify-center text-[var(--fei-text-muted)] shrink-0"
                 >
                   {isExpanded ? (
                     <ChevronDown className="w-4 h-4" />
@@ -880,6 +901,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') commitRename({ kind: 'folder', id: folder.id });
                       if (e.key === 'Escape') {
+                        editingItemRef.current = null;
                         setEditingItem(null);
                         setEditingName('');
                       }
@@ -891,7 +913,22 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                     type="button"
                     onClick={() => {
                       if (suppressClickRef.current) return;
-                      onSelectTarget({ kind: 'folder', id: folder.id });
+                      if (pickCutMode || cutItem) {
+                        onSelectTarget({ kind: 'folder', id: folder.id });
+                        return;
+                      }
+                      const key = `folder:${folder.id}`;
+                      if (isTarget) {
+                        const last = lastSelectedAtRef.current;
+                        if (last && last.key === key && performance.now() - last.time < 300) {
+                          return;
+                        }
+                        setEditingItem({ kind: 'folder', id: folder.id });
+                        setEditingName(folder.name);
+                      } else {
+                        lastSelectedAtRef.current = { key, time: performance.now() };
+                        onSelectTarget({ kind: 'folder', id: folder.id });
+                      }
                     }}
                     className="flex-1 min-w-0 text-left text-[14.5px] font-medium truncate py-2 text-[var(--fei-text-primary)]"
                   >

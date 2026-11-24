@@ -282,12 +282,12 @@ export function saveActiveMdictId(dictId: string | null): void {
   }
 }
 
-export type TreeToolbarIconId = 'edit' | 'import' | 'cut' | 'encrypt' | 'settings';
+export type TreeToolbarIconId = 'read' | 'import' | 'cut' | 'encrypt' | 'settings';
 export type DocToolbarIconId = 'back' | 'font' | 'note' | 'whistle';
 
 export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
+  'read',
   'import',
-  'edit',
   'cut',
   'encrypt',
   'settings',
@@ -320,11 +320,25 @@ function normalizeToolbarOrder<T extends string>(raw: unknown, defaults: readonl
   return result;
 }
 
+function migrateTreeToolbarRaw(parsed: unknown): TreeToolbarIconId[] {
+  if (!Array.isArray(parsed)) return [...DEFAULT_TREE_TOOLBAR_ORDER];
+  const filtered = parsed.filter((item): item is string => typeof item === 'string' && item !== 'edit');
+  if (!filtered.includes('read')) {
+    const importIdx = filtered.indexOf('import');
+    if (importIdx !== -1) {
+      filtered.splice(importIdx, 0, 'read');
+    } else {
+      filtered.unshift('read');
+    }
+  }
+  return normalizeToolbarOrder(filtered, DEFAULT_TREE_TOOLBAR_ORDER);
+}
+
 export function loadTreeToolbarOrder(): TreeToolbarIconId[] {
   const rawV2 = localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER);
   if (rawV2) {
     const parsed = safeParse<unknown>(rawV2, null);
-    const normalized = normalizeToolbarOrder(parsed, DEFAULT_TREE_TOOLBAR_ORDER);
+    const normalized = migrateTreeToolbarRaw(parsed);
     const needsSave =
       !Array.isArray(parsed) ||
       parsed.length !== normalized.length ||
@@ -337,13 +351,7 @@ export function loadTreeToolbarOrder(): TreeToolbarIconId[] {
   const rawLegacy = localStorage.getItem(KEYS.TREE_TOOLBAR_ORDER_LEGACY);
   if (rawLegacy) {
     const parsed = safeParse<unknown>(rawLegacy, null);
-    const normalized = normalizeToolbarOrder(parsed, DEFAULT_TREE_TOOLBAR_ORDER);
-    const editIdx = normalized.indexOf('edit');
-    const importIdx = normalized.indexOf('import');
-    if (editIdx !== -1 && importIdx !== -1 && editIdx + 1 === importIdx) {
-      normalized[editIdx] = 'import';
-      normalized[importIdx] = 'edit';
-    }
+    const normalized = migrateTreeToolbarRaw(parsed);
     saveTreeToolbarOrder(normalized);
     return normalized;
   }

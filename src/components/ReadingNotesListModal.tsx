@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Copy, Download, Trash2, X } from 'lucide-react';
+import { Download, Trash2, X } from 'lucide-react';
 import { ReadingNote } from '../types';
 import { formatNotesAsPureMarkdown, getActiveNotes } from '../utils/notes';
 
@@ -23,28 +23,6 @@ export const ReadingNotesListModal: React.FC<ReadingNotesListModalProps> = ({
   onClose,
 }) => {
   const activeNotes = useMemo(() => getActiveNotes(notes), [notes]);
-
-  const handleCopyAll = async () => {
-    const md = formatNotesAsPureMarkdown(docTitle, activeNotes);
-    if (!md) return;
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(md);
-      } else {
-        const ta = document.createElement('textarea');
-        ta.value = md;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-      }
-      onCopySuccess('已复制全部笔记');
-    } catch {
-      onCopySuccess('复制失败，请重试');
-    }
-  };
 
   const handleDownloadMarkdown = () => {
     const md = formatNotesAsPureMarkdown(docTitle, activeNotes);
@@ -96,28 +74,16 @@ export const ReadingNotesListModal: React.FC<ReadingNotesListModalProps> = ({
 
           <div className="flex items-center gap-1 shrink-0">
             {activeNotes.length > 0 && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => void handleCopyAll()}
-                  title="复制全部笔记（仅含个人笔记正文）"
-                  aria-label="复制全部笔记"
-                  className="h-7 px-2 inline-flex items-center gap-1 rounded-lg text-[12px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors cursor-pointer"
-                >
-                  <Copy className="w-3.5 h-3.5" strokeWidth={1.8} />
-                  <span>复制</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDownloadMarkdown}
-                  title="导出为 Markdown 文件（仅含个人笔记正文）"
-                  aria-label="导出为 Markdown"
-                  className="h-7 px-2 inline-flex items-center gap-1 rounded-lg text-[12px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors cursor-pointer"
-                >
-                  <Download className="w-3.5 h-3.5" strokeWidth={1.8} />
-                  <span>导出</span>
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={handleDownloadMarkdown}
+                title="导出为 Markdown 文件（仅含个人笔记正文）"
+                aria-label="导出为 Markdown"
+                className="h-7 px-2 inline-flex items-center gap-1 rounded-lg text-[12px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" strokeWidth={1.8} />
+                <span>导出</span>
+              </button>
             )}
 
             <button

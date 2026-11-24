@@ -1,13 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ALargeSmall,
-  ArrowLeft,
+  BookOpen,
   Download,
+  FolderTree,
   Lock,
   LockOpen,
   Minus,
   Music2,
-  Pencil,
   Plus,
   Scissors,
   Settings,
@@ -956,17 +956,16 @@ export default function App() {
     markAutoCatalogDirty();
   };
 
-  const handleToolbarEditClick = () => {
-    if (!activeTarget) {
-      showToast('请先点选要重命名的目录或文档');
-      return;
-    }
-    const res = treeViewRef.current?.startRenameTarget(activeTarget);
-    if (res === 'inbox') {
-      showToast('inbox 目录不可重命名');
-    } else if (res === 'missing') {
-      showToast('请先点选要重命名的目录或文档');
-    }
+  const canReadSelectedDoc = useMemo(() => {
+    if (activeTarget?.kind !== 'doc') return false;
+    return docs.some((d) => !d.deleted && d.id === activeTarget.id);
+  }, [activeTarget, docs]);
+
+  const handleToolbarReadClick = () => {
+    if (!canReadSelectedDoc || activeTarget?.kind !== 'doc') return;
+    // Commit and exit inline title edit mode if active before entering reading mode
+    treeViewRef.current?.flushRename();
+    handleOpenDoc(activeTarget.id);
   };
 
   // Trash: Move Doc or Folder (with all docs inside it) to 30-day Trash
@@ -1966,10 +1965,18 @@ export default function App() {
     };
     const screenNoteIds = ctx?.screenNoteIds ?? [];
     const defaultAnchorHasNote = ctx?.defaultAnchorHasNote ?? false;
+    const initialNoteId = screenNoteIds[0] ?? null;
+
+    if (initialNoteId) {
+      const targetNote = getActiveNotes(selectedDoc.notes).find((n) => n.id === initialNoteId);
+      if (targetNote) {
+        docViewRef.current?.jumpToCharOffset(targetNote.charOffset);
+      }
+    }
 
     setNotePopoverState({
       screenNoteIds,
-      initialNoteId: screenNoteIds[0] ?? null,
+      initialNoteId,
       defaultAnchor,
       canCreateAtDefaultAnchor: !defaultAnchorHasNote,
     });
@@ -1989,6 +1996,11 @@ export default function App() {
     const rawVisible = ctx?.screenNoteIds ?? [];
     const screenNoteIds = rawVisible.includes(noteId) ? rawVisible : [noteId, ...rawVisible];
     const defaultAnchorHasNote = ctx?.defaultAnchorHasNote ?? false;
+
+    const targetNote = getActiveNotes(selectedDoc.notes).find((n) => n.id === noteId);
+    if (targetNote) {
+      docViewRef.current?.jumpToCharOffset(targetNote.charOffset);
+    }
 
     setNotePopoverState({
       screenNoteIds,
@@ -3865,22 +3877,33 @@ export default function App() {
                   toolbarBtnRefs.current.set(key, el);
                 };
 
-                if (iconId === 'edit') {
+                if (iconId === 'read') {
                   return (
                     <button
                       key={iconId}
                       ref={bindRef}
                       type="button"
-                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'edit', 'tree')}
+                      aria-disabled={!canReadSelectedDoc}
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'read', 'tree')}
                       onClick={() => {
                         if (suppressToolbarClickRef.current) return;
-                        handleToolbarEditClick();
+                        handleToolbarReadClick();
                       }}
-                      aria-label="重命名选中的目录或文档"
-                      title="重命名选中的目录或文档（可拖动调整图标位置）"
-                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                      aria-label={canReadSelectedDoc ? '阅读当前选中文档' : '请先选中文档再进入阅读'}
+                      title={
+                        canReadSelectedDoc
+                          ? '打开当前选中文档进入阅读（可拖动调整图标位置）'
+                          : '请先选中一个文档（可拖动调整图标位置）'
+                      }
+                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
+                        isDraggingThis
+                          ? dragCls
+                          : canReadSelectedDoc
+                            ? 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
+                            : 'text-[var(--fei-text-muted)] opacity-35 cursor-default'
+                      }`}
                     >
-                      <Pencil className="w-[21px] h-[21px]" strokeWidth={1.8} />
+                      <BookOpen className="w-[21px] h-[21px]" strokeWidth={1.8} />
                     </button>
                   );
                 }
@@ -4057,11 +4080,11 @@ export default function App() {
                         if (suppressToolbarClickRef.current) return;
                         handleExitDocToTree();
                       }}
-                      aria-label="返回目录"
-                      title="返回目录（可拖动调整图标位置）"
+                      aria-label="进入目录模式"
+                      title="目录（可拖动调整图标位置）"
                       className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
                     >
-                      <ArrowLeft className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                      <FolderTree className="w-[21px] h-[21px]" strokeWidth={1.8} />
                     </button>
                   );
                 }
@@ -4129,7 +4152,7 @@ export default function App() {
                           ? `当前页有 ${visibleNoteIds.length} 条笔记（点击查看/编辑，长按或右键打开全部笔记列表）`
                           : '读书笔记（点击记录，长按或右键查看全部笔记，可拖动调整位置）'
                       }
-                      className={`relative w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
+                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
                         isDraggingThis
                           ? dragCls
                           : noteActive
@@ -4141,20 +4164,6 @@ export default function App() {
                         className="w-[20px] h-[20px]"
                         strokeWidth={hasVisibleNotes ? 2.1 : 1.8}
                       />
-                      {hasVisibleNotes &&
-                        (visibleNoteIds.length > 1 ? (
-                          <span
-                            aria-hidden="true"
-                            className="absolute top-1.5 right-1.5 min-w-[13px] h-[13px] px-0.5 rounded-full bg-[var(--fei-text-primary)] text-[var(--fei-bg)] text-[9px] font-semibold tabular-nums leading-none inline-flex items-center justify-center"
-                          >
-                            {visibleNoteIds.length > 9 ? '9+' : visibleNoteIds.length}
-                          </span>
-                        ) : (
-                          <span
-                            aria-hidden="true"
-                            className="absolute top-2 right-2 w-[6px] h-[6px] rounded-full bg-[var(--fei-text-primary)]"
-                          />
-                        ))}
                     </button>
                   );
                 }
@@ -4470,15 +4479,14 @@ export default function App() {
       {/* Reading Note Input Popover in Browse Mode */}
       {mainView === 'doc' && selectedDoc && notePopoverState && (
         <ReadingNotePopover
-          screenNotes={getActiveNotes(selectedDoc.notes).filter((n) =>
-            notePopoverState.screenNoteIds.includes(n.id)
-          )}
+          allNotes={getActiveNotes(selectedDoc.notes)}
           initialNoteId={notePopoverState.initialNoteId}
           defaultAnchor={notePopoverState.defaultAnchor}
-          canCreateAtDefaultAnchor={notePopoverState.canCreateAtDefaultAnchor}
           fontSize={fontSize}
+          onSwitchNote={(charOffset) => {
+            docViewRef.current?.jumpToCharOffset(charOffset);
+          }}
           onSaveNote={handleSaveReadingNote}
-          onDeleteNote={handleDeleteReadingNote}
           onClose={() => setNotePopoverState(null)}
         />
       )}
