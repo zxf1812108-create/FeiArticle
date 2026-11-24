@@ -46,6 +46,28 @@ function joinWebDavPath(baseUrl: string, relativePath: string): string {
   return `${cleanBase}${cleanRel}`;
 }
 
+function decodeTextBufferSmart(buf: Buffer): string {
+  if (buf.length === 0) return '';
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return new TextDecoder('utf-8').decode(buf.subarray(3));
+  }
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    return new TextDecoder('utf-16le').decode(buf.subarray(2));
+  }
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    return new TextDecoder('utf-16be').decode(buf.subarray(2));
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf).replace(/^\uFEFF/, '');
+  } catch {
+    try {
+      return new TextDecoder('gb18030').decode(buf);
+    } catch {
+      return new TextDecoder('utf-8').decode(buf);
+    }
+  }
+}
+
 interface WebDavProxyPayload {
   baseUrl: string;
   username: string;
@@ -124,8 +146,13 @@ app.post('/api/webdav/proxy', async (req, res) => {
 
     const etag = upstream.headers.get('etag') || undefined;
     const lastModified = upstream.headers.get('last-modified') || undefined;
-    const textBody = upstream.status === 304 || payload.method === 'HEAD' ? '' : await upstream.text();
-    const bytesTransferred = Buffer.byteLength(textBody, 'utf-8');
+    let textBody = '';
+    let bytesTransferred = 0;
+    if (upstream.status !== 304 && payload.method !== 'HEAD') {
+      const rawBuf = Buffer.from(await upstream.arrayBuffer());
+      bytesTransferred = rawBuf.length;
+      textBody = decodeTextBufferSmart(rawBuf);
+    }
 
     res.status(200).json({
       ok: upstream.ok || upstream.status === 304 || upstream.status === 207 || upstream.status === 201 || upstream.status === 204,

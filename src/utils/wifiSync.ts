@@ -13,6 +13,7 @@ export interface WifiPeer {
   name: string;
   ip: string;
   port: number;
+  stateHash?: string;
 }
 
 export interface WifiServerInfo {
@@ -86,8 +87,10 @@ interface WifiSyncNativePlugin {
     password: string;
     deviceName?: string;
     port?: number;
+    stateHash?: string;
   }): Promise<WifiServerInfo>;
   stopServer(): Promise<{ running: boolean }>;
+  updateStateHash(options: { stateHash: string }): Promise<{ ok: boolean }>;
   resolveServerRequest(options: {
     reqId: string;
     ok: boolean;
@@ -124,12 +127,67 @@ interface WifiSyncNativePlugin {
     eventName: 'wifiImageReceived',
     listenerFunc: (data: { relPath: string }) => void
   ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'wifiIncomingSync',
+    listenerFunc: (data: { status: 'start' | 'end' }) => void
+  ): Promise<PluginListenerHandle>;
 }
 
 const WifiSyncNative = registerPlugin<WifiSyncNativePlugin>('WifiSyncNative');
 
 export function isWifiSyncNativeAvailable(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('WifiSyncNative');
+}
+
+export async function updateWifiSyncStateHash(stateHash: string): Promise<void> {
+  if (!isWifiSyncNativeAvailable()) return;
+  await WifiSyncNative.updateStateHash({ stateHash }).catch(() => {});
+}
+
+/**
+ * Deterministic compact fingerprint covering folders, docs metadata/progress/body availability,
+ * and local images/ sizes. Converges identically on both peers immediately after sync so
+ * auto-discovery can detect real divergence with zero network traffic when already in sync.
+ */
+export async function computeWifiSyncFingerprint(
+  folders: FolderNode[],
+  docs: ArticleDoc[],
+  storageDir: StorageDirectoryConfig
+): Promise<string> {
+  const now = Date.now();
+  const folderParts = folders
+    .filter((f) => !isTrashExpired(f, now))
+    .map(
+      (f) =>
+        `${f.id}|${f.name}|${f.order}|${f.updatedAt}|${f.deleted ? 1 : 0}|${
+          f.deleted ? f.deletedAt || 0 : 0
+        }`
+    )
+    .sort();
+
+  const docParts = docs
+    .filter((d) => !isTrashExpired(d, now))
+    .map((d) => {
+      const hasBody = !d.deleted && !isDocBodyMissing(d) ? 1 : 0;
+      const progressRounded = Math.round((d.readProgress || 0) * 1000);
+      const charOffset = Math.max(0, Math.round(d.lastCharOffset || 0));
+      const lastRead = d.lastReadAt || 0;
+      return `${d.id}|${d.title}|${d.folderId || ''}|${d.order}|${d.contentHash || ''}|${hasBody}|${progressRounded}|${charOffset}|${lastRead}|${
+        d.encrypted ? 1 : 0
+      }|${d.format || 'txt'}|${d.updatedAt}|${d.deleted ? 1 : 0}|${
+        d.deleted ? d.deletedAt || 0 : 0
+      }`;
+    })
+    .sort();
+
+  const localImages = await listLocalImageFiles(storageDir).catch(() => [] as LocalImageFileMeta[]);
+  const imageParts = localImages
+    .map((img) => `${img.relPath.toLowerCase()}|${img.size}`)
+    .sort();
+
+  const raw = `F:${folderParts.join(';')}\nD:${docParts.join(';')}\nI:${imageParts.join(';')}`;
+  const fullHash = await sha256Hex(raw);
+  return fullHash.slice(0, 16);
 }
 
 export function buildWifiCatalogSnapshot(
@@ -373,11 +431,14 @@ export interface WifiSyncHostCallbacks {
   applyReceivedDocBody: (payload: WifiDocBodyPayload) => Promise<void>;
   onPeersChange: (peers: WifiPeer[]) => void;
   onImageReceived?: (relPath: string) => void;
+  onIncomingSync?: (status: 'start' | 'end') => void;
+  onIncomingActivity?: () => void;
 }
 
 export async function startWifiSyncHost(
   password: string,
-  callbacks: WifiSyncHostCallbacks
+  callbacks: WifiSyncHostCallbacks,
+  initialStateHash?: string
 ): Promise<{ info: WifiServerInfo; stop: () => Promise<void> }> {
   if (!password) {
     throw new Error('请先在设置中配置加密密码，再开启 Wi-Fi 同步');
@@ -399,13 +460,22 @@ export async function startWifiSyncHost(
   const imgHandle = await WifiSyncNative.addListener('wifiImageReceived', (data) => {
     if (!disposed && data?.relPath) {
       invalidateLocalImageCache(data.relPath);
+      callbacks.onIncomingActivity?.();
       callbacks.onImageReceived?.(data.relPath);
     }
   });
   handles.push(imgHandle);
 
+  const incomingHandle = await WifiSyncNative.addListener('wifiIncomingSync', (data) => {
+    if (!disposed && (data?.status === 'start' || data?.status === 'end')) {
+      callbacks.onIncomingSync?.(data.status);
+    }
+  });
+  handles.push(incomingHandle);
+
   const reqHandle = await WifiSyncNative.addListener('wifiServerRequest', async (evt) => {
     if (disposed) return;
+    callbacks.onIncomingActivity?.();
     try {
       const payload = JSON.parse(evt.payloadJson || '{}');
       if (evt.action === 'mergeCatalog') {
@@ -495,6 +565,7 @@ export async function startWifiSyncHost(
   const info = await WifiSyncNative.startServer({
     password,
     port: DEFAULT_WIFI_SYNC_PORT,
+    stateHash: initialStateHash || '',
   });
 
   const stop = async () => {

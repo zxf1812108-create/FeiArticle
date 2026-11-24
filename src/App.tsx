@@ -126,7 +126,14 @@ import {
 } from './utils/webdavSync';
 import {
   applyWifiReceivedDocToDocs,
+  computeWifiSyncFingerprint,
+  isWifiSyncNativeAvailable,
+  runWifiBidirectionalSync,
+  startWifiSyncHost,
+  updateWifiSyncStateHash,
   WifiDocBodyPayload,
+  WifiPeer,
+  WifiServerInfo,
 } from './utils/wifiSync';
 import {
   LanDirectAction,
@@ -252,6 +259,35 @@ export default function App() {
   const [lanRunning, setLanRunning] = useState(false);
   const [lanUrl, setLanUrl] = useState('');
   const [lanLoading, setLanLoading] = useState(false);
+  const [wifiServerInfo, setWifiServerInfo] = useState<WifiServerInfo | null>(null);
+  const [wifiHostStarting, setWifiHostStarting] = useState(false);
+  const [wifiHostError, setWifiHostError] = useState<string | null>(null);
+  const [wifiPeers, setWifiPeers] = useState<WifiPeer[]>([]);
+  const wifiPeersRef = useRef<WifiPeer[]>([]);
+  const [wifiLocalStateHash, setWifiLocalStateHash] = useState('');
+  const wifiLocalStateHashRef = useRef('');
+  const [wifiImageVersion, setWifiImageVersion] = useState(0);
+  const [wifiQuickBubble, setWifiQuickBubble] = useState<{
+    status: 'syncing' | 'done' | 'error';
+    text?: string;
+    action?: 'settings' | 'wifiModal';
+  } | null>(null);
+  const [wifiBubbleDots, setWifiBubbleDots] = useState(1);
+  const wifiAutoSyncingRef = useRef(false);
+  const wifiBubbleTimerRef = useRef<number | null>(null);
+  const wifiIncomingSyncTimerRef = useRef<number | null>(null);
+  const wifiLastSyncedPairRef = useRef<
+    Map<
+      string,
+      {
+        localHash: string;
+        peerHash: string;
+        at: number;
+        isError?: boolean;
+        isAuthError?: boolean;
+      }
+    >
+  >(new Map());
   const [toast, setToast] = useState<{ msg: string } | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const [windowDragging, setWindowDragging] = useState(false);
@@ -2238,6 +2274,387 @@ export default function App() {
     setDocs((prev) => applyWifiReceivedDocToDocs(prev, payload));
   };
 
+  const wifiCallbacksRef = useRef({
+    getLocalState: getWifiLocalState,
+    applyMergedCatalog: applyWifiMergedCatalog,
+    applyReceivedDocBody: applyWifiReceivedDocBody,
+  });
+  wifiCallbacksRef.current = {
+    getLocalState: getWifiLocalState,
+    applyMergedCatalog: applyWifiMergedCatalog,
+    applyReceivedDocBody: applyWifiReceivedDocBody,
+  };
+
+  const scheduleHideWifiBubble = (delayMs: number) => {
+    if (wifiBubbleTimerRef.current !== null) {
+      window.clearTimeout(wifiBubbleTimerRef.current);
+    }
+    wifiBubbleTimerRef.current = window.setTimeout(() => {
+      wifiBubbleTimerRef.current = null;
+      setWifiQuickBubble(null);
+    }, delayMs);
+  };
+
+  const clearWifiIncomingSafetyTimer = () => {
+    if (wifiIncomingSyncTimerRef.current !== null) {
+      window.clearTimeout(wifiIncomingSyncTimerRef.current);
+      wifiIncomingSyncTimerRef.current = null;
+    }
+  };
+
+  const armWifiIncomingSafetyTimer = () => {
+    clearWifiIncomingSafetyTimer();
+    wifiIncomingSyncTimerRef.current = window.setTimeout(() => {
+      wifiIncomingSyncTimerRef.current = null;
+      if (!wifiAutoSyncingRef.current) {
+        setWifiQuickBubble((prev) => (prev?.status === 'syncing' ? null : prev));
+      }
+    }, 15_000);
+  };
+
+  // Plan A: Only keep Wi-Fi P2P host & UDP discovery active while in Directory Mode (or Wi-Fi modal)
+  // and app is in foreground. Automatically shuts down in Reading Mode or background for 0% E-Ink reading drain.
+  const wifiHostShouldRun = mainView === 'tree' || showWifiSyncModal;
+
+  useEffect(() => {
+    wifiLastSyncedPairRef.current.clear();
+  }, [webDavConfig.encryptionPassword]);
+
+  // Keep local sync fingerprint updated while Wi-Fi standby is active, and push changes to native UDP beacon
+  useEffect(() => {
+    const password = (webDavConfig.encryptionPassword || '').trim();
+    if (!password || !isWifiSyncNativeAvailable() || !wifiHostShouldRun) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void computeWifiSyncFingerprint(
+        foldersRef.current,
+        docsRef.current,
+        storageDirRef.current
+      ).then((nextHash) => {
+        if (cancelled) return;
+        if (nextHash !== wifiLocalStateHashRef.current) {
+          wifiLocalStateHashRef.current = nextHash;
+          setWifiLocalStateHash(nextHash);
+          void updateWifiSyncStateHash(nextHash);
+        }
+      });
+    }, 220);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    wifiHostShouldRun,
+    webDavConfig.encryptionPassword,
+    folders,
+    docs,
+    storageDir,
+    wifiImageVersion,
+  ]);
+
+  useEffect(() => {
+    const password = (webDavConfig.encryptionPassword || '').trim();
+    if (!password || !isWifiSyncNativeAvailable() || !wifiHostShouldRun) {
+      setWifiServerInfo(null);
+      setWifiHostStarting(false);
+      setWifiHostError(null);
+      wifiPeersRef.current = [];
+      setWifiPeers([]);
+      clearWifiIncomingSafetyTimer();
+      if (!wifiHostShouldRun) {
+        setWifiQuickBubble(null);
+      }
+      return;
+    }
+
+    let disposed = false;
+    let lifecycleId = 0;
+    let activeStop: (() => Promise<void>) | null = null;
+
+    const stopHost = async () => {
+      lifecycleId++;
+      const stopFn = activeStop;
+      activeStop = null;
+      setWifiHostStarting(false);
+      setWifiServerInfo(null);
+      wifiPeersRef.current = [];
+      setWifiPeers([]);
+      clearWifiIncomingSafetyTimer();
+      if (stopFn) {
+        await stopFn().catch(() => {});
+      }
+    };
+
+    const isPageHidden = () => document.visibilityState === 'hidden';
+
+    const startHost = async () => {
+      if (disposed || isPageHidden()) return;
+      if (activeStop) return;
+      const runId = ++lifecycleId;
+      setWifiHostStarting(true);
+      setWifiHostError(null);
+      try {
+        let initialHash = wifiLocalStateHashRef.current;
+        if (!initialHash) {
+          initialHash = await computeWifiSyncFingerprint(
+            foldersRef.current,
+            docsRef.current,
+            storageDirRef.current
+          );
+          if (disposed || runId !== lifecycleId || isPageHidden()) return;
+          wifiLocalStateHashRef.current = initialHash;
+          setWifiLocalStateHash(initialHash);
+        }
+
+        const res = await startWifiSyncHost(
+          password,
+          {
+            getLocalState: () => wifiCallbacksRef.current.getLocalState(),
+            applyMergedCatalog: (...args) => wifiCallbacksRef.current.applyMergedCatalog(...args),
+            applyReceivedDocBody: (payload) =>
+              wifiCallbacksRef.current.applyReceivedDocBody(payload),
+            onPeersChange: (nextPeers) => {
+              if (disposed || runId !== lifecycleId) return;
+              const prev = wifiPeersRef.current;
+              const same =
+                prev.length === nextPeers.length &&
+                prev.every(
+                  (p, i) =>
+                    p.id === nextPeers[i].id &&
+                    p.name === nextPeers[i].name &&
+                    p.ip === nextPeers[i].ip &&
+                    p.port === nextPeers[i].port &&
+                    (p.stateHash || '') === (nextPeers[i].stateHash || '')
+                );
+              if (!same) {
+                wifiPeersRef.current = nextPeers;
+                setWifiPeers(nextPeers);
+              }
+            },
+            onImageReceived: () => {
+              if (!disposed) {
+                setWifiImageVersion((v) => v + 1);
+              }
+            },
+            onIncomingActivity: () => {
+              if (!disposed && mainViewRef.current === 'tree') {
+                armWifiIncomingSafetyTimer();
+              }
+            },
+            onIncomingSync: (status) => {
+              if (disposed || runId !== lifecycleId) return;
+              if (status === 'start') {
+                if (mainViewRef.current === 'tree' && !wifiAutoSyncingRef.current) {
+                  if (wifiBubbleTimerRef.current !== null) {
+                    window.clearTimeout(wifiBubbleTimerRef.current);
+                    wifiBubbleTimerRef.current = null;
+                  }
+                  setWifiQuickBubble({ status: 'syncing' });
+                  armWifiIncomingSafetyTimer();
+                }
+              } else if (status === 'end') {
+                clearWifiIncomingSafetyTimer();
+                setWifiImageVersion((v) => v + 1);
+                if (mainViewRef.current === 'tree' && !wifiAutoSyncingRef.current) {
+                  setWifiQuickBubble({ status: 'done', text: '同步完成' });
+                  scheduleHideWifiBubble(1800);
+                }
+              }
+            },
+          },
+          initialHash
+        );
+        if (disposed || runId !== lifecycleId || isPageHidden()) {
+          await res.stop().catch(() => {});
+          return;
+        }
+        activeStop = res.stop;
+        setWifiServerInfo(res.info);
+      } catch (err) {
+        if (!disposed && runId === lifecycleId) {
+          setWifiHostError(err instanceof Error ? err.message : 'Wi-Fi 同步服务启动失败');
+        }
+      } finally {
+        if (!disposed && runId === lifecycleId) {
+          setWifiHostStarting(false);
+        }
+      }
+    };
+
+    if (document.visibilityState === 'visible') {
+      void startHost();
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        void stopHost();
+      } else if (document.visibilityState === 'visible') {
+        void startHost();
+      }
+    };
+
+    const handlePageHide = () => {
+      void stopHost();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageHide);
+      void stopHost();
+    };
+  }, [webDavConfig.encryptionPassword, wifiHostShouldRun]);
+
+  // Plan A Auto-Sync: When both devices are in Directory Mode on the same Wi-Fi and their data
+  // fingerprints differ, the deterministic leader (smaller instanceId) automatically initiates bidirectional sync.
+  useEffect(() => {
+    const password = (webDavConfig.encryptionPassword || '').trim();
+    if (
+      mainView !== 'tree' ||
+      showWifiSyncModal ||
+      !password ||
+      !wifiServerInfo?.running ||
+      !wifiLocalStateHash ||
+      wifiAutoSyncingRef.current
+    ) {
+      return;
+    }
+
+    const myId = wifiServerInfo.instanceId;
+    const now = Date.now();
+    const candidate = wifiPeers.find((peer) => {
+      const peerHash = (peer.stateHash || '').trim();
+      if (!peerHash || peerHash === wifiLocalStateHash) return false;
+      // Deterministic leader election prevents both peers from initiating simultaneously
+      if (myId >= peer.id) return false;
+
+      const prev = wifiLastSyncedPairRef.current.get(peer.id);
+      if (prev) {
+        if (now - prev.at < 2500) return false;
+        if (prev.localHash === wifiLocalStateHash && prev.peerHash === peerHash) {
+          if (!prev.isError || prev.isAuthError) return false;
+          if (now - prev.at < 30_000) return false;
+        }
+      }
+      return true;
+    });
+
+    if (!candidate) return;
+
+    const peerHashSnapshot = (candidate.stateHash || '').trim();
+    const localHashSnapshot = wifiLocalStateHash;
+    let cancelled = false;
+
+    const runAutoSync = async () => {
+      wifiAutoSyncingRef.current = true;
+      if (wifiBubbleTimerRef.current !== null) {
+        window.clearTimeout(wifiBubbleTimerRef.current);
+        wifiBubbleTimerRef.current = null;
+      }
+      setWifiQuickBubble({ status: 'syncing' });
+
+      try {
+        await runWifiBidirectionalSync({
+          host: candidate.ip,
+          port: candidate.port,
+          password,
+          storageDir: storageDirRef.current,
+          getLocalState: () => wifiCallbacksRef.current.getLocalState(),
+          applyMergedCatalog: (...args) => wifiCallbacksRef.current.applyMergedCatalog(...args),
+          applyReceivedDocBody: (payload) =>
+            wifiCallbacksRef.current.applyReceivedDocBody(payload),
+        });
+
+        wifiLastSyncedPairRef.current.set(candidate.id, {
+          localHash: localHashSnapshot,
+          peerHash: peerHashSnapshot,
+          at: Date.now(),
+        });
+        setWifiImageVersion((v) => v + 1);
+
+        if (!cancelled && mainViewRef.current === 'tree') {
+          setWifiQuickBubble({ status: 'done', text: '同步完成' });
+          scheduleHideWifiBubble(1800);
+        }
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : String(err || '');
+        const lower = raw.toLowerCase();
+        const isAuthError =
+          lower.includes('401') ||
+          lower.includes('auth') ||
+          lower.includes('密码') ||
+          lower.includes('invalid');
+        wifiLastSyncedPairRef.current.set(candidate.id, {
+          localHash: localHashSnapshot,
+          peerHash: peerHashSnapshot,
+          at: Date.now(),
+          isError: true,
+          isAuthError,
+        });
+
+        if (!cancelled && mainViewRef.current === 'tree') {
+          if (isAuthError) {
+            setWifiQuickBubble({
+              status: 'error',
+              text: 'Wi-Fi 同步密码不一致',
+              action: 'settings',
+            });
+            scheduleHideWifiBubble(2600);
+          } else {
+            // Peer may have just entered Reading Mode or locked screen; dismiss quietly
+            setWifiQuickBubble(null);
+          }
+        }
+      } finally {
+        wifiAutoSyncingRef.current = false;
+      }
+    };
+
+    void runAutoSync();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    mainView,
+    showWifiSyncModal,
+    wifiServerInfo,
+    wifiPeers,
+    wifiLocalStateHash,
+    webDavConfig.encryptionPassword,
+  ]);
+
+  // Animate expanding/contracting 3-dot ellipsis (1 -> 2 -> 3 -> 2 -> 1) while Wi-Fi sync is running
+  useEffect(() => {
+    if (wifiQuickBubble?.status !== 'syncing') {
+      setWifiBubbleDots(1);
+      return;
+    }
+    const sequence = [1, 2, 3, 2];
+    let step = 0;
+    setWifiBubbleDots(sequence[0]);
+    const timer = window.setInterval(() => {
+      step = (step + 1) % sequence.length;
+      setWifiBubbleDots(sequence[step]);
+    }, 380);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [wifiQuickBubble?.status]);
+
+  useEffect(() => {
+    return () => {
+      if (wifiBubbleTimerRef.current !== null) {
+        window.clearTimeout(wifiBubbleTimerRef.current);
+        wifiBubbleTimerRef.current = null;
+      }
+      clearWifiIncomingSafetyTimer();
+    };
+  }, []);
+
   // Drag-to-reorder handler for all movable bottom toolbar icons (both touch & mouse)
   const handleToolbarIconPointerDown = (
     e: React.PointerEvent<HTMLButtonElement>,
@@ -2535,8 +2952,45 @@ export default function App() {
           }
         }}
         onContextMenu={(e) => e.preventDefault()}
-        className="shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)] select-none"
+        className="relative shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)] select-none"
       >
+        {mainView === 'tree' && wifiQuickBubble && (
+          <div
+            role="status"
+            aria-live="polite"
+            onClick={
+              wifiQuickBubble.action
+                ? () => {
+                    const action = wifiQuickBubble.action;
+                    if (wifiBubbleTimerRef.current !== null) {
+                      window.clearTimeout(wifiBubbleTimerRef.current);
+                      wifiBubbleTimerRef.current = null;
+                    }
+                    setWifiQuickBubble(null);
+                    if (action === 'settings') {
+                      setShowSyncModal(true);
+                    } else if (action === 'wifiModal') {
+                      setShowWifiSyncModal(true);
+                    }
+                  }
+                : undefined
+            }
+            className={`absolute bottom-[calc(100%+10px)] left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-lg bg-[var(--fei-bg-surface)] border border-[var(--fei-modal-border)] eink:border-[var(--fei-border-strong)] text-[12.5px] font-medium text-[var(--fei-text-primary)] whitespace-nowrap shadow-md eink:shadow-none select-none ${
+              wifiQuickBubble.action ? 'cursor-pointer hover:bg-[var(--fei-bg-hover)]' : 'pointer-events-none'
+            }`}
+          >
+            {wifiQuickBubble.status === 'syncing' ? (
+              <span className="inline-flex items-baseline">
+                <span>同步中</span>
+                <span className="inline-block w-[1.15em] text-left">
+                  {'.'.repeat(wifiBubbleDots)}
+                </span>
+              </span>
+            ) : (
+              <span>{wifiQuickBubble.text}</span>
+            )}
+          </div>
+        )}
         <div className="h-[54px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-start gap-0.5 sm:gap-1">
           {mainView === 'tree' ? (
             <>
@@ -2935,6 +3389,10 @@ export default function App() {
         <WifiSyncModal
           encryptionPassword={webDavConfig.encryptionPassword || ''}
           storageDir={storageDir}
+          serverInfo={wifiServerInfo}
+          hostStarting={wifiHostStarting}
+          hostError={wifiHostError}
+          peers={wifiPeers}
           getLocalState={getWifiLocalState}
           applyMergedCatalog={applyWifiMergedCatalog}
           applyReceivedDocBody={applyWifiReceivedDocBody}

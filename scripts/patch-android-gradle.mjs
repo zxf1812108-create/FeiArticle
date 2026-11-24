@@ -132,6 +132,11 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.concurrent.ExecutorService;
@@ -194,9 +199,13 @@ public class WebDavPlugin extends Plugin {
 
                 try (Response response = CLIENT.newCall(builder.build()).execute()) {
                     int status = response.code();
-                    String responseBody = (status == 304 || "HEAD".equals(upperMethod) || response.body() == null)
-                        ? ""
-                        : response.body().string();
+                    String responseBody;
+                    if (status == 304 || "HEAD".equals(upperMethod) || response.body() == null) {
+                        responseBody = "";
+                    } else {
+                        byte[] rawBytes = response.body().bytes();
+                        responseBody = decodeSmartText(rawBytes);
+                    }
                     String etag = response.header("ETag");
                     String lastModified = response.header("Last-Modified");
 
@@ -219,6 +228,48 @@ public class WebDavPlugin extends Plugin {
                 call.resolve(result);
             }
         });
+    }
+
+    private static String decodeSmartText(byte[] rawBytes) {
+        if (rawBytes == null || rawBytes.length == 0) {
+            return "";
+        }
+        if (rawBytes.length >= 3
+                && (rawBytes[0] & 0xFF) == 0xEF
+                && (rawBytes[1] & 0xFF) == 0xBB
+                && (rawBytes[2] & 0xFF) == 0xBF) {
+            return new String(rawBytes, 3, rawBytes.length - 3, StandardCharsets.UTF_8);
+        }
+        if (rawBytes.length >= 2
+                && (rawBytes[0] & 0xFF) == 0xFF
+                && (rawBytes[1] & 0xFF) == 0xFE) {
+            return new String(rawBytes, 2, rawBytes.length - 2, StandardCharsets.UTF_16LE);
+        }
+        if (rawBytes.length >= 2
+                && (rawBytes[0] & 0xFF) == 0xFE
+                && (rawBytes[1] & 0xFF) == 0xFF) {
+            return new String(rawBytes, 2, rawBytes.length - 2, StandardCharsets.UTF_16BE);
+        }
+        try {
+            CharsetDecoder utf8Decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+            String text = utf8Decoder.decode(ByteBuffer.wrap(rawBytes)).toString();
+            if (!text.isEmpty() && text.charAt(0) == '\\uFEFF') {
+                return text.substring(1);
+            }
+            return text;
+        } catch (CharacterCodingException ignored) {
+            try {
+                return new String(rawBytes, Charset.forName("GB18030"));
+            } catch (Exception ignored2) {
+                try {
+                    return new String(rawBytes, Charset.forName("GBK"));
+                } catch (Exception ignored3) {
+                    return new String(rawBytes, StandardCharsets.UTF_8);
+                }
+            }
+        }
     }
 }
 `;
@@ -877,6 +928,11 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -2372,11 +2428,46 @@ public class LocalStoragePlugin extends Plugin {
         while ((n = is.read(buf)) != -1) {
             baos.write(buf, 0, n);
         }
-        String text = new String(baos.toByteArray(), StandardCharsets.UTF_8);
-        if (!text.isEmpty() && text.charAt(0) == '\\uFEFF') {
-            return text.substring(1);
+        byte[] rawBytes = baos.toByteArray();
+        if (rawBytes.length == 0) {
+            return "";
         }
-        return text;
+        if (rawBytes.length >= 3
+                && (rawBytes[0] & 0xFF) == 0xEF
+                && (rawBytes[1] & 0xFF) == 0xBB
+                && (rawBytes[2] & 0xFF) == 0xBF) {
+            return new String(rawBytes, 3, rawBytes.length - 3, StandardCharsets.UTF_8);
+        }
+        if (rawBytes.length >= 2
+                && (rawBytes[0] & 0xFF) == 0xFF
+                && (rawBytes[1] & 0xFF) == 0xFE) {
+            return new String(rawBytes, 2, rawBytes.length - 2, StandardCharsets.UTF_16LE);
+        }
+        if (rawBytes.length >= 2
+                && (rawBytes[0] & 0xFF) == 0xFE
+                && (rawBytes[1] & 0xFF) == 0xFF) {
+            return new String(rawBytes, 2, rawBytes.length - 2, StandardCharsets.UTF_16BE);
+        }
+        try {
+            CharsetDecoder utf8Decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+            String text = utf8Decoder.decode(ByteBuffer.wrap(rawBytes)).toString();
+            if (!text.isEmpty() && text.charAt(0) == '\\uFEFF') {
+                return text.substring(1);
+            }
+            return text;
+        } catch (CharacterCodingException ignored) {
+            try {
+                return new String(rawBytes, Charset.forName("GB18030"));
+            } catch (Exception ignored2) {
+                try {
+                    return new String(rawBytes, Charset.forName("GBK"));
+                } catch (Exception ignored3) {
+                    return new String(rawBytes, StandardCharsets.UTF_8);
+                }
+            }
+        }
     }
 }
 `;
@@ -2805,13 +2896,15 @@ public class WifiSyncPlugin extends Plugin {
         final String name;
         final String ip;
         final int port;
+        final String stateHash;
         volatile long lastSeenAt;
 
-        DiscoveredPeer(String id, String name, String ip, int port, long lastSeenAt) {
+        DiscoveredPeer(String id, String name, String ip, int port, String stateHash, long lastSeenAt) {
             this.id = id;
             this.name = name;
             this.ip = ip;
             this.port = port;
+            this.stateHash = stateHash != null ? stateHash : "";
             this.lastSeenAt = lastSeenAt;
         }
     }
@@ -2836,6 +2929,7 @@ public class WifiSyncPlugin extends Plugin {
     private volatile String activeIp = "";
     private volatile String activePassword = "";
     private volatile String activeDeviceName = "";
+    private volatile String activeStateHash = "";
 
     @PluginMethod
     public void startServer(PluginCall call) {
@@ -2849,11 +2943,14 @@ public class WifiSyncPlugin extends Plugin {
         String resolvedName = (customName != null && !customName.trim().isEmpty())
             ? customName.trim()
             : buildDefaultDeviceName();
+        String stateHash = call.getString("stateHash", "");
 
         this.activePassword = password;
         this.activeDeviceName = resolvedName;
+        this.activeStateHash = stateHash != null ? stateHash : "";
 
         if (running && serverSocket != null && !serverSocket.isClosed()) {
+            triggerImmediateBeacon();
             JSObject res = new JSObject();
             res.put("running", true);
             res.put("ip", activeIp);
@@ -2922,6 +3019,20 @@ public class WifiSyncPlugin extends Plugin {
         stopInternal();
         JSObject res = new JSObject();
         res.put("running", false);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void updateStateHash(PluginCall call) {
+        String nextHash = call.getString("stateHash", "");
+        String normalized = nextHash != null ? nextHash : "";
+        boolean changed = !normalized.equals(this.activeStateHash);
+        this.activeStateHash = normalized;
+        if (changed && running) {
+            triggerImmediateBeacon();
+        }
+        JSObject res = new JSObject();
+        res.put("ok", true);
         call.resolve(res);
     }
 
@@ -3170,8 +3281,22 @@ public class WifiSyncPlugin extends Plugin {
     @PluginMethod
     public void peerDisconnect(PluginCall call) {
         String sessionId = call.getString("sessionId", "");
-        if (sessionId != null) {
-            clientSessions.remove(sessionId);
+        final ClientSession removed = sessionId != null ? clientSessions.remove(sessionId) : null;
+        if (removed != null) {
+            clientPool.execute(() -> {
+                try {
+                    Map<String, String> headers = new HashMap<>();
+                    headers.put("X-Wifi-Token", removed.token);
+                    httpRequest(
+                        "POST",
+                        "http://" + removed.host + ":" + removed.port + "/wifi-sync/bye",
+                        headers,
+                        new byte[0],
+                        2000
+                    );
+                } catch (Exception ignored) {
+                }
+            });
         }
         JSObject out = new JSObject();
         out.put("ok", true);
@@ -3252,9 +3377,21 @@ public class WifiSyncPlugin extends Plugin {
                         String peerIp = pkt.getAddress() != null ? pkt.getAddress().getHostAddress() : "";
                         int peerPort = obj.optInt("port", DEFAULT_SYNC_PORT);
                         String peerName = obj.optString("name", peerIp);
+                        String peerHash = obj.optString("hash", "");
                         if (peerIp == null || peerIp.isEmpty() || peerIp.equals(activeIp)) continue;
-                        discoveredPeers.put(peerId, new DiscoveredPeer(peerId, peerName, peerIp, peerPort, System.currentTimeMillis()));
-                        emitPeersToJs();
+                        long nowMs = System.currentTimeMillis();
+                        DiscoveredPeer prev = discoveredPeers.get(peerId);
+                        boolean peerChanged = prev == null
+                            || !peerName.equals(prev.name)
+                            || !peerIp.equals(prev.ip)
+                            || peerPort != prev.port
+                            || !peerHash.equals(prev.stateHash);
+                        if (peerChanged) {
+                            discoveredPeers.put(peerId, new DiscoveredPeer(peerId, peerName, peerIp, peerPort, peerHash, nowMs));
+                            emitPeersToJs();
+                        } else {
+                            prev.lastSeenAt = nowMs;
+                        }
                     } catch (IOException ignored) {
                         pruneAndEmitPeers();
                     } catch (Exception ignored) {
@@ -3266,29 +3403,46 @@ public class WifiSyncPlugin extends Plugin {
             serverPool.execute(() -> {
                 while (running && !ds.isClosed()) {
                     try {
-                        JSONObject beacon = new JSONObject();
-                        beacon.put("app", "feiartical");
-                        beacon.put("v", 1);
-                        beacon.put("id", instanceId);
-                        beacon.put("name", activeDeviceName);
-                        beacon.put("port", activePort);
-                        byte[] payload = beacon.toString().getBytes(StandardCharsets.UTF_8);
-
-                        sendBroadcastPacket(ds, payload, InetAddress.getByName("255.255.255.255"));
-                        for (InetAddress bcast : resolveSubnetBroadcasts()) {
-                            sendBroadcastPacket(ds, payload, bcast);
-                        }
+                        sendCurrentBeacon(ds);
                         pruneAndEmitPeers();
                     } catch (Exception ignored) {
                     }
                     try {
-                        Thread.sleep(1500);
+                        Thread.sleep(2500);
                     } catch (InterruptedException e) {
                         break;
                     }
                 }
             });
         } catch (Exception ignored) {
+        }
+    }
+
+    private void triggerImmediateBeacon() {
+        final DatagramSocket ds = discoverySocket;
+        if (!running || ds == null || ds.isClosed()) return;
+        serverPool.execute(() -> {
+            try {
+                sendCurrentBeacon(ds);
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private void sendCurrentBeacon(DatagramSocket ds) throws Exception {
+        if (!running || ds == null || ds.isClosed()) return;
+        JSONObject beacon = new JSONObject();
+        beacon.put("app", "feiartical");
+        beacon.put("v", 1);
+        beacon.put("id", instanceId);
+        beacon.put("name", activeDeviceName);
+        beacon.put("port", activePort);
+        beacon.put("hash", activeStateHash != null ? activeStateHash : "");
+        byte[] payload = beacon.toString().getBytes(StandardCharsets.UTF_8);
+
+        sendBroadcastPacket(ds, payload, InetAddress.getByName("255.255.255.255"));
+        for (InetAddress bcast : resolveSubnetBroadcasts()) {
+            sendBroadcastPacket(ds, payload, bcast);
         }
     }
 
@@ -3302,7 +3456,7 @@ public class WifiSyncPlugin extends Plugin {
 
     private void pruneAndEmitPeers() {
         long now = System.currentTimeMillis();
-        boolean removed = discoveredPeers.entrySet().removeIf(e -> now - e.getValue().lastSeenAt > 6500L);
+        boolean removed = discoveredPeers.entrySet().removeIf(e -> now - e.getValue().lastSeenAt > 9000L);
         if (removed) {
             emitPeersToJs();
         }
@@ -3316,6 +3470,7 @@ public class WifiSyncPlugin extends Plugin {
             obj.put("name", p.name);
             obj.put("ip", p.ip);
             obj.put("port", p.port);
+            obj.put("stateHash", p.stateHash);
             arr.put(obj);
         }
         JSObject payload = new JSObject();
@@ -3422,12 +3577,25 @@ public class WifiSyncPlugin extends Plugin {
                 resp.put("serverProof", serverProof);
                 resp.put("deviceName", activeDeviceName);
                 writeBytesResponse(out, 200, "OK", "application/json; charset=utf-8", resp.toString().getBytes(StandardCharsets.UTF_8));
+
+                JSObject startEvt = new JSObject();
+                startEvt.put("status", "start");
+                notifyListeners("wifiIncomingSync", startEvt);
                 return;
             }
 
             ServerSession session = serverSessions.get(token);
             if (session == null || System.currentTimeMillis() > session.expiresAt) {
                 writeBytesResponse(out, 401, "Unauthorized", "application/json", "{\\"error\\":\\"unauthorized\\"}".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+
+            if ("POST".equals(method) && "/wifi-sync/bye".equals(path)) {
+                serverSessions.remove(token);
+                writeBytesResponse(out, 200, "OK", "application/json; charset=utf-8", "{\\"ok\\":true}".getBytes(StandardCharsets.UTF_8));
+                JSObject endEvt = new JSObject();
+                endEvt.put("status", "end");
+                notifyListeners("wifiIncomingSync", endEvt);
                 return;
             }
 

@@ -520,9 +520,16 @@ export function parseDocumentBlocks(content: string): { blocks: BlockNode[]; toc
   return { blocks, toc };
 }
 
-// Decode uploaded .txt / .md file with UTF-8 first, falling back to GB18030 for legacy Chinese .txt files
+// Decode uploaded .txt / .md file with BOM + UTF-8 first, falling back to GB18030 for legacy Chinese .txt files
 export async function readTextFileSmart(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+  }
   try {
     const utf8 = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
     return utf8.replace(/^\uFEFF/, '');

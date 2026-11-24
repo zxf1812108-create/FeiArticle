@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Check,
   Laptop,
@@ -14,7 +14,6 @@ import {
   DEFAULT_WIFI_SYNC_PORT,
   isWifiSyncNativeAvailable,
   runWifiBidirectionalSync,
-  startWifiSyncHost,
   WifiDocBodyPayload,
   WifiPeer,
   WifiServerInfo,
@@ -25,6 +24,10 @@ import {
 interface WifiSyncModalProps {
   encryptionPassword: string;
   storageDir: StorageDirectoryConfig;
+  serverInfo: WifiServerInfo | null;
+  hostStarting: boolean;
+  hostError: string | null;
+  peers: WifiPeer[];
   getLocalState: () => {
     folders: FolderNode[];
     docs: ArticleDoc[];
@@ -51,7 +54,7 @@ function formatWifiError(err: unknown): string {
     return '连续密码核验失败过多，对方已临时锁定 60 秒，请稍后重试';
   }
   if (lower.includes('refused') || lower.includes('timeout') || lower.includes('timed out') || lower.includes('unreachable')) {
-    return '无法连接对方设备：请确认两台设备在同一 Wi-Fi 且对方已打开「Wi-Fi 同步」界面';
+    return '无法连接对方设备：请确认两台设备在同一 Wi-Fi 且对方软件处于前台运行';
   }
   return raw || 'Wi-Fi 同步失败，请重试';
 }
@@ -73,6 +76,10 @@ function parseHostAndPort(rawInput: string): { host: string; port: number } | nu
 export const WifiSyncModal: React.FC<WifiSyncModalProps> = ({
   encryptionPassword,
   storageDir,
+  serverInfo,
+  hostStarting,
+  hostError,
+  peers,
   getLocalState,
   applyMergedCatalog,
   applyReceivedDocBody,
@@ -82,12 +89,7 @@ export const WifiSyncModal: React.FC<WifiSyncModalProps> = ({
   const hasPassword = Boolean(encryptionPassword && encryptionPassword.trim().length > 0);
   const nativeSupported = isWifiSyncNativeAvailable();
 
-  const [serverInfo, setServerInfo] = useState<WifiServerInfo | null>(null);
-  const [hostStarting, setHostStarting] = useState(false);
-  const [hostError, setHostError] = useState<string | null>(null);
-  const [peers, setPeers] = useState<WifiPeer[]>([]);
   const [manualAddress, setManualAddress] = useState('');
-
   const [syncing, setSyncing] = useState(false);
   const [progress, setProgress] = useState<WifiSyncProgress | null>(null);
   const [summary, setSummary] = useState<WifiSyncSummary | null>(null);
@@ -103,50 +105,6 @@ export const WifiSyncModal: React.FC<WifiSyncModalProps> = ({
     applyMergedCatalog,
     applyReceivedDocBody,
   };
-
-  useEffect(() => {
-    if (!hasPassword || !nativeSupported) return;
-
-    let cancelled = false;
-    let stopHost: (() => Promise<void>) | null = null;
-
-    setHostStarting(true);
-    setHostError(null);
-
-    startWifiSyncHost(encryptionPassword, {
-      getLocalState: () => callbacksRef.current.getLocalState(),
-      applyMergedCatalog: (folders, docs, treeState) =>
-        callbacksRef.current.applyMergedCatalog(folders, docs, treeState),
-      applyReceivedDocBody: (payload) => callbacksRef.current.applyReceivedDocBody(payload),
-      onPeersChange: (nextPeers) => {
-        if (!cancelled) {
-          setPeers(nextPeers);
-        }
-      },
-    })
-      .then((res) => {
-        if (cancelled) {
-          void res.stop();
-          return;
-        }
-        stopHost = res.stop;
-        setServerInfo(res.info);
-        setHostStarting(false);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setHostError(formatWifiError(err));
-          setHostStarting(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      if (stopHost) {
-        void stopHost();
-      }
-    };
-  }, [encryptionPassword, hasPassword, nativeSupported]);
 
   const handleSyncWithPeer = async (host: string, port: number) => {
     if (syncing || !hasPassword || !nativeSupported) return;
@@ -288,7 +246,7 @@ export const WifiSyncModal: React.FC<WifiSyncModalProps> = ({
               </div>
             </div>
           ) : (
-            /* Active native Wi-Fi sync UI */
+            /* Active native Wi-Fi sync UI (shares foreground host owned by App) */
             <div className="space-y-3.5">
               {/* Local Device Status */}
               <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] px-3.5 py-2.5 space-y-1">
@@ -303,7 +261,7 @@ export const WifiSyncModal: React.FC<WifiSyncModalProps> = ({
                     {hostStarting
                       ? '正在启动…'
                       : serverInfo?.running
-                        ? '已加密就绪'
+                        ? '已就绪'
                         : '未就绪'}
                   </span>
                 </div>
@@ -333,7 +291,7 @@ export const WifiSyncModal: React.FC<WifiSyncModalProps> = ({
                 <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] divide-y divide-[var(--fei-border)] overflow-hidden">
                   {peers.length === 0 ? (
                     <div className="px-3.5 py-3 text-[12px] leading-relaxed text-[var(--fei-text-muted)]">
-                      请在另一台设备也打开「Wi-Fi 设备同步」界面（两台设备需连入同一 Wi-Fi 且加密密码一致）。
+                      只要两台设备在同一 Wi-Fi 且都停留在目录界面（加密密码一致），会自动发现并完成同步；进入文章阅读时会自动关闭以省电。若路由器隔离了广播，可在下方手动输入 IP。
                     </div>
                   ) : (
                     peers.map((peer) => (
@@ -458,7 +416,7 @@ export const WifiSyncModal: React.FC<WifiSyncModalProps> = ({
                   onClick={onClose}
                   className="w-full h-9 rounded-xl bg-[var(--fei-bg-subtle)] text-[13px] font-medium text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] disabled:opacity-50 transition-colors"
                 >
-                  {syncing ? '正在同步，请勿关闭…' : '完成并关闭'}
+                  {syncing ? '正在同步，请勿关闭…' : '关闭'}
                 </button>
               </div>
             </div>

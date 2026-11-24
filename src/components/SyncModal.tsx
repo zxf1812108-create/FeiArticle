@@ -589,7 +589,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                 </div>
                 <div className="text-[11.5px] leading-snug text-[var(--fei-text-muted)] mt-0.5">
                   {config.encryptionPassword
-                    ? '同 Wi-Fi 互传文档正文与插图（已加密就绪）'
+                    ? '目录模式下同 Wi-Fi 自动发现并同步（阅读时自动关闭省电），也可在此手动输入 IP'
                     : '需先保存加密密码后才可开启设备互传'}
                 </div>
               </div>
