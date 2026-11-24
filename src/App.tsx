@@ -35,7 +35,6 @@ import {
 } from './components/StorageFolderModal';
 import { SyncModal } from './components/SyncModal';
 import { TrashModal } from './components/TrashModal';
-import { WifiSyncModal } from './components/WifiSyncModal';
 import {
   checkAndPullExternalLocalFsChanges,
   resetLocalFsSyncManifest,
@@ -216,7 +215,6 @@ export default function App() {
   const [storageModalSubtitle, setStorageModalSubtitle] = useState<string | undefined>(undefined);
   const [localFsReady, setLocalFsReady] = useState(false);
   const [showSyncModal, setShowSyncModal] = useState(false);
-  const [showWifiSyncModal, setShowWifiSyncModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTrashModal, setShowTrashModal] = useState(false);
   const [showFontSizeBar, setShowFontSizeBar] = useState(false);
@@ -260,8 +258,6 @@ export default function App() {
   const [lanUrl, setLanUrl] = useState('');
   const [lanLoading, setLanLoading] = useState(false);
   const [wifiServerInfo, setWifiServerInfo] = useState<WifiServerInfo | null>(null);
-  const [wifiHostStarting, setWifiHostStarting] = useState(false);
-  const [wifiHostError, setWifiHostError] = useState<string | null>(null);
   const [wifiPeers, setWifiPeers] = useState<WifiPeer[]>([]);
   const wifiPeersRef = useRef<WifiPeer[]>([]);
   const [wifiLocalStateHash, setWifiLocalStateHash] = useState('');
@@ -270,7 +266,7 @@ export default function App() {
   const [wifiQuickBubble, setWifiQuickBubble] = useState<{
     status: 'syncing' | 'done' | 'error';
     text?: string;
-    action?: 'settings' | 'wifiModal';
+    action?: 'settings';
   } | null>(null);
   const [wifiBubbleDots, setWifiBubbleDots] = useState(1);
   const wifiAutoSyncingRef = useRef(false);
@@ -1597,7 +1593,6 @@ export default function App() {
     if (
       mainView !== 'doc' ||
       showSyncModal ||
-      showWifiSyncModal ||
       showImportModal ||
       showTrashModal ||
       showStorageFolderModal
@@ -1621,7 +1616,6 @@ export default function App() {
     whistleEnabled,
     mainView,
     showSyncModal,
-    showWifiSyncModal,
     showImportModal,
     showTrashModal,
     showStorageFolderModal,
@@ -2312,9 +2306,9 @@ export default function App() {
     }, 15_000);
   };
 
-  // Plan A: Only keep Wi-Fi P2P host & UDP discovery active while in Directory Mode (or Wi-Fi modal)
+  // Plan A: Only keep Wi-Fi P2P host & UDP/NSD discovery active while in Directory Mode
   // and app is in foreground. Automatically shuts down in Reading Mode or background for 0% E-Ink reading drain.
-  const wifiHostShouldRun = mainView === 'tree' || showWifiSyncModal;
+  const wifiHostShouldRun = mainView === 'tree';
 
   useEffect(() => {
     wifiLastSyncedPairRef.current.clear();
@@ -2358,8 +2352,6 @@ export default function App() {
     const password = (webDavConfig.encryptionPassword || '').trim();
     if (!password || !isWifiSyncNativeAvailable() || !wifiHostShouldRun) {
       setWifiServerInfo(null);
-      setWifiHostStarting(false);
-      setWifiHostError(null);
       wifiPeersRef.current = [];
       setWifiPeers([]);
       clearWifiIncomingSafetyTimer();
@@ -2377,7 +2369,6 @@ export default function App() {
       lifecycleId++;
       const stopFn = activeStop;
       activeStop = null;
-      setWifiHostStarting(false);
       setWifiServerInfo(null);
       wifiPeersRef.current = [];
       setWifiPeers([]);
@@ -2393,8 +2384,6 @@ export default function App() {
       if (disposed || isPageHidden()) return;
       if (activeStop) return;
       const runId = ++lifecycleId;
-      setWifiHostStarting(true);
-      setWifiHostError(null);
       try {
         let initialHash = wifiLocalStateHashRef.current;
         if (!initialHash) {
@@ -2472,14 +2461,8 @@ export default function App() {
         }
         activeStop = res.stop;
         setWifiServerInfo(res.info);
-      } catch (err) {
-        if (!disposed && runId === lifecycleId) {
-          setWifiHostError(err instanceof Error ? err.message : 'Wi-Fi 同步服务启动失败');
-        }
-      } finally {
-        if (!disposed && runId === lifecycleId) {
-          setWifiHostStarting(false);
-        }
+      } catch {
+        // Ignore transient offline / no-Wi-Fi errors while waiting in directory mode
       }
     };
 
@@ -2509,13 +2492,20 @@ export default function App() {
     };
   }, [webDavConfig.encryptionPassword, wifiHostShouldRun]);
 
+  const appMountedRef = useRef(true);
+  useEffect(() => {
+    appMountedRef.current = true;
+    return () => {
+      appMountedRef.current = false;
+    };
+  }, []);
+
   // Plan A Auto-Sync: When both devices are in Directory Mode on the same Wi-Fi and their data
   // fingerprints differ, the deterministic leader (smaller instanceId) automatically initiates bidirectional sync.
   useEffect(() => {
     const password = (webDavConfig.encryptionPassword || '').trim();
     if (
       mainView !== 'tree' ||
-      showWifiSyncModal ||
       !password ||
       !wifiServerInfo?.running ||
       !wifiLocalStateHash ||
@@ -2547,7 +2537,6 @@ export default function App() {
 
     const peerHashSnapshot = (candidate.stateHash || '').trim();
     const localHashSnapshot = wifiLocalStateHash;
-    let cancelled = false;
 
     const runAutoSync = async () => {
       wifiAutoSyncingRef.current = true;
@@ -2576,7 +2565,7 @@ export default function App() {
         });
         setWifiImageVersion((v) => v + 1);
 
-        if (!cancelled && mainViewRef.current === 'tree') {
+        if (appMountedRef.current && mainViewRef.current === 'tree') {
           setWifiQuickBubble({ status: 'done', text: '同步完成' });
           scheduleHideWifiBubble(1800);
         }
@@ -2596,7 +2585,7 @@ export default function App() {
           isAuthError,
         });
 
-        if (!cancelled && mainViewRef.current === 'tree') {
+        if (appMountedRef.current && mainViewRef.current === 'tree') {
           if (isAuthError) {
             setWifiQuickBubble({
               status: 'error',
@@ -2615,12 +2604,8 @@ export default function App() {
     };
 
     void runAutoSync();
-    return () => {
-      cancelled = true;
-    };
   }, [
     mainView,
-    showWifiSyncModal,
     wifiServerInfo,
     wifiPeers,
     wifiLocalStateHash,
@@ -2903,7 +2888,7 @@ export default function App() {
               );
             }}
             onFetchRemoteBody={() => handleFetchRemoteBody(selectedDoc.id)}
-            onOpenWifiSync={() => setShowWifiSyncModal(true)}
+            onReturnToTree={handleExitDocToTree}
           />
         ) : (
           <MinimalTreeView
@@ -2969,8 +2954,6 @@ export default function App() {
                     setWifiQuickBubble(null);
                     if (action === 'settings') {
                       setShowSyncModal(true);
-                    } else if (action === 'wifiModal') {
-                      setShowWifiSyncModal(true);
                     }
                   }
                 : undefined
@@ -3364,10 +3347,6 @@ export default function App() {
           lanLoading={lanLoading}
           onToggleLan={handleToggleLanDirect}
           onCopyLanUrl={handleCopyLanUrl}
-          onOpenWifiSync={() => {
-            setShowSyncModal(false);
-            setShowWifiSyncModal(true);
-          }}
           dictionaries={mdictDicts}
           activeDictId={activeMdictId}
           onImportDictFiles={handleImportMdictFiles}
@@ -3381,26 +3360,6 @@ export default function App() {
           onDeleteDict={handleDeleteMdictDict}
           onSaveConfig={handleSaveSyncConfig}
           onClose={() => setShowSyncModal(false)}
-        />
-      )}
-
-      {/* Same-Wi-Fi P2P Bidirectional Sync Modal */}
-      {showWifiSyncModal && (
-        <WifiSyncModal
-          encryptionPassword={webDavConfig.encryptionPassword || ''}
-          storageDir={storageDir}
-          serverInfo={wifiServerInfo}
-          hostStarting={wifiHostStarting}
-          hostError={wifiHostError}
-          peers={wifiPeers}
-          getLocalState={getWifiLocalState}
-          applyMergedCatalog={applyWifiMergedCatalog}
-          applyReceivedDocBody={applyWifiReceivedDocBody}
-          onOpenSettings={() => {
-            setShowWifiSyncModal(false);
-            setShowSyncModal(true);
-          }}
-          onClose={() => setShowWifiSyncModal(false)}
         />
       )}
 

@@ -14,7 +14,6 @@ import {
   Sun,
   Trash2,
   Upload,
-  Wifi,
   X,
 } from 'lucide-react';
 import { MdictDictionarySummary, WebDavConfig, WhistleSensitivity } from '../types';
@@ -36,7 +35,6 @@ interface SyncModalProps {
   lanLoading: boolean;
   onToggleLan: (next: boolean) => void;
   onCopyLanUrl: (url: string) => void;
-  onOpenWifiSync: () => void;
   dictionaries: MdictDictionarySummary[];
   activeDictId: string | null;
   onImportDictFiles: (files: FileList) => Promise<void>;
@@ -60,7 +58,6 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   lanLoading,
   onToggleLan,
   onCopyLanUrl,
-  onOpenWifiSync,
   dictionaries,
   activeDictId,
   onImportDictFiles,
@@ -577,30 +574,6 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                 {errorMsg}
               </p>
             )}
-          </section>
-
-          {/* 区域二点五：Wi-Fi 设备同步 */}
-          <section className="space-y-2">
-            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] px-3.5 py-2.5 flex items-center justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5 text-[13.5px] font-medium text-[var(--fei-text-primary)]">
-                  <Wifi className="w-3.5 h-3.5 shrink-0" strokeWidth={1.8} />
-                  <span>Wi-Fi 设备同步</span>
-                </div>
-                <div className="text-[11.5px] leading-snug text-[var(--fei-text-muted)] mt-0.5">
-                  {config.encryptionPassword
-                    ? '目录模式下同 Wi-Fi 自动发现并同步（阅读时自动关闭省电），也可在此手动输入 IP'
-                    : '需先保存加密密码后才可开启设备互传'}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={onOpenWifiSync}
-                className="px-2.5 py-1.5 rounded-lg border border-[var(--fei-border)] bg-[var(--fei-bg-surface)] text-[12px] font-medium text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors cursor-pointer"
-              >
-                打开同步
-              </button>
-            </div>
           </section>
 
           {/* 区域三：电脑直连（同飞记局域网直连） */}

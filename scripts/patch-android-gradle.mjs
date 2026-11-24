@@ -115,6 +115,12 @@ if (fs.existsSync(manifestPath)) {
       '<application\n        android:requestLegacyExternalStorage="true"'
     );
   }
+  if (!manifest.includes('android:usesCleartextTraffic')) {
+    manifest = manifest.replace(
+      /<application\b/,
+      '<application\n        android:usesCleartextTraffic="true"'
+    );
+  }
   fs.writeFileSync(manifestPath, manifest, 'utf8');
 }
 
@@ -2804,6 +2810,9 @@ public class MainActivity extends BridgeActivity {
   const wifiSyncPluginJava = `package com.feiartical.app;
 
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.net.nsd.NsdManager;
+import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.util.Base64;
@@ -2814,13 +2823,13 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
-import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -2828,16 +2837,17 @@ import java.net.InterfaceAddress;
 import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -2921,9 +2931,17 @@ public class WifiSyncPlugin extends Plugin {
     private final Map<String, ClientSession> clientSessions = new ConcurrentHashMap<>();
     private final Map<String, DiscoveredPeer> discoveredPeers = new ConcurrentHashMap<>();
 
+    private static final String NSD_SERVICE_TYPE = "_feiartical._tcp.";
+    private static final String PREFS_NAME = "FeiArticalWifiSyncPrefs";
+    private static final String PREF_RECENT_PEER_IPS = "recent_peer_ips";
+
     private volatile ServerSocket serverSocket;
     private volatile DatagramSocket discoverySocket;
     private volatile WifiManager.MulticastLock multicastLock;
+    private volatile NsdManager nsdManager;
+    private volatile NsdManager.RegistrationListener nsdRegListener;
+    private volatile NsdManager.DiscoveryListener nsdDiscListener;
+    private volatile String registeredNsdName = "";
     private volatile boolean running = false;
     private volatile int activePort = DEFAULT_SYNC_PORT;
     private volatile String activeIp = "";
@@ -3004,6 +3022,7 @@ public class WifiSyncPlugin extends Plugin {
         });
 
         startUdpDiscovery();
+        startNsdDiscovery();
 
         JSObject res = new JSObject();
         res.put("running", true);
@@ -3064,14 +3083,14 @@ public class WifiSyncPlugin extends Plugin {
 
         clientPool.execute(() -> {
             try {
-                // Step 1: GET /wifi-sync/challenge
-                HttpResult chRes = httpRequest("GET", "http://" + host + ":" + port + "/wifi-sync/challenge", null, null, 8000);
+                // Step 1: GET /wifi-sync/challenge (direct raw TCP socket bypasses Android cleartext & HTTP proxy blocks)
+                HttpResult chRes = httpRequest("GET", host, port, "/wifi-sync/challenge", null, null, 8000);
                 if (chRes.status == 429) {
                     call.reject("密码错误次数过多，对方设备已暂时锁定，请 1 分钟后再试");
                     return;
                 }
                 if (chRes.status != 200) {
-                    call.reject("无法连接对方设备（HTTP " + chRes.status + "），请确认对方已打开 Wi-Fi 同步");
+                    call.reject("无法连接对方设备（HTTP " + chRes.status + "），请确认对方处于目录界面");
                     return;
                 }
                 JSONObject chObj = new JSONObject(new String(chRes.body, StandardCharsets.UTF_8));
@@ -3096,7 +3115,9 @@ public class WifiSyncPlugin extends Plugin {
                 headers.put("Content-Type", "application/json; charset=utf-8");
                 HttpResult authRes = httpRequest(
                     "POST",
-                    "http://" + host + ":" + port + "/wifi-sync/auth",
+                    host,
+                    port,
+                    "/wifi-sync/auth",
                     headers,
                     authReq.toString().getBytes(StandardCharsets.UTF_8),
                     8000
@@ -3126,6 +3147,7 @@ public class WifiSyncPlugin extends Plugin {
                 byte[] sessionKey = hmacSha256Raw(authKey, "session:" + serverNonce + ":" + clientNonce);
                 String sessionId = randomHex(12);
                 clientSessions.put(sessionId, new ClientSession(host, port, token, sessionKey, peerName));
+                rememberPeerIp(host);
 
                 JSObject out = new JSObject();
                 out.put("ok", true);
@@ -3162,7 +3184,9 @@ public class WifiSyncPlugin extends Plugin {
 
                 HttpResult res = httpRequest(
                     "POST",
-                    "http://" + session.host + ":" + session.port + "/wifi-sync/rpc",
+                    session.host,
+                    session.port,
+                    "/wifi-sync/rpc",
                     headers,
                     encrypted,
                     35000
@@ -3203,7 +3227,9 @@ public class WifiSyncPlugin extends Plugin {
 
                 HttpResult res = httpRequest(
                     "POST",
-                    "http://" + session.host + ":" + session.port + "/wifi-sync/image/get",
+                    session.host,
+                    session.port,
+                    "/wifi-sync/image/get",
                     headers,
                     encPath,
                     30000
@@ -3260,7 +3286,9 @@ public class WifiSyncPlugin extends Plugin {
 
                 HttpResult res = httpRequest(
                     "POST",
-                    "http://" + session.host + ":" + session.port + "/wifi-sync/image/put",
+                    session.host,
+                    session.port,
+                    "/wifi-sync/image/put",
                     headers,
                     encBody,
                     30000
@@ -3289,7 +3317,9 @@ public class WifiSyncPlugin extends Plugin {
                     headers.put("X-Wifi-Token", removed.token);
                     httpRequest(
                         "POST",
-                        "http://" + removed.host + ":" + removed.port + "/wifi-sync/bye",
+                        removed.host,
+                        removed.port,
+                        "/wifi-sync/bye",
                         headers,
                         new byte[0],
                         2000
@@ -3335,11 +3365,197 @@ public class WifiSyncPlugin extends Plugin {
             try { ds.close(); } catch (Exception ignored) {}
         }
 
+        stopNsdDiscovery();
+
         WifiManager.MulticastLock lock = multicastLock;
         multicastLock = null;
         if (lock != null && lock.isHeld()) {
             try { lock.release(); } catch (Exception ignored) {}
         }
+    }
+
+    private void upsertDiscoveredPeer(String peerId, String peerName, String peerIp, int peerPort, String peerHash) {
+        if (peerId == null || peerId.isEmpty() || peerId.equals(instanceId)) return;
+        if (peerIp == null || peerIp.isEmpty() || peerIp.equals(activeIp)) return;
+        String safeName = (peerName != null && !peerName.isEmpty()) ? peerName : peerIp;
+        String safeHash = peerHash != null ? peerHash : "";
+        long nowMs = System.currentTimeMillis();
+        DiscoveredPeer prev = discoveredPeers.get(peerId);
+        // If NSD resolves with empty hash while UDP already gave us a real hash, keep the existing hash
+        String resolvedHash = (!safeHash.isEmpty() || prev == null) ? safeHash : prev.stateHash;
+        boolean peerChanged = prev == null
+            || !safeName.equals(prev.name)
+            || !peerIp.equals(prev.ip)
+            || peerPort != prev.port
+            || !resolvedHash.equals(prev.stateHash);
+        if (peerChanged) {
+            discoveredPeers.put(peerId, new DiscoveredPeer(peerId, safeName, peerIp, peerPort, resolvedHash, nowMs));
+            rememberPeerIp(peerIp);
+            emitPeersToJs();
+        } else {
+            prev.lastSeenAt = nowMs;
+        }
+    }
+
+    private void startNsdDiscovery() {
+        try {
+            NsdManager mgr = (NsdManager) getContext().getApplicationContext().getSystemService(Context.NSD_SERVICE);
+            if (mgr == null) return;
+            this.nsdManager = mgr;
+
+            NsdServiceInfo svc = new NsdServiceInfo();
+            svc.setServiceName("FeiArtical-" + instanceId);
+            svc.setServiceType(NSD_SERVICE_TYPE);
+            svc.setPort(activePort);
+            svc.setAttribute("id", instanceId);
+            svc.setAttribute("name", activeDeviceName);
+            if (activeStateHash != null && !activeStateHash.isEmpty()) {
+                svc.setAttribute("hash", activeStateHash);
+            }
+
+            NsdManager.RegistrationListener regListener = new NsdManager.RegistrationListener() {
+                @Override
+                public void onServiceRegistered(NsdServiceInfo info) {
+                    registeredNsdName = info.getServiceName() != null ? info.getServiceName() : "";
+                }
+                @Override
+                public void onRegistrationFailed(NsdServiceInfo info, int errorCode) {}
+                @Override
+                public void onServiceUnregistered(NsdServiceInfo info) {}
+                @Override
+                public void onUnregistrationFailed(NsdServiceInfo info, int errorCode) {}
+            };
+            this.nsdRegListener = regListener;
+            mgr.registerService(svc, NsdManager.PROTOCOL_DNS_SD, regListener);
+
+            NsdManager.DiscoveryListener discListener = new NsdManager.DiscoveryListener() {
+                @Override
+                public void onDiscoveryStarted(String regType) {}
+                @Override
+                public void onServiceFound(NsdServiceInfo serviceInfo) {
+                    if (!running) return;
+                    String svcName = serviceInfo.getServiceName();
+                    if (svcName == null || !svcName.startsWith("FeiArtical-")) return;
+                    if (svcName.equals(registeredNsdName) || svcName.equals("FeiArtical-" + instanceId)) return;
+                    try {
+                        mgr.resolveService(serviceInfo, new NsdManager.ResolveListener() {
+                            @Override
+                            public void onResolveFailed(NsdServiceInfo info, int errorCode) {}
+                            @Override
+                            public void onServiceResolved(NsdServiceInfo resolved) {
+                                if (!running) return;
+                                InetAddress hostAddr = resolved.getHost();
+                                if (hostAddr == null) return;
+                                String peerIp = hostAddr.getHostAddress();
+                                int peerPort = resolved.getPort();
+                                Map<String, byte[]> attrs = resolved.getAttributes();
+                                String peerId = readNsdAttr(attrs, "id");
+                                if (peerId.isEmpty() && resolved.getServiceName() != null && resolved.getServiceName().startsWith("FeiArtical-")) {
+                                    peerId = resolved.getServiceName().substring("FeiArtical-".length());
+                                }
+                                String peerName = readNsdAttr(attrs, "name");
+                                String peerHash = readNsdAttr(attrs, "hash");
+                                upsertDiscoveredPeer(peerId, peerName, peerIp, peerPort, peerHash);
+                                // Immediately unicast our UDP beacon to this resolved IP so both sides exchange fresh stateHash
+                                sendUnicastBeaconToIp(peerIp);
+                            }
+                        });
+                    } catch (Exception ignored) {
+                    }
+                }
+                @Override
+                public void onServiceLost(NsdServiceInfo serviceInfo) {}
+                @Override
+                public void onDiscoveryStopped(String serviceType) {}
+                @Override
+                public void onStartDiscoveryFailed(String serviceType, int errorCode) {}
+                @Override
+                public void onStopDiscoveryFailed(String serviceType, int errorCode) {}
+            };
+            this.nsdDiscListener = discListener;
+            mgr.discoverServices(NSD_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discListener);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void stopNsdDiscovery() {
+        NsdManager mgr = nsdManager;
+        nsdManager = null;
+        NsdManager.RegistrationListener reg = nsdRegListener;
+        nsdRegListener = null;
+        NsdManager.DiscoveryListener disc = nsdDiscListener;
+        nsdDiscListener = null;
+        registeredNsdName = "";
+        if (mgr != null) {
+            if (disc != null) {
+                try { mgr.stopServiceDiscovery(disc); } catch (Exception ignored) {}
+            }
+            if (reg != null) {
+                try { mgr.unregisterService(reg); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private static String readNsdAttr(Map<String, byte[]> attrs, String key) {
+        if (attrs == null) return "";
+        byte[] val = attrs.get(key);
+        if (val == null || val.length == 0) return "";
+        return new String(val, StandardCharsets.UTF_8).trim();
+    }
+
+    private void rememberPeerIp(String ip) {
+        if (ip == null || ip.isEmpty() || ip.equals(activeIp)) return;
+        try {
+            SharedPreferences prefs = getContext().getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String existing = prefs.getString(PREF_RECENT_PEER_IPS, "");
+            java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
+            set.add(ip);
+            if (existing != null && !existing.isEmpty()) {
+                for (String part : existing.split(",")) {
+                    String trimmed = part.trim();
+                    if (!trimmed.isEmpty() && !trimmed.equals(activeIp) && set.size() < 6) {
+                        set.add(trimmed);
+                    }
+                }
+            }
+            StringBuilder sb = new StringBuilder();
+            for (String s : set) {
+                if (sb.length() > 0) sb.append(",");
+                sb.append(s);
+            }
+            prefs.edit().putString(PREF_RECENT_PEER_IPS, sb.toString()).apply();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private Set<String> loadRememberedPeerIps() {
+        Set<String> ips = new HashSet<>();
+        try {
+            SharedPreferences prefs = getContext().getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String existing = prefs.getString(PREF_RECENT_PEER_IPS, "");
+            if (existing != null && !existing.isEmpty()) {
+                for (String part : existing.split(",")) {
+                    String trimmed = part.trim();
+                    if (!trimmed.isEmpty() && !trimmed.equals(activeIp)) {
+                        ips.add(trimmed);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return ips;
+    }
+
+    private void sendUnicastBeaconToIp(String targetIp) {
+        final DatagramSocket ds = discoverySocket;
+        if (!running || ds == null || ds.isClosed() || targetIp == null || targetIp.isEmpty() || targetIp.equals(activeIp)) return;
+        serverPool.execute(() -> {
+            try {
+                byte[] payload = buildBeaconBytes();
+                sendBroadcastPacket(ds, payload, InetAddress.getByName(targetIp));
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     private void startUdpDiscovery() {
@@ -3378,19 +3594,10 @@ public class WifiSyncPlugin extends Plugin {
                         int peerPort = obj.optInt("port", DEFAULT_SYNC_PORT);
                         String peerName = obj.optString("name", peerIp);
                         String peerHash = obj.optString("hash", "");
-                        if (peerIp == null || peerIp.isEmpty() || peerIp.equals(activeIp)) continue;
-                        long nowMs = System.currentTimeMillis();
-                        DiscoveredPeer prev = discoveredPeers.get(peerId);
-                        boolean peerChanged = prev == null
-                            || !peerName.equals(prev.name)
-                            || !peerIp.equals(prev.ip)
-                            || peerPort != prev.port
-                            || !peerHash.equals(prev.stateHash);
-                        if (peerChanged) {
-                            discoveredPeers.put(peerId, new DiscoveredPeer(peerId, peerName, peerIp, peerPort, peerHash, nowMs));
-                            emitPeersToJs();
-                        } else {
-                            prev.lastSeenAt = nowMs;
+                        boolean isNewPeer = !discoveredPeers.containsKey(peerId);
+                        upsertDiscoveredPeer(peerId, peerName, peerIp, peerPort, peerHash);
+                        if (isNewPeer && peerIp != null && !peerIp.isEmpty()) {
+                            sendUnicastBeaconToIp(peerIp);
                         }
                     } catch (IOException ignored) {
                         pruneAndEmitPeers();
@@ -3429,8 +3636,7 @@ public class WifiSyncPlugin extends Plugin {
         });
     }
 
-    private void sendCurrentBeacon(DatagramSocket ds) throws Exception {
-        if (!running || ds == null || ds.isClosed()) return;
+    private byte[] buildBeaconBytes() throws Exception {
         JSONObject beacon = new JSONObject();
         beacon.put("app", "feiartical");
         beacon.put("v", 1);
@@ -3438,11 +3644,54 @@ public class WifiSyncPlugin extends Plugin {
         beacon.put("name", activeDeviceName);
         beacon.put("port", activePort);
         beacon.put("hash", activeStateHash != null ? activeStateHash : "");
-        byte[] payload = beacon.toString().getBytes(StandardCharsets.UTF_8);
+        return beacon.toString().getBytes(StandardCharsets.UTF_8);
+    }
 
+    private void sendCurrentBeacon(DatagramSocket ds) throws Exception {
+        if (!running || ds == null || ds.isClosed()) return;
+        byte[] payload = buildBeaconBytes();
+
+        Set<String> sentTargets = new HashSet<>();
         sendBroadcastPacket(ds, payload, InetAddress.getByName("255.255.255.255"));
+        sentTargets.add("255.255.255.255");
+
         for (InetAddress bcast : resolveSubnetBroadcasts()) {
-            sendBroadcastPacket(ds, payload, bcast);
+            String hostAddr = bcast.getHostAddress();
+            if (hostAddr != null && sentTargets.add(hostAddr)) {
+                sendBroadcastPacket(ds, payload, bcast);
+            }
+        }
+
+        // Fallback /24 subnet broadcast derived from activeIp in case InterfaceAddress.getBroadcast() returned null
+        if (activeIp != null && !activeIp.isEmpty()) {
+            int lastDot = activeIp.lastIndexOf('.');
+            if (lastDot > 0) {
+                String fallbackBcast = activeIp.substring(0, lastDot) + ".255";
+                if (sentTargets.add(fallbackBcast)) {
+                    try {
+                        sendBroadcastPacket(ds, payload, InetAddress.getByName(fallbackBcast));
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        }
+
+        // Direct unicast to currently discovered peers & recently paired LAN IPs (immune to router broadcast filtering)
+        for (DiscoveredPeer p : discoveredPeers.values()) {
+            if (p.ip != null && !p.ip.isEmpty() && !p.ip.equals(activeIp) && sentTargets.add(p.ip)) {
+                try {
+                    sendBroadcastPacket(ds, payload, InetAddress.getByName(p.ip));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        for (String cachedIp : loadRememberedPeerIps()) {
+            if (!cachedIp.equals(activeIp) && sentTargets.add(cachedIp)) {
+                try {
+                    sendBroadcastPacket(ds, payload, InetAddress.getByName(cachedIp));
+                } catch (Exception ignored) {
+                }
+            }
         }
     }
 
@@ -3789,45 +4038,77 @@ public class WifiSyncPlugin extends Plugin {
 
     private static HttpResult httpRequest(
         String method,
-        String urlStr,
+        String host,
+        int port,
+        String path,
         Map<String, String> headers,
         byte[] body,
         int timeoutMs
     ) throws IOException {
-        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
-        conn.setRequestMethod(method);
-        conn.setConnectTimeout(timeoutMs);
-        conn.setReadTimeout(timeoutMs);
-        conn.setUseCaches(false);
-        if (headers != null) {
-            for (Map.Entry<String, String> e : headers.entrySet()) {
-                conn.setRequestProperty(e.getKey(), e.getValue());
+        try (Socket sock = new Socket()) {
+            sock.connect(new InetSocketAddress(host, port), timeoutMs);
+            sock.setSoTimeout(timeoutMs);
+            sock.setTcpNoDelay(true);
+
+            OutputStream os = new BufferedOutputStream(sock.getOutputStream());
+            StringBuilder sb = new StringBuilder();
+            sb.append(method).append(" ").append(path).append(" HTTP/1.1\\r\\n");
+            sb.append("Host: ").append(host).append(":").append(port).append("\\r\\n");
+            sb.append("Connection: close\\r\\n");
+            if (headers != null) {
+                for (Map.Entry<String, String> e : headers.entrySet()) {
+                    sb.append(e.getKey()).append(": ").append(e.getValue()).append("\\r\\n");
+                }
             }
-        }
-        if (body != null) {
-            conn.setDoOutput(true);
-            conn.setFixedLengthStreamingMode(body.length);
-            try (OutputStream os = conn.getOutputStream()) {
+            int bodyLen = body != null ? body.length : 0;
+            if (body != null) {
+                sb.append("Content-Length: ").append(bodyLen).append("\\r\\n");
+            }
+            sb.append("\\r\\n");
+            os.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+            if (body != null && bodyLen > 0) {
                 os.write(body);
-                os.flush();
             }
-        }
-        int status = conn.getResponseCode();
-        InputStream is = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
-        byte[] respBytes = new byte[0];
-        if (is != null) {
-            try (InputStream stream = is) {
+            os.flush();
+
+            InputStream in = new BufferedInputStream(sock.getInputStream());
+            String headerBlock = readHeaderBlock(in);
+            if (headerBlock == null || headerBlock.isEmpty()) {
+                throw new IOException("Empty HTTP response");
+            }
+            String[] lines = headerBlock.split("\\r\\n");
+            if (lines.length == 0) {
+                throw new IOException("Malformed HTTP status line");
+            }
+            String[] statusParts = lines[0].split(" ");
+            int status = statusParts.length >= 2 ? Integer.parseInt(statusParts[1]) : 500;
+
+            int contentLength = -1;
+            for (int i = 1; i < lines.length; i++) {
+                int colon = lines[i].indexOf(':');
+                if (colon > 0) {
+                    String k = lines[i].substring(0, colon).trim().toLowerCase(Locale.ROOT);
+                    String v = lines[i].substring(colon + 1).trim();
+                    if ("content-length".equals(k)) {
+                        try { contentLength = Integer.parseInt(v); } catch (NumberFormatException ignored) {}
+                    }
+                }
+            }
+
+            byte[] respBytes;
+            if (contentLength >= 0) {
+                respBytes = contentLength > 0 ? readExactBytes(in, contentLength) : new byte[0];
+            } else {
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 byte[] buf = new byte[16384];
                 int n;
-                while ((n = stream.read(buf)) != -1) {
+                while ((n = in.read(buf)) != -1) {
                     baos.write(buf, 0, n);
                 }
                 respBytes = baos.toByteArray();
             }
+            return new HttpResult(status, respBytes);
         }
-        conn.disconnect();
-        return new HttpResult(status, respBytes);
     }
 
     private static String readHeaderBlock(InputStream in) throws IOException {

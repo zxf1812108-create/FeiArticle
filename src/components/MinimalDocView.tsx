@@ -78,7 +78,7 @@ interface MinimalDocViewProps {
   onReadProgressChange?: (progress: number) => void;
   onReadMetricsChange?: (metrics: DocReadMetrics) => void;
   onFetchRemoteBody: () => Promise<void>;
-  onOpenWifiSync: () => void;
+  onReturnToTree: () => void;
 }
 
 interface CopyPopoverState {
@@ -601,7 +601,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       onReadProgressChange,
       onReadMetricsChange,
       onFetchRemoteBody,
-      onOpenWifiSync,
+      onReturnToTree,
     },
     ref
   ) {
@@ -2692,15 +2692,15 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                     ) : (
                       <>
                         <p className="text-[14px] text-[var(--fei-text-muted)]">
-                          本机暂无此文档正文（约 {formatBytes(doc.byteSize)}），请在相同 Wi-Fi 下通过设备同步获取。
+                          本机暂无此文档正文（约 {formatBytes(doc.byteSize)}），两台设备同 Wi-Fi 停留在目录界面即可自动同步。
                         </p>
                         <button
                           type="button"
-                          onClick={onOpenWifiSync}
+                          onClick={onReturnToTree}
                           className="h-9 px-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[13px] text-[var(--fei-text-primary)] font-medium hover:bg-[var(--fei-bg-selected)] active:bg-[var(--fei-bg-selected)] transition-colors cursor-pointer"
                         >
                           <Wifi className="w-4 h-4" />
-                          <span>打开 Wi-Fi 同步</span>
+                          <span>返回目录自动同步</span>
                         </button>
                       </>
                     )}
