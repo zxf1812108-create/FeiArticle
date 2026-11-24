@@ -48,6 +48,228 @@ const UNSAFE_TAGS = [
   'link',
 ];
 
+const BACK_TO_TOP_RE =
+  /^[\s\[\]【】()（）<>《》↑▲△⇧⬆⬆︎🔝·•\-—]*回\s*到\s*顶\s*部[\s\[\]【】()（）<>《》↑▲△⇧⬆⬆︎🔝·•\-—]*$/;
+
+const EMPTY_WRAPPER_TAGS = new Set([
+  'DIV',
+  'P',
+  'SPAN',
+  'CENTER',
+  'FONT',
+  'B',
+  'I',
+  'U',
+  'SMALL',
+  'STRONG',
+  'EM',
+  'A',
+  'LI',
+]);
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function extractSafeAnchorFromJs(code: string): string | null {
+  const patterns = [
+    /getElementById\s*\(\s*['"]([^'"]+)['"]\s*\)/i,
+    /querySelector\s*\(\s*['"]#([^'"\s]+)['"]\s*\)/i,
+    /(?:location\.)?hash\s*=\s*['"]#?([^'"\s]+)['"]/i,
+    /scrollToElement\s*\(\s*['"]#?([^'"]+)['"]\s*\)/i,
+  ];
+  for (const re of patterns) {
+    const m = code.match(re);
+    if (m && m[1]) {
+      return m[1].trim();
+    }
+  }
+  return null;
+}
+
+function isNodeOnlyWhitespaceOrBr(node: Node | null): boolean {
+  if (!node) return true;
+  if (node.nodeType === Node.TEXT_NODE) {
+    return (node.nodeValue || '').trim().length === 0;
+  }
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    return (node as Element).tagName === 'BR';
+  }
+  return true;
+}
+
+function hasOnlyTrailingNoiseAfter(node: Node): boolean {
+  let cur: Node | null = node.nextSibling;
+  while (cur) {
+    if (!isNodeOnlyWhitespaceOrBr(cur)) return false;
+    cur = cur.nextSibling;
+  }
+  return true;
+}
+
+function removeBackToTopElements(body: HTMLElement): void {
+  const fullText = body.textContent || '';
+  if (!fullText.includes('回到顶部') && !/回\s*到\s*顶\s*部/.test(fullText)) {
+    return;
+  }
+  // Never wipe out an entry if the entire entry itself is only "回到顶部"
+  if (BACK_TO_TOP_RE.test(fullText)) {
+    return;
+  }
+
+  let removedAny = false;
+
+  const removeNodeAndCleanup = (node: Node) => {
+    const parent = node.parentElement;
+    if (!parent) return;
+
+    const atTrailingEnd = hasOnlyTrailingNoiseAfter(node);
+    const prevSibling = node.previousSibling;
+    const nextSibling = node.nextSibling;
+
+    node.parentNode?.removeChild(node);
+    removedAny = true;
+
+    if (atTrailingEnd) {
+      // Trim trailing whitespace and <br> immediately before the removed back-to-top control
+      let cursor: Node | null = parent.lastChild;
+      while (cursor && isNodeOnlyWhitespaceOrBr(cursor)) {
+        const prev = cursor.previousSibling;
+        parent.removeChild(cursor);
+        cursor = prev;
+      }
+    } else if (
+      prevSibling &&
+      prevSibling.nodeType === Node.ELEMENT_NODE &&
+      (prevSibling as Element).tagName === 'BR' &&
+      nextSibling &&
+      nextSibling.nodeType === Node.ELEMENT_NODE &&
+      (nextSibling as Element).tagName === 'BR'
+    ) {
+      parent.removeChild(prevSibling);
+    }
+
+    // Remove ancestor wrappers that became completely empty
+    let ancestor: HTMLElement | null = parent;
+    while (ancestor && ancestor !== body) {
+      if (
+        EMPTY_WRAPPER_TAGS.has(ancestor.tagName) &&
+        (ancestor.textContent || '').trim() === '' &&
+        !ancestor.querySelector('img, svg, hr, table')
+      ) {
+        const nextParent: HTMLElement | null = ancestor.parentElement;
+        const ancestorAtEnd = hasOnlyTrailingNoiseAfter(ancestor);
+        ancestor.remove();
+        if (ancestorAtEnd && nextParent) {
+          let cursor: Node | null = nextParent.lastChild;
+          while (cursor && isNodeOnlyWhitespaceOrBr(cursor)) {
+            const prev = cursor.previousSibling;
+            nextParent.removeChild(cursor);
+            cursor = prev;
+          }
+        }
+        ancestor = nextParent;
+      } else {
+        break;
+      }
+    }
+  };
+
+  // Pass 1: Remove elements (deepest-first) whose sole text is "回到顶部"
+  const candidates = Array.from(
+    body.querySelectorAll(
+      'a, button, span, b, i, u, font, small, strong, em, p, div, center, li, td'
+    )
+  ).reverse();
+
+  for (const el of candidates) {
+    if (!el.isConnected) continue;
+    if (BACK_TO_TOP_RE.test(el.textContent || '')) {
+      removeNodeAndCleanup(el);
+    }
+  }
+
+  // Pass 2: Remove standalone bare text nodes matching "回到顶部"
+  const textWalker = body.ownerDocument.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  const matchingTextNodes: Text[] = [];
+  let textNode = textWalker.nextNode();
+  while (textNode) {
+    if (BACK_TO_TOP_RE.test(textNode.nodeValue || '')) {
+      matchingTextNodes.push(textNode as Text);
+    }
+    textNode = textWalker.nextNode();
+  }
+  for (const tn of matchingTextNodes) {
+    if (!tn.isConnected) continue;
+    const remainingText = (body.textContent || '').replace(tn.nodeValue || '', '').trim();
+    if (remainingText.length > 0) {
+      removeNodeAndCleanup(tn);
+    }
+  }
+
+  if (removedAny) {
+    let cursor: Node | null = body.lastChild;
+    while (cursor && isNodeOnlyWhitespaceOrBr(cursor)) {
+      const prev = cursor.previousSibling;
+      body.removeChild(cursor);
+      cursor = prev;
+    }
+  }
+}
+
+function findAnchorTargetInScope(scope: ParentNode, rawAnchor: string): HTMLElement | null {
+  const cleaned = rawAnchor.replace(/^#+/, '').trim();
+  if (!cleaned) return null;
+  const decoded = safeDecodeURIComponent(cleaned);
+  const candidates = Array.from(scope.querySelectorAll<HTMLElement>('[id], [name]'));
+
+  for (const el of candidates) {
+    const id = el.getAttribute('id');
+    if (id && (id === cleaned || id === decoded)) return el;
+  }
+  for (const el of candidates) {
+    const name = el.getAttribute('name');
+    if (name && (name === cleaned || name === decoded)) return el;
+  }
+
+  const lowerCleaned = cleaned.toLowerCase();
+  const lowerDecoded = decoded.toLowerCase();
+  for (const el of candidates) {
+    const id = (el.getAttribute('id') || '').toLowerCase();
+    const name = (el.getAttribute('name') || '').toLowerCase();
+    if (
+      (id && (id === lowerCleaned || id === lowerDecoded)) ||
+      (name && (name === lowerCleaned || name === lowerDecoded))
+    ) {
+      return el;
+    }
+  }
+  return null;
+}
+
+function getScrollableTargetRect(targetEl: HTMLElement): DOMRect | null {
+  const r = targetEl.getBoundingClientRect();
+  if (r.top !== 0 || r.bottom !== 0 || r.height > 0 || r.width > 0) {
+    return r;
+  }
+  let probe: Element | null = targetEl.nextElementSibling;
+  while (probe) {
+    const pr = probe.getBoundingClientRect();
+    if (pr.top !== 0 || pr.bottom !== 0 || pr.height > 0 || pr.width > 0) {
+      return pr;
+    }
+    probe = probe.nextElementSibling;
+  }
+  if (targetEl.parentElement) {
+    return targetEl.parentElement.getBoundingClientRect();
+  }
+  return null;
+}
+
 function sanitizeMdictEntryHtml(rawHtml: string): string {
   if (typeof DOMParser === 'undefined') return '';
   const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
@@ -75,6 +297,12 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
       const name = attr.name.toLowerCase();
       const val = attr.value.trim();
       if (name.startsWith('on')) {
+        if (name === 'onclick' && !el.getAttribute('data-mdx-anchor')) {
+          const safeAnchor = extractSafeAnchorFromJs(val);
+          if (safeAnchor) {
+            el.setAttribute('data-mdx-anchor', safeAnchor);
+          }
+        }
         el.removeAttribute(attr.name);
         continue;
       }
@@ -82,6 +310,12 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
         (name === 'href' || name === 'src' || name === 'xlink:href') &&
         /^(?:javascript|vbscript):/i.test(val)
       ) {
+        if (name === 'href' && !el.getAttribute('data-mdx-anchor')) {
+          const safeAnchor = extractSafeAnchorFromJs(val);
+          if (safeAnchor) {
+            el.setAttribute('data-mdx-anchor', safeAnchor);
+          }
+        }
         el.removeAttribute(attr.name);
       }
       if (name === 'style') {
@@ -99,6 +333,8 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
       }
     }
   });
+
+  removeBackToTopElements(doc.body);
 
   return doc.body.innerHTML;
 }
@@ -193,21 +429,29 @@ const MdictShadowDefinition: React.FC<{
   htmlDefinitions: string[];
   dictCssText?: string;
   fontSize: number;
-  onLookupWord: (word: string) => void;
+  currentWords: string[];
+  onLookupWord: (word: string, anchorId?: string) => void;
+  onJumpToAnchor: (anchorId: string, sourceEntry?: Element | null) => void;
   onShadowReady?: (shadow: ShadowRoot | null) => void;
   onContentRendered?: () => void;
 }> = ({
   htmlDefinitions,
   dictCssText,
   fontSize,
+  currentWords,
   onLookupWord,
+  onJumpToAnchor,
   onShadowReady,
   onContentRendered,
 }) => {
   const hostRef = useRef<HTMLDivElement>(null);
   const shadowRef = useRef<ShadowRoot | null>(null);
+  const currentWordsRef = useRef(currentWords);
+  currentWordsRef.current = currentWords;
   const onLookupWordRef = useRef(onLookupWord);
   onLookupWordRef.current = onLookupWord;
+  const onJumpToAnchorRef = useRef(onJumpToAnchor);
+  onJumpToAnchorRef.current = onJumpToAnchor;
   const onShadowReadyRef = useRef(onShadowReady);
   onShadowReadyRef.current = onShadowReady;
   const onContentRenderedRef = useRef(onContentRendered);
@@ -246,17 +490,59 @@ const MdictShadowDefinition: React.FC<{
         evt.preventDefault();
       });
       shadowRef.current.addEventListener('click', (evt) => {
-        const target = evt.target as HTMLElement | null;
-        const anchor = target?.closest('a[href]') as HTMLAnchorElement | null;
+        const rawTarget = evt.target as Node | null;
+        const targetEl =
+          rawTarget instanceof Element ? rawTarget : rawTarget?.parentElement ?? null;
+        if (!targetEl) return;
+
+        const anchor = targetEl.closest('a[href], [data-mdx-anchor]') as HTMLElement | null;
         if (!anchor) return;
-        const href = (anchor.getAttribute('href') || '').trim();
-        const entryMatch = href.match(/^(?:entry|bword):\/\/(.+)$/i);
-        if (entryMatch && entryMatch[1]) {
+
+        const sourceEntry = anchor.closest('.mdx-entry');
+        const dataAnchor = (anchor.getAttribute('data-mdx-anchor') || '').trim();
+        if (dataAnchor) {
           evt.preventDefault();
           evt.stopPropagation();
-          const nextWord = decodeURIComponent(entryMatch[1]).replace(/#.*$/, '').trim();
+          onJumpToAnchorRef.current(dataAnchor, sourceEntry);
+          return;
+        }
+
+        const href = (anchor.getAttribute('href') || '').trim();
+        if (!href) return;
+
+        // Direct in-entry hash anchor (e.g. href="#pos_n" or href="about:blank#pos_n")
+        if (href.startsWith('#') || /^about:blank#/i.test(href)) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          const hashPart = href.slice(href.indexOf('#') + 1).trim();
+          onJumpToAnchorRef.current(hashPart, sourceEntry);
+          return;
+        }
+
+        // MDict entry:// or bword:// link (in-entry anchor, same-word anchor, or cross-word lookup)
+        const entryMatch = href.match(/^(?:entry|bword):\/\/(.*)$/i);
+        if (entryMatch) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          const rawPayload = entryMatch[1] || '';
+          const payload = rawPayload.includes('#') ? rawPayload : safeDecodeURIComponent(rawPayload);
+          const hashIdx = payload.indexOf('#');
+          const rawWordPart = hashIdx >= 0 ? payload.slice(0, hashIdx) : payload;
+          const rawAnchorPart = hashIdx >= 0 ? payload.slice(hashIdx + 1) : '';
+          const nextWord = safeDecodeURIComponent(rawWordPart).trim();
+          const anchorId = rawAnchorPart.trim();
+
+          const isSameWord =
+            !nextWord ||
+            currentWordsRef.current.some((w) => w && w.toLowerCase() === nextWord.toLowerCase());
+
+          if (anchorId && isSameWord) {
+            onJumpToAnchorRef.current(anchorId, sourceEntry);
+            return;
+          }
+
           if (nextWord) {
-            onLookupWordRef.current(nextWord);
+            onLookupWordRef.current(nextWord, anchorId || undefined);
           }
         }
       });
@@ -290,13 +576,13 @@ const MdictShadowDefinition: React.FC<{
       p { margin: 0.25em 0; }
       ul, ol { margin: 0.3em 0; padding-left: 1.3em; }
       li { margin: 0.12em 0; }
-      a[href^="entry://"], a[href^="bword://"] {
+      a[href^="entry://"], a[href^="bword://"], a[href^="#"], [data-mdx-anchor] {
         color: inherit;
         text-decoration: underline;
         text-underline-offset: 2px;
         cursor: pointer;
       }
-      a:not([href^="entry://"]):not([href^="bword://"]) {
+      a:not([href^="entry://"]):not([href^="bword://"]):not([href^="#"]):not([data-mdx-anchor]) {
         color: inherit;
         text-decoration: none;
         cursor: default;
@@ -382,6 +668,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
     const clipRafRef = useRef<number | null>(null);
     const autoExpandRafRef = useRef<number | null>(null);
+    const pendingAnchorRef = useRef<string | null>(null);
 
     const [isExpanded, setIsExpanded] = useState(false);
     const isExpandedRef = useRef(false);
@@ -582,6 +869,71 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       scheduleAutoExpandCheck();
     }, [scheduleAutoExpandCheck]);
 
+    const scrollToAnchor = useCallback(
+      (anchorId: string, sourceEntry?: Element | null): boolean => {
+        const scrollEl = bodyScrollRef.current;
+        const shadow = shadowRootRef.current;
+        if (!scrollEl || !shadow) return false;
+
+        const cleaned = anchorId.replace(/^#+/, '').trim();
+        if (!cleaned) {
+          scrollEl.scrollTop = 0;
+          updatePopupEdgeClips();
+          return true;
+        }
+
+        const targetEl =
+          (sourceEntry ? findAnchorTargetInScope(sourceEntry, cleaned) : null) ||
+          findAnchorTargetInScope(shadow, cleaned);
+
+        if (!targetEl) {
+          if (cleaned.toLowerCase() === 'top' || cleaned.toLowerCase() === '_top') {
+            scrollEl.scrollTop = 0;
+            updatePopupEdgeClips();
+            return true;
+          }
+          return false;
+        }
+
+        // Open any collapsed <details> ancestor so the jumped section becomes visible
+        let ancestor: HTMLElement | null = targetEl.parentElement;
+        while (ancestor) {
+          if (ancestor.tagName === 'DETAILS' && !(ancestor as HTMLDetailsElement).open) {
+            (ancestor as HTMLDetailsElement).open = true;
+          }
+          ancestor = ancestor.parentElement;
+        }
+
+        const targetRect = getScrollableTargetRect(targetEl);
+        if (!targetRect) return false;
+
+        const containerRect = scrollEl.getBoundingClientRect();
+        const maxScroll = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+        const desiredTop = scrollEl.scrollTop + (targetRect.top - containerRect.top) - 6;
+        scrollEl.scrollTop = Math.max(0, Math.min(maxScroll, Math.floor(desiredTop)));
+        updatePopupEdgeClips();
+        return true;
+      },
+      [updatePopupEdgeClips]
+    );
+
+    const handleLookupWordWithAnchor = useCallback(
+      (word: string, anchorId?: string) => {
+        pendingAnchorRef.current = anchorId || null;
+        onLookupWord(word);
+      },
+      [onLookupWord]
+    );
+
+    const currentWords = useMemo(() => {
+      const list: string[] = [];
+      if (queryWord) list.push(queryWord);
+      if (result?.matchedHeadword && result.matchedHeadword !== queryWord) {
+        list.push(result.matchedHeadword);
+      }
+      return list;
+    }, [queryWord, result?.matchedHeadword]);
+
     const handleShadowContentRendered = useCallback(() => {
       scheduleEdgeClipUpdate();
       if (pendingAutoExpandCheckRef.current) {
@@ -601,11 +953,24 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     }, []);
 
     useEffect(() => {
+      const pendingAnchor = pendingAnchorRef.current;
+      if (pendingAnchor && result && result.htmlDefinitions.length > 0) {
+        pendingAnchorRef.current = null;
+        const raf = window.requestAnimationFrame(() => {
+          if (!scrollToAnchor(pendingAnchor)) {
+            if (bodyScrollRef.current) {
+              bodyScrollRef.current.scrollTop = 0;
+            }
+            scheduleEdgeClipUpdate();
+          }
+        });
+        return () => window.cancelAnimationFrame(raf);
+      }
       if (bodyScrollRef.current) {
         bodyScrollRef.current.scrollTop = 0;
       }
       scheduleEdgeClipUpdate();
-    }, [queryWord, result, scheduleEdgeClipUpdate]);
+    }, [queryWord, result, scheduleEdgeClipUpdate, scrollToAnchor]);
 
     useLayoutEffect(() => {
       updatePopupEdgeClips();
@@ -726,9 +1091,12 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
           if (tag === 'BUTTON' || tag === 'SUMMARY' || tag === 'INPUT' || tag === 'SELECT') {
             return;
           }
+          if (item.hasAttribute('data-mdx-anchor')) {
+            return;
+          }
           if (tag === 'A') {
             const href = (item.getAttribute('href') || '').trim();
-            if (/^(?:entry|bword):\/\//i.test(href)) {
+            if (/^(?:entry|bword):\/\//i.test(href) || href.startsWith('#') || /^about:blank#/i.test(href)) {
               return;
             }
           }
@@ -911,7 +1279,9 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                     htmlDefinitions={result.htmlDefinitions}
                     dictCssText={result.dictCssText}
                     fontSize={popupFontSize}
-                    onLookupWord={onLookupWord}
+                    currentWords={currentWords}
+                    onLookupWord={handleLookupWordWithAnchor}
+                    onJumpToAnchor={scrollToAnchor}
                     onShadowReady={(shadow) => {
                       shadowRootRef.current = shadow;
                     }}
