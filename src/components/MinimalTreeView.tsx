@@ -7,12 +7,15 @@ import React, {
   useState,
 } from 'react';
 import {
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   ChevronRight,
   CloudDownload,
   FilePlus,
   Pencil,
   Plus,
+  RefreshCw,
   Trash2,
   Wifi,
 } from 'lucide-react';
@@ -63,6 +66,8 @@ interface MinimalTreeViewProps {
   onDragPayloadChange?: (payload: DragPayload | null) => void;
   onTrashDrop?: (payload: DragPayload) => void;
   onTrashDragHoverChange?: (hovering: boolean) => void;
+  onPullRefresh?: () => void;
+  isPullRefreshing?: boolean;
 }
 
 export type DragPayload =
@@ -95,9 +100,12 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
       onDragPayloadChange,
       onTrashDrop,
       onTrashDragHoverChange,
+      onPullRefresh,
+      isPullRefreshing = false,
     },
     ref
   ) {
+  const PULL_REFRESH_THRESHOLD = 52;
   const scrollRef = useRef<HTMLDivElement>(null);
   const debounceScrollRef = useRef<number | null>(null);
   const restoredScrollRef = useRef(false);
@@ -109,11 +117,20 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     y: number;
   } | null>(null);
   const suppressClickRef = useRef(false);
+  const pullStartRef = useRef<{ x: number; y: number; active: boolean } | null>(null);
+  const pullDistanceRef = useRef(0);
+  const onPullRefreshRef = useRef(onPullRefresh);
+  onPullRefreshRef.current = onPullRefresh;
+  const isPullRefreshingRef = useRef(isPullRefreshing);
+  isPullRefreshingRef.current = isPullRefreshing;
 
+  const [pullDistance, setPullDistance] = useState(0);
   const [addingFolder, setAddingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [editingItem, setEditingItem] = useState<TreeSelection | null>(null);
   const [editingName, setEditingName] = useState('');
+  const editingActiveRef = useRef(false);
+  editingActiveRef.current = Boolean(editingItem || addingFolder);
 
   // Restore saved directory scroll position synchronously on entering tree mode
   useLayoutEffect(() => {
@@ -186,6 +203,114 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     x: number;
     y: number;
   } | null>(null);
+  const touchDragActiveRef = useRef(false);
+  touchDragActiveRef.current = Boolean(touchDrag);
+
+  // Pull-to-refresh at the top of Directory Mode (touch gesture, E-Ink friendly low-repaint steps)
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const resetPull = () => {
+      pullStartRef.current = null;
+      if (pullDistanceRef.current !== 0) {
+        pullDistanceRef.current = 0;
+        setPullDistance(0);
+      }
+    };
+
+    const handlePullTouchStart = (e: TouchEvent) => {
+      if (
+        !onPullRefreshRef.current ||
+        isPullRefreshingRef.current ||
+        touchDragActiveRef.current ||
+        editingActiveRef.current ||
+        e.touches.length !== 1 ||
+        el.scrollTop > 1
+      ) {
+        pullStartRef.current = null;
+        return;
+      }
+      const t = e.touches[0];
+      pullStartRef.current = { x: t.clientX, y: t.clientY, active: false };
+    };
+
+    const handlePullTouchMove = (e: TouchEvent) => {
+      const start = pullStartRef.current;
+      if (!start) return;
+      if (
+        !onPullRefreshRef.current ||
+        isPullRefreshingRef.current ||
+        touchDragActiveRef.current ||
+        editingActiveRef.current ||
+        e.touches.length !== 1
+      ) {
+        resetPull();
+        return;
+      }
+
+      const t = e.touches[0];
+      const dx = t.clientX - start.x;
+      const dy = t.clientY - start.y;
+
+      if (!start.active) {
+        if (el.scrollTop > 1 || dy < -6 || (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy))) {
+          pullStartRef.current = null;
+          return;
+        }
+        if (dy >= 8 && dy > Math.abs(dx) * 1.2) {
+          start.active = true;
+          if (touchHoldTimerRef.current) {
+            window.clearTimeout(touchHoldTimerRef.current);
+            touchHoldTimerRef.current = null;
+          }
+          touchStartRef.current = null;
+        } else {
+          return;
+        }
+      }
+
+      if (dy <= 0) {
+        if (pullDistanceRef.current !== 0) {
+          pullDistanceRef.current = 0;
+          setPullDistance(0);
+        }
+        return;
+      }
+
+      e.preventDefault();
+      const damped = Math.min(80, Math.round(dy * 0.48));
+      const crossedThreshold =
+        (pullDistanceRef.current < PULL_REFRESH_THRESHOLD && damped >= PULL_REFRESH_THRESHOLD) ||
+        (pullDistanceRef.current >= PULL_REFRESH_THRESHOLD && damped < PULL_REFRESH_THRESHOLD);
+      if (crossedThreshold || Math.abs(damped - pullDistanceRef.current) >= 4) {
+        pullDistanceRef.current = damped;
+        setPullDistance(damped);
+      }
+    };
+
+    const handlePullTouchEnd = () => {
+      const shouldTrigger =
+        Boolean(pullStartRef.current?.active) &&
+        pullDistanceRef.current >= PULL_REFRESH_THRESHOLD &&
+        !isPullRefreshingRef.current;
+      resetPull();
+      if (shouldTrigger) {
+        onPullRefreshRef.current?.();
+      }
+    };
+
+    el.addEventListener('touchstart', handlePullTouchStart, { passive: true });
+    el.addEventListener('touchmove', handlePullTouchMove, { passive: false });
+    el.addEventListener('touchend', handlePullTouchEnd, { passive: true });
+    el.addEventListener('touchcancel', resetPull, { passive: true });
+    return () => {
+      el.removeEventListener('touchstart', handlePullTouchStart);
+      el.removeEventListener('touchmove', handlePullTouchMove);
+      el.removeEventListener('touchend', handlePullTouchEnd);
+      el.removeEventListener('touchcancel', resetPull);
+    };
+  }, []);
 
   React.useEffect(() => {
     if (!touchDrag) return;
@@ -579,8 +704,36 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="w-full h-full overflow-y-auto bg-[var(--fei-bg)] select-none"
+      className="w-full h-full overflow-y-auto overscroll-y-contain bg-[var(--fei-bg)] select-none"
     >
+      {(pullDistance > 0 || isPullRefreshing) && (
+        <div
+          style={{ height: isPullRefreshing ? 36 : pullDistance }}
+          className="flex items-center justify-center overflow-hidden text-[12.5px] text-[var(--fei-text-muted)] border-b border-[var(--fei-border)] bg-[var(--fei-bg)] select-none"
+        >
+          <span className="inline-flex items-center gap-1.5">
+            {isPullRefreshing ? (
+              <>
+                <RefreshCw
+                  className="w-3.5 h-3.5 animate-spin eink:animate-none"
+                  strokeWidth={1.8}
+                />
+                <span>正在同步云端…</span>
+              </>
+            ) : pullDistance >= PULL_REFRESH_THRESHOLD ? (
+              <>
+                <ArrowUp className="w-3.5 h-3.5" strokeWidth={1.8} />
+                <span>松手立即同步</span>
+              </>
+            ) : (
+              <>
+                <ArrowDown className="w-3.5 h-3.5" strokeWidth={1.8} />
+                <span>下拉同步云端</span>
+              </>
+            )}
+          </span>
+        </div>
+      )}
       <div className="max-w-[760px] mx-auto px-4 sm:px-8 pt-6 pb-10 space-y-1.5">
         {/* Status strip only when cutting or selecting item to cut */}
         {(pickCutMode || cutLabel) && (

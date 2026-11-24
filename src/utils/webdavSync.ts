@@ -145,13 +145,14 @@ async function callWebDavUrlNative(
   username: string,
   password: string,
   method: 'GET' | 'PUT' | 'MKCOL' | 'DELETE' | 'PROPFIND' | 'HEAD',
-  options?: { body?: string; ifNoneMatch?: string; depth?: '0' | '1' }
+  options?: { body?: string; ifNoneMatch?: string; ifMatch?: string; depth?: '0' | '1' }
 ): Promise<ProxyResponse> {
   const headers: Record<string, string> = {
     Authorization: encodeBasicAuthUtf8(username, password),
     'User-Agent': 'FeiArtical-Android/1.0',
   };
   if (options?.ifNoneMatch) headers['If-None-Match'] = options.ifNoneMatch;
+  if (options?.ifMatch) headers['If-Match'] = options.ifMatch;
   if (options?.depth) headers['Depth'] = options.depth;
 
   const contentType =
@@ -247,7 +248,7 @@ async function callWebDavUrl(
   password: string,
   method: 'GET' | 'PUT' | 'MKCOL' | 'DELETE' | 'PROPFIND' | 'HEAD',
   relativePath: string,
-  options?: { body?: string; ifNoneMatch?: string; depth?: '0' | '1' }
+  options?: { body?: string; ifNoneMatch?: string; ifMatch?: string; depth?: '0' | '1' }
 ): Promise<ProxyResponse> {
   const cleanBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
   const cleanRel = relativePath.replace(/^\/+/, '');
@@ -269,6 +270,7 @@ async function callWebDavUrl(
         relativePath: cleanRel,
         body: options?.body,
         ifNoneMatch: options?.ifNoneMatch,
+        ifMatch: options?.ifMatch,
         depth: options?.depth,
       }),
     });
@@ -306,7 +308,7 @@ async function callWebDav(
   config: WebDavConfig,
   method: 'GET' | 'PUT' | 'MKCOL' | 'DELETE' | 'PROPFIND' | 'HEAD',
   relativePath: string,
-  options?: { body?: string; ifNoneMatch?: string; depth?: '0' | '1' }
+  options?: { body?: string; ifNoneMatch?: string; ifMatch?: string; depth?: '0' | '1' }
 ): Promise<ProxyResponse> {
   const normalizedBase = normalizeWebDavBaseUrl(config.baseUrl);
   return callWebDavUrl(
@@ -478,6 +480,8 @@ export interface AutoSyncOutcome {
   didPull: boolean;
   purgedSynced?: boolean;
   wasRateLimited?: boolean;
+  authFailed?: boolean;
+  oversizedInboxCount?: number;
 }
 
 function pendingRemoteProgressEqual(
@@ -543,7 +547,8 @@ export async function runAutoMetadataProgressSync(
   localDocs: ArticleDoc[],
   localTreeState: SyncedTreeState,
   hasLocalChanges: boolean,
-  purgedRecords?: PurgedSyncRecords
+  purgedRecords?: PurgedSyncRecords,
+  retryOnPreconditionFailed = true
 ): Promise<AutoSyncOutcome> {
   const syncNow = Date.now();
   const config: WebDavConfig = {
@@ -560,30 +565,31 @@ export async function runAutoMetadataProgressSync(
   let skippedByHashMatch = 0;
   let dirsEnsured = false;
   let docsDirEnsured = false;
+  let oversizedInboxCount = 0;
 
   const listEligibleShortInboxFiles = async (
     targetConfig: WebDavConfig
-  ): Promise<{ rateLimited: boolean; files: RemoteInboxFile[] }> => {
+  ): Promise<{ rateLimited: boolean; files: RemoteInboxFile[]; oversizedCount: number }> => {
     requestCount++;
     const inboxRes = await callWebDav(targetConfig, 'PROPFIND', INBOX_DIR, { depth: '1' });
     if (inboxRes.status === 429 || inboxRes.status === 503) {
-      return { rateLimited: true, files: [] };
+      return { rateLimited: true, files: [], oversizedCount: 0 };
     }
     if (inboxRes.status === 404 || inboxRes.status === 409) {
       if (!ensuredInboxBaseUrls.has(targetConfig.baseUrl)) {
         requestCount++;
         const mkRes = await callWebDav(targetConfig, 'MKCOL', INBOX_DIR);
         if (mkRes.status === 429 || mkRes.status === 503) {
-          return { rateLimited: true, files: [] };
+          return { rateLimited: true, files: [], oversizedCount: 0 };
         }
         if (mkRes.ok || mkRes.status === 201 || mkRes.status === 405 || mkRes.status === 301) {
           ensuredInboxBaseUrls.add(targetConfig.baseUrl);
         }
       }
-      return { rateLimited: false, files: [] };
+      return { rateLimited: false, files: [], oversizedCount: 0 };
     }
     if (!inboxRes.ok || !inboxRes.body) {
-      return { rateLimited: false, files: [] };
+      return { rateLimited: false, files: [], oversizedCount: 0 };
     }
     ensuredInboxBaseUrls.add(targetConfig.baseUrl);
     downloadBytes += inboxRes.bytesTransferred || getByteSize(inboxRes.body);
@@ -591,7 +597,8 @@ export async function runAutoMetadataProgressSync(
     const eligible = parsed.filter(
       (f) => f.size === undefined || f.size <= CLOUD_SHORT_DOC_MAX_BYTES
     );
-    return { rateLimited: false, files: eligible };
+    const oversizedCount = parsed.length - eligible.length;
+    return { rateLimited: false, files: eligible, oversizedCount };
   };
 
   const hasPendingPurges = Boolean(
@@ -654,6 +661,26 @@ export async function runAutoMetadataProgressSync(
     ifNoneMatch: shouldBypass304 ? undefined : config.lastAutoManifestEtag,
   });
 
+  if (manifestRes.status === 401 || manifestRes.status === 403) {
+    return {
+      folders: localFolders,
+      docs: localDocs,
+      treeState: localTreeState,
+      config,
+      quotaDelta: {
+        uploadBytes: 0,
+        downloadBytes: 0,
+        requestCount,
+        skippedByEtag304: 0,
+        skippedByHashMatch: 0,
+      },
+      pulledProgressDocIds: {},
+      didPush: false,
+      didPull: false,
+      authFailed: true,
+    };
+  }
+
   if (manifestRes.status === 429 || manifestRes.status === 503) {
     return {
       folders: localFolders,
@@ -698,6 +725,7 @@ export async function runAutoMetadataProgressSync(
         };
       }
       precheckedInboxFiles = inboxCheck.files;
+      oversizedInboxCount += inboxCheck.oversizedCount;
     }
 
     if (!precheckedInboxFiles || precheckedInboxFiles.length === 0) {
@@ -720,12 +748,32 @@ export async function runAutoMetadataProgressSync(
         pulledProgressDocIds: {},
         didPush: false,
         didPull: false,
+        oversizedInboxCount: oversizedInboxCount > 0 ? oversizedInboxCount : undefined,
       };
     }
 
     // Eligible short files were dropped into inbox/ while manifest was 304 -> fetch full manifest to merge cleanly
     requestCount++;
     manifestRes = await callWebDav(config, 'GET', MANIFEST_PATH);
+    if (manifestRes.status === 401 || manifestRes.status === 403) {
+      return {
+        folders: localFolders,
+        docs: localDocs,
+        treeState: localTreeState,
+        config,
+        quotaDelta: {
+          uploadBytes: 0,
+          downloadBytes,
+          requestCount,
+          skippedByEtag304: 0,
+          skippedByHashMatch: 0,
+        },
+        pulledProgressDocIds: {},
+        didPush: false,
+        didPull: false,
+        authFailed: true,
+      };
+    }
     if (manifestRes.status === 429 || manifestRes.status === 503) {
       return {
         folders: localFolders,
@@ -749,6 +797,7 @@ export async function runAutoMetadataProgressSync(
 
   let remoteManifest: RemoteManifest | null = null;
   let nextAutoEtag = config.lastAutoManifestEtag;
+  let fetchedManifestEtag: string | undefined;
 
   if (manifestRes.status === 404 || manifestRes.status === 409) {
     const hasAnythingLocal =
@@ -775,6 +824,25 @@ export async function runAutoMetadataProgressSync(
     requestCount += ensured.requests;
     dirsEnsured = true;
     docsDirEnsured = Boolean(config.syncShortDocsViaCloud && ensured.docsReady);
+    if (ensured.authFailedStatus === 401 || ensured.authFailedStatus === 403) {
+      return {
+        folders: localFolders,
+        docs: localDocs,
+        treeState: localTreeState,
+        config,
+        quotaDelta: {
+          uploadBytes: 0,
+          downloadBytes,
+          requestCount,
+          skippedByEtag304: 0,
+          skippedByHashMatch: 0,
+        },
+        pulledProgressDocIds: {},
+        didPush: false,
+        didPull: false,
+        authFailed: true,
+      };
+    }
     if (ensured.authFailedStatus) {
       throw new Error(
         formatSyncHttpError('创建远端目录失败', {
@@ -786,6 +854,7 @@ export async function runAutoMetadataProgressSync(
   } else if (manifestRes.ok && manifestRes.body) {
     downloadBytes += manifestRes.bytesTransferred || getByteSize(manifestRes.body);
     nextAutoEtag = manifestRes.etag || nextAutoEtag;
+    fetchedManifestEtag = manifestRes.etag || undefined;
     try {
       remoteManifest = JSON.parse(manifestRes.body) as RemoteManifest;
     } catch {
@@ -998,6 +1067,7 @@ export async function runAutoMetadataProgressSync(
         ...localDoc,
         cloudBodySynced: cloudSynced,
         syncStatus: localMissingBody ? 'remote-only' : 'synced',
+        lastSyncedContentHash: localMissingBody ? localDoc.lastSyncedContentHash : localDoc.contentHash,
         lastSyncedCharOffset: localOffset,
         lastSyncedProgress: localDoc.readProgress ?? 0,
         lastSyncedReadAt: localDoc.lastReadAt ?? 0,
@@ -1231,7 +1301,114 @@ export async function runAutoMetadataProgressSync(
     // Short-doc <= 200 KB optional cloud fallback body sync
     if (!localMissingBody) {
       const localBodyNewer = localDoc.updatedAt >= remoteEntry.updatedAt;
-      if (localBodyNewer && (!sameBody || !cloudSynced)) {
+      const forceReuploadBody = Boolean(
+        shortDocFallback &&
+          !nextLocal.deleted &&
+          localDoc.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES &&
+          !localDoc.cloudBodySynced &&
+          localDoc.syncStatus === 'dirty'
+      );
+      const bothSidesEditedBody = Boolean(
+        !sameBody &&
+          localDoc.lastSyncedContentHash &&
+          localDoc.contentHash !== localDoc.lastSyncedContentHash &&
+          remoteEntry.contentHash !== localDoc.lastSyncedContentHash
+      );
+
+      if (
+        bothSidesEditedBody &&
+        shortDocFallback &&
+        remoteEntry.cloudBodySynced &&
+        !remoteEntry.deleted &&
+        remoteEntry.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES
+      ) {
+        // Two-way offline body edit detected: keep newer version on original doc & save older as conflict copy
+        const downloaded = await downloadShortDocBody(remoteEntry);
+        if (downloaded && downloaded.contentHash !== nextLocal.contentHash) {
+          const copyTs = Date.now();
+          const conflictContent = localBodyNewer ? downloaded.content : nextLocal.content;
+          const conflictHash = localBodyNewer ? downloaded.contentHash : nextLocal.contentHash;
+          const conflictBytes = localBodyNewer ? downloaded.byteSize : nextLocal.byteSize;
+          const baseTitle = (nextLocal.title || '无标题文档').replace(/\s*\(冲突副本\)$/, '');
+          const conflictDoc: ArticleDoc = {
+            id: `doc_${copyTs}_${Math.random().toString(36).slice(2, 6)}`,
+            title: `${baseTitle} (冲突副本)`,
+            folderId: nextLocal.folderId,
+            order: nextLocal.order + 0.5,
+            content: conflictContent,
+            contentHash: conflictHash,
+            excerpt: nextLocal.encrypted ? '' : extractExcerpt(conflictContent),
+            tags: nextLocal.tags || [],
+            starred: false,
+            readProgress: 0,
+            lastReadAt: null,
+            lastMode: 'read',
+            lastScrollTop: 0,
+            lastCharOffset: 0,
+            encrypted: Boolean(nextLocal.encrypted),
+            format: nextLocal.format ?? 'txt',
+            cloudBodySynced: false,
+            createdAt: copyTs,
+            updatedAt: copyTs,
+            syncStatus: 'synced',
+            lastSyncedContentHash: conflictHash,
+            highlights: [],
+            byteSize: conflictBytes,
+          };
+          if (conflictBytes <= CLOUD_SHORT_DOC_MAX_BYTES) {
+            const conflictUploaded = await uploadShortDocBody(conflictDoc);
+            if (conflictUploaded) {
+              conflictDoc.cloudBodySynced = true;
+            }
+          }
+          mergedDocsMap.set(conflictDoc.id, conflictDoc);
+          nextRemoteDocs[conflictDoc.id] = toManifestDocEntry(conflictDoc, Boolean(conflictDoc.cloudBodySynced));
+          needManifestPush = true;
+          didPull = true;
+
+          if (localBodyNewer) {
+            if (!nextLocal.deleted && nextLocal.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES) {
+              const uploaded = await uploadShortDocBody(nextLocal);
+              if (uploaded) {
+                cloudSynced = true;
+                nextRemoteEntry.contentHash = nextLocal.contentHash;
+                nextRemoteEntry.byteSize = nextLocal.byteSize;
+                nextRemoteEntry.excerpt = nextLocal.encrypted ? '' : trimManifestExcerpt(nextLocal.excerpt);
+                nextRemoteEntry.encrypted = Boolean(nextLocal.encrypted);
+                nextRemoteEntry.cloudBodySynced = true;
+                nextRemoteEntry.updatedAt = Math.max(nextRemoteEntry.updatedAt, nextLocal.updatedAt);
+              }
+            }
+            nextLocal = { ...nextLocal, lastSyncedContentHash: nextLocal.contentHash };
+          } else {
+            const anchor = nextLocal.readAnchorText || remoteEntry.readAnchorText;
+            const relocated =
+              anchor && (nextLocal.lastCharOffset ?? 0) > 0
+                ? relocateCharOffsetByAnchor(downloaded.content, nextLocal.lastCharOffset ?? 0, anchor)
+                : null;
+            nextLocal = {
+              ...nextLocal,
+              content: downloaded.content,
+              contentHash: downloaded.contentHash,
+              lastSyncedContentHash: downloaded.contentHash,
+              byteSize: downloaded.byteSize,
+              excerpt: remoteEntry.encrypted ? '' : extractExcerpt(downloaded.content),
+              updatedAt: remoteEntry.updatedAt,
+              syncStatus: 'synced',
+              cloudBodySynced: true,
+              ...(relocated?.matched
+                ? {
+                    lastCharOffset: relocated.offset,
+                    readProgress: relocated.progress,
+                    lastScrollTop: 0,
+                    readAnchorText: extractReadAnchorText(downloaded.content, relocated.offset) || anchor,
+                  }
+                : {}),
+            };
+            cloudSynced = true;
+          }
+        }
+      } else if (forceReuploadBody || (localBodyNewer && (!sameBody || !cloudSynced))) {
         if (shortDocFallback && !nextLocal.deleted && localDoc.byteSize <= CLOUD_SHORT_DOC_MAX_BYTES) {
           const uploaded = await uploadShortDocBody(nextLocal);
           if (uploaded) {
@@ -1242,6 +1419,7 @@ export async function runAutoMetadataProgressSync(
             nextRemoteEntry.encrypted = Boolean(nextLocal.encrypted);
             nextRemoteEntry.cloudBodySynced = true;
             nextRemoteEntry.updatedAt = Math.max(nextRemoteEntry.updatedAt, nextLocal.updatedAt);
+            nextLocal = { ...nextLocal, lastSyncedContentHash: nextLocal.contentHash };
             needManifestPush = true;
           }
         } else if (!sameBody) {
@@ -1252,6 +1430,7 @@ export async function runAutoMetadataProgressSync(
           nextRemoteEntry.excerpt = nextLocal.encrypted ? '' : trimManifestExcerpt(nextLocal.excerpt);
           nextRemoteEntry.cloudBodySynced = false;
           nextRemoteEntry.updatedAt = Math.max(nextRemoteEntry.updatedAt, nextLocal.updatedAt);
+          nextLocal = { ...nextLocal, lastSyncedContentHash: nextLocal.contentHash };
           needManifestPush = true;
         }
       } else if (
@@ -1273,6 +1452,7 @@ export async function runAutoMetadataProgressSync(
             ...nextLocal,
             content: downloaded.content,
             contentHash: downloaded.contentHash,
+            lastSyncedContentHash: downloaded.contentHash,
             byteSize: downloaded.byteSize,
             excerpt: remoteEntry.encrypted ? '' : extractExcerpt(downloaded.content),
             updatedAt: remoteEntry.updatedAt,
@@ -1290,6 +1470,8 @@ export async function runAutoMetadataProgressSync(
           cloudSynced = true;
           didPull = true;
         }
+      } else if (sameBody && nextLocal.lastSyncedContentHash !== nextLocal.contentHash) {
+        nextLocal = { ...nextLocal, lastSyncedContentHash: nextLocal.contentHash };
       }
       nextLocal = {
         ...nextLocal,
@@ -1315,6 +1497,7 @@ export async function runAutoMetadataProgressSync(
             ...nextLocal,
             content: downloaded.content,
             contentHash: downloaded.contentHash,
+            lastSyncedContentHash: downloaded.contentHash,
             byteSize: downloaded.byteSize,
             excerpt: remoteEntry.encrypted ? '' : extractExcerpt(downloaded.content),
             updatedAt: Math.max(nextLocal.updatedAt, remoteEntry.updatedAt),
@@ -1430,6 +1613,7 @@ export async function runAutoMetadataProgressSync(
             highlights: [],
             byteSize: downloaded.byteSize,
             syncStatus: 'synced',
+            lastSyncedContentHash: downloaded.contentHash,
           };
           mergedDocsMap.set(id, pulledDoc);
           nextRemoteDocs[id] = {
@@ -1512,6 +1696,7 @@ export async function runAutoMetadataProgressSync(
         };
       }
       inboxCandidates = inboxCheck.files;
+      oversizedInboxCount += inboxCheck.oversizedCount;
     }
 
     if (inboxCandidates.length > 0) {
@@ -1535,6 +1720,7 @@ export async function runAutoMetadataProgressSync(
 
         // Enforce <= 200 KB short-doc limit (skip larger files safely without deleting from inbox/)
         if (byteSize > CLOUD_SHORT_DOC_MAX_BYTES) {
+          oversizedInboxCount += 1;
           continue;
         }
 
@@ -1637,8 +1823,51 @@ export async function runAutoMetadataProgressSync(
       },
     };
     const manifestJson = JSON.stringify(nextManifest);
+    const useIfMatch = Boolean(remoteManifest !== null && fetchedManifestEtag);
     requestCount++;
-    let putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, { body: manifestJson });
+    let putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, {
+      body: manifestJson,
+      ifMatch: useIfMatch ? fetchedManifestEtag : undefined,
+    });
+    // Optimistic concurrency: another device updated _manifest.json concurrently -> re-fetch & merge once
+    if (putManifest.status === 412 && retryOnPreconditionFailed) {
+      return runAutoMetadataProgressSync(
+        { ...mergedConfig, lastAutoManifestEtag: undefined },
+        localFolders,
+        localDocs,
+        localTreeState,
+        true,
+        purgedRecords,
+        false
+      );
+    }
+    // Graceful fallback if a custom WebDAV server rejects If-Match with 400/501
+    if (useIfMatch && !putManifest.ok && (putManifest.status === 400 || putManifest.status === 501)) {
+      requestCount++;
+      putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, { body: manifestJson });
+    }
+    if (putManifest.status === 401 || putManifest.status === 403) {
+      return {
+        folders: mergedFolders,
+        docs: mergedDocs,
+        treeState: mergedTreeState,
+        config: {
+          ...mergedConfig,
+          lastAutoManifestEtag: nextAutoEtag,
+        },
+        quotaDelta: {
+          uploadBytes,
+          downloadBytes,
+          requestCount,
+          skippedByEtag304,
+          skippedByHashMatch,
+        },
+        pulledProgressDocIds,
+        didPush: false,
+        didPull,
+        authFailed: true,
+      };
+    }
     if (putManifest.status === 429 || putManifest.status === 503) {
       return {
         folders: mergedFolders,
@@ -1720,6 +1949,7 @@ export async function runAutoMetadataProgressSync(
     didPush,
     didPull,
     purgedSynced,
+    oversizedInboxCount: oversizedInboxCount > 0 ? oversizedInboxCount : undefined,
   };
 }
 

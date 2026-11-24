@@ -118,9 +118,10 @@ import {
   isReservedInboxName,
   resolveDuplicateDocImport,
 } from './utils/inbox';
-import { purgeExpiredTrash } from './utils/trash';
+import { pruneExpiredPurgedRecords, purgeExpiredTrash } from './utils/trash';
 import {
   fetchRemoteDocBody,
+  isDocBodyMissing,
   runAutoMetadataProgressSync,
 } from './utils/webdavSync';
 import {
@@ -151,7 +152,22 @@ import { ProgressConflictModal } from './components/ProgressConflictModal';
 
 type MainView = 'tree' | 'doc';
 
+type SilentAutoSyncResult =
+  | { status: 'skipped' }
+  | { status: 'offline' }
+  | { status: 'auth-error' }
+  | { status: 'rate-limited' }
+  | { status: 'error' }
+  | {
+      status: 'ok';
+      didPull: boolean;
+      didPush: boolean;
+      addedDocsCount: number;
+      oversizedInboxCount: number;
+    };
+
 const AUTO_PROGRESS_SYNC_INTERVAL_MS = 60 * 1000;
+const AUTO_TREE_POLL_INTERVAL_MS = 45 * 1000;
 const AUTO_CATALOG_DEBOUNCE_MS = 5000;
 const AUTO_PULL_COOLDOWN_MS = 15_000;
 const AUTO_SYNC_BACKOFF_STEPS_MS = [30_000, 60_000, 180_000, 300_000];
@@ -339,7 +355,9 @@ export default function App() {
   treeScrollTopRef.current = treeScrollTop;
   const treeStateUpdatedAtRef = useRef<number>(treeStateUpdatedAt);
   treeStateUpdatedAtRef.current = treeStateUpdatedAt;
-  const activeAutoSyncPromiseRef = useRef<Promise<void> | null>(null);
+  const activeAutoSyncPromiseRef = useRef<Promise<SilentAutoSyncResult> | null>(null);
+  const [treePullRefreshing, setTreePullRefreshing] = useState(false);
+  const treePullRefreshingRef = useRef(false);
   const autoProgressDirtyRef = useRef(false);
   const autoCatalogDirtyRef = useRef(false);
   const autoMutationSeqRef = useRef(0);
@@ -347,6 +365,8 @@ export default function App() {
   const lastAutoPullAtRef = useRef(0);
   const autoSyncFailCountRef = useRef(0);
   const autoSyncBackoffUntilRef = useRef(0);
+  const lastAuthErrorKeyRef = useRef('');
+  const lastOversizedInboxNoticeAtRef = useRef(0);
   const lastWifiPeerCloudConfiguredRef = useRef(false);
   const wifiCloudSyncNeededRef = useRef(false);
   const triggerPostWifiCloudSyncRef = useRef<
@@ -484,9 +504,12 @@ export default function App() {
       );
 
       if (res.changed) {
+        foldersRef.current = res.folders;
+        docsRef.current = res.docs;
         setFolders(res.folders);
         setDocs(res.docs);
         setFoldersDirty(true);
+        markAutoCatalogDirty();
 
         if (!options?.silent) {
           const parts: string[] = [];
@@ -614,23 +637,40 @@ export default function App() {
     };
   }, [storageDir.initialized, localFsReady]);
 
-  // Automatically permanently delete Trash items older than 30 days on launch and periodically
+  // Automatically permanently delete Trash items & expired purge tombstones older than 30 days
   const runExpiredTrashCleanup = () => {
     const now = Date.now();
     const res = purgeExpiredTrash(foldersRef.current, docsRef.current, now);
-    if (!res.changed) return;
+    const prevPurged = purgedRecordsRef.current;
+    const prunedPrev = pruneExpiredPurgedRecords(prevPurged, now);
+    const prunedChanged =
+      Object.keys(prunedPrev.docs).length !== Object.keys(prevPurged.docs).length ||
+      Object.keys(prunedPrev.folders).length !== Object.keys(prevPurged.folders).length;
+
+    if (!res.changed) {
+      if (prunedChanged) {
+        purgedRecordsRef.current = prunedPrev;
+        setPurgedRecords(prunedPrev);
+      }
+      return;
+    }
+    foldersRef.current = res.folders;
+    docsRef.current = res.docs;
     setFolders(res.folders);
     setDocs(res.docs);
     setPurgedRecords((prev) => {
-      const nextDocs = { ...prev.docs };
-      const nextDocFormats = { ...(prev.docFormats || {}) };
-      const nextFolders = { ...prev.folders };
+      const base = pruneExpiredPurgedRecords(prev, now);
+      const nextDocs = { ...base.docs };
+      const nextDocFormats = { ...(base.docFormats || {}) };
+      const nextFolders = { ...base.folders };
       for (const fid of res.expiredFolderIds) nextFolders[fid] = now;
       for (const d of res.expiredDocs) {
         nextDocs[d.id] = now;
         nextDocFormats[d.id] = d.format === 'md' ? 'md' : 'txt';
       }
-      return { docs: nextDocs, docFormats: nextDocFormats, folders: nextFolders };
+      const next = { docs: nextDocs, docFormats: nextDocFormats, folders: nextFolders };
+      purgedRecordsRef.current = next;
+      return next;
     });
     setFoldersDirty(true);
   };
@@ -2172,22 +2212,40 @@ export default function App() {
     const nextEnc = nextConfig.encryptionPassword || '';
     const encChanged = prevEnc !== nextEnc;
 
+    webDavConfigRef.current = nextConfig;
     setWebDavConfig(nextConfig);
     setFoldersDirty(true);
+    autoSyncFailCountRef.current = 0;
+    autoSyncBackoffUntilRef.current = 0;
+    lastAuthErrorKeyRef.current = '';
 
     if (encChanged) {
       const now = Date.now();
-      setDocs((prev) =>
-        prev.map((d) =>
-          d.encrypted && !d.deleted
-            ? { ...d, updatedAt: now, syncStatus: 'dirty' }
-            : d
-        )
+      const nextDocs = docsRef.current.map((d) =>
+        d.encrypted && !d.deleted && !isDocBodyMissing(d)
+          ? { ...d, updatedAt: now, syncStatus: 'dirty' as const, cloudBodySynced: false }
+          : d
       );
+      docsRef.current = nextDocs;
+      setDocs(nextDocs);
     }
 
     if (nextConfig.username.trim() && nextConfig.password.trim()) {
-      markAutoCatalogDirty();
+      autoCatalogDirtyRef.current = true;
+      autoMutationSeqRef.current++;
+      void runSilentAutoSyncRef
+        .current({ forcePullCheck: true, bypassThrottle: true })
+        .then((res) => {
+          if (!appMountedRef.current) return;
+          if (res.status === 'auth-error') {
+            showToast('坚果云账号或应用密码错误，请检查设置');
+          } else if (res.status === 'ok' && res.oversizedInboxCount > 0) {
+            lastOversizedInboxNoticeAtRef.current = Date.now();
+            showToast(
+              `inbox 有 ${res.oversizedInboxCount} 个文件超过 200 KB，请改用 Wi-Fi 或电脑直连`
+            );
+          }
+        });
     }
   };
 
@@ -2243,33 +2301,40 @@ export default function App() {
   const runSilentAutoSync = async (options?: {
     forcePullCheck?: boolean;
     bypassThrottle?: boolean;
-  }) => {
+    isManual?: boolean;
+  }): Promise<SilentAutoSyncResult> => {
     const cfg = webDavConfigRef.current;
-    if (!cfg.username.trim() || !cfg.password.trim()) return;
-    if (activeAutoSyncPromiseRef.current) return;
+    if (!cfg.username.trim() || !cfg.password.trim()) return { status: 'skipped' };
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return { status: 'offline' };
+    }
+    if (activeAutoSyncPromiseRef.current) return { status: 'skipped' };
     // Pause background WebDAV sync while user is resolving Wi-Fi progress conflicts in Directory Mode
     if (
       mainViewRef.current === 'tree' &&
       docsRef.current.some((d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi')
     ) {
-      return;
+      return { status: 'skipped' };
     }
 
     const now = Date.now();
-    if (now < autoSyncBackoffUntilRef.current) return;
+    if (now < autoSyncBackoffUntilRef.current) return { status: 'skipped' };
 
     const hasLocalChanges = autoProgressDirtyRef.current || autoCatalogDirtyRef.current;
-    if (!hasLocalChanges && !options?.forcePullCheck) return;
+    if (!hasLocalChanges && !options?.forcePullCheck) return { status: 'skipped' };
 
     if (
       !hasLocalChanges &&
       !options?.bypassThrottle &&
       now - lastAutoPullAtRef.current < AUTO_PULL_COOLDOWN_MS
     ) {
-      return;
+      return { status: 'skipped' };
     }
 
     const seqBefore = autoMutationSeqRef.current;
+    const prevLiveDocIds = new Set(
+      docsRef.current.filter((d) => !d.deleted).map((d) => d.id)
+    );
     const currentTreeScroll =
       mainViewRef.current === 'tree'
         ? treeViewRef.current?.getScrollTop() ?? treeScrollTopRef.current
@@ -2281,7 +2346,7 @@ export default function App() {
       updatedAt: treeStateUpdatedAtRef.current,
     };
 
-    const task = (async () => {
+    const task = (async (): Promise<SilentAutoSyncResult> => {
       try {
         const outcome = await runAutoMetadataProgressSync(
           cfg,
@@ -2293,6 +2358,21 @@ export default function App() {
         );
         applyQuotaDelta(outcome.quotaDelta);
 
+        if (outcome.authFailed) {
+          const stepIdx = Math.min(
+            autoSyncFailCountRef.current,
+            AUTO_SYNC_BACKOFF_STEPS_MS.length - 1
+          );
+          autoSyncFailCountRef.current++;
+          autoSyncBackoffUntilRef.current = Date.now() + AUTO_SYNC_BACKOFF_STEPS_MS[stepIdx];
+          const credKey = `${cfg.baseUrl}|${cfg.username.trim()}|${cfg.password.trim()}`;
+          if (!options?.isManual && lastAuthErrorKeyRef.current !== credKey) {
+            lastAuthErrorKeyRef.current = credKey;
+            showToast('坚果云账号或应用密码错误，请检查设置');
+          }
+          return { status: 'auth-error' };
+        }
+
         if (outcome.wasRateLimited) {
           const stepIdx = Math.min(
             autoSyncFailCountRef.current,
@@ -2300,11 +2380,12 @@ export default function App() {
           );
           autoSyncFailCountRef.current++;
           autoSyncBackoffUntilRef.current = Date.now() + AUTO_SYNC_BACKOFF_STEPS_MS[stepIdx];
-          return;
+          return { status: 'rate-limited' };
         }
 
         autoSyncFailCountRef.current = 0;
         autoSyncBackoffUntilRef.current = 0;
+        lastAuthErrorKeyRef.current = '';
         lastAutoPullAtRef.current = Date.now();
 
         setWebDavConfig((prev) => ({
@@ -2495,6 +2576,26 @@ export default function App() {
             setPurgedRecords({ docs: {}, docFormats: {}, folders: {} });
           }
         }
+        const addedDocsCount = outcome.didPull
+          ? outcome.docs.filter((d) => !d.deleted && !prevLiveDocIds.has(d.id)).length
+          : 0;
+        const oversizedInboxCount = outcome.oversizedInboxCount ?? 0;
+        if (
+          !options?.isManual &&
+          oversizedInboxCount > 0 &&
+          mainViewRef.current === 'tree' &&
+          Date.now() - lastOversizedInboxNoticeAtRef.current > 10 * 60 * 1000
+        ) {
+          lastOversizedInboxNoticeAtRef.current = Date.now();
+          showToast(`inbox 有 ${oversizedInboxCount} 个文件超过 200 KB，请改用 Wi-Fi 或电脑直连`);
+        }
+        return {
+          status: 'ok',
+          didPull: outcome.didPull,
+          didPush: outcome.didPush,
+          addedDocsCount,
+          oversizedInboxCount,
+        };
       } catch {
         // Silent exponential backoff on network/transient errors — never interrupt reading
         const stepIdx = Math.min(
@@ -2503,13 +2604,14 @@ export default function App() {
         );
         autoSyncFailCountRef.current++;
         autoSyncBackoffUntilRef.current = Date.now() + AUTO_SYNC_BACKOFF_STEPS_MS[stepIdx];
+        return { status: 'error' };
       } finally {
         activeAutoSyncPromiseRef.current = null;
       }
     })();
 
     activeAutoSyncPromiseRef.current = task;
-    await task;
+    return await task;
   };
 
   const runSilentAutoSyncRef = useRef(runSilentAutoSync);
@@ -2550,6 +2652,86 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [webDavConfigured, mainView]);
+
+  // Auto-sync Trigger 1b (Plan A): While staying in Directory Mode in foreground,
+  // poll Jianguoyun cloud & inbox every 45s (stops immediately in Reading Mode, background, or offline).
+  useEffect(() => {
+    if (!webDavConfigured || mainView !== 'tree') return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      void runSilentAutoSyncRef.current({ forcePullCheck: true });
+    }, AUTO_TREE_POLL_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [webDavConfigured, mainView]);
+
+  // Plan B: Pull-to-refresh in Directory Mode for instant on-demand cloud & inbox sync
+  const handleTreePullRefresh = async () => {
+    const cfg = webDavConfigRef.current;
+    if (!cfg.username.trim() || !cfg.password.trim()) {
+      showToast('请先在设置中配置坚果云');
+      return;
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      showToast('当前无网络连接');
+      return;
+    }
+    if (treePullRefreshingRef.current) return;
+    treePullRefreshingRef.current = true;
+    setTreePullRefreshing(true);
+    try {
+      let res: SilentAutoSyncResult;
+      const inFlight = activeAutoSyncPromiseRef.current
+        ? await activeAutoSyncPromiseRef.current.catch(() => null)
+        : null;
+      if (
+        inFlight &&
+        inFlight.status === 'ok' &&
+        (inFlight.addedDocsCount > 0 || inFlight.didPull || inFlight.oversizedInboxCount > 0)
+      ) {
+        res = inFlight;
+      } else {
+        autoSyncBackoffUntilRef.current = 0;
+        res = await runSilentAutoSyncRef.current({
+          forcePullCheck: true,
+          bypassThrottle: true,
+          isManual: true,
+        });
+      }
+      if (!appMountedRef.current) return;
+      if (res.status === 'ok') {
+        if (res.oversizedInboxCount > 0) {
+          lastOversizedInboxNoticeAtRef.current = Date.now();
+          showToast(
+            res.addedDocsCount > 0
+              ? `新增 ${res.addedDocsCount} 篇，另有 ${res.oversizedInboxCount} 个 inbox 文件超 200 KB`
+              : `inbox 有 ${res.oversizedInboxCount} 个文件超过 200 KB，请改用 Wi-Fi 或电脑直连`
+          );
+        } else if (res.addedDocsCount > 0) {
+          showToast(`已同步，新增 ${res.addedDocsCount} 篇文档`);
+        } else if (res.didPull || res.didPush) {
+          showToast('已同步云端');
+        } else {
+          showToast('已是最新');
+        }
+      } else if (res.status === 'offline') {
+        showToast('当前无网络连接');
+      } else if (res.status === 'auth-error') {
+        showToast('坚果云账号或应用密码错误，请检查设置');
+      } else if (res.status === 'rate-limited') {
+        showToast('云端请求频繁，请稍后再试');
+      } else if (res.status === 'error') {
+        showToast('同步失败，请检查网络');
+      }
+    } finally {
+      treePullRefreshingRef.current = false;
+      if (appMountedRef.current) {
+        setTreePullRefreshing(false);
+      }
+    }
+  };
 
   // Auto-sync Trigger 2: Startup light pull + foreground/background lifecycle sync
   useEffect(() => {
@@ -2625,7 +2807,8 @@ export default function App() {
   const applyWifiMergedCatalog = (
     nextFolders: FolderNode[],
     nextDocs: ArticleDoc[],
-    nextTreeState: SyncedTreeState
+    nextTreeState: SyncedTreeState,
+    nextPurgedRecords?: PurgedSyncRecords
   ) => {
     const normalizedFolders = nextFolders.map((f) => ({ ...f, parentId: null }));
     foldersRef.current = normalizedFolders;
@@ -2637,6 +2820,11 @@ export default function App() {
       setActiveTarget(nextTreeState.activeTarget);
       setTreeScrollTop(nextTreeState.scrollTop);
       setTreeStateUpdatedAt(nextTreeState.updatedAt);
+    }
+    if (nextPurgedRecords) {
+      const pruned = pruneExpiredPurgedRecords(nextPurgedRecords);
+      purgedRecordsRef.current = pruned;
+      setPurgedRecords(pruned);
     }
     setFoldersDirty(true);
     const hasUnresolvedWifiConflict = nextDocs.some(
@@ -3393,6 +3581,8 @@ export default function App() {
             onDragPayloadChange={setActiveDragPayload}
             onTrashDrop={handleMoveToTrash}
             onTrashDragHoverChange={setTrashDragOver}
+            onPullRefresh={handleTreePullRefresh}
+            isPullRefreshing={treePullRefreshing}
           />
         )}
       </main>

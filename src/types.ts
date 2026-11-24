@@ -57,6 +57,7 @@ export interface ArticleDoc {
   createdAt: number;
   updatedAt: number;
   syncStatus: SyncStatus;
+  lastSyncedContentHash?: string;
   cloudBodySynced?: boolean;
   deleted?: boolean;
   deletedAt?: number;

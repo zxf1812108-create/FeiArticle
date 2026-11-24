@@ -252,10 +252,23 @@ export const SyncModal: React.FC<SyncModalProps> = ({
       encryptionPassword,
       syncShortDocsViaCloud,
       lastManifestEtag: endpointChanged ? undefined : config.lastManifestEtag,
+      lastAutoManifestEtag: endpointChanged ? undefined : config.lastAutoManifestEtag,
       settingsUpdatedAt: syncedSettingChanged ? Date.now() : (config.settingsUpdatedAt || 0),
       enabled: Boolean(trimmedUser && trimmedPass),
     });
     onClose();
+  };
+
+  const formatLastSyncedLabel = (ts?: number): string => {
+    if (!ts) return '尚未同步';
+    const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (diffSec < 60) return '刚刚';
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(
+      d.getMinutes()
+    ).padStart(2, '0')}`;
   };
 
   const themeOptions: Array<{ id: AppThemeMode; label: string; Icon: React.FC<{ className?: string; strokeWidth?: number }> }> = [
@@ -474,7 +487,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                     短文云端兜底（≤ 200 KB）
                   </div>
                   <div className="text-[11px] leading-snug text-[var(--fei-text-muted)] mt-0.5">
-                    坚果云每 60 秒同步目录与进度；开启后 ≤ 200 KB 短文正文及坚果云 inbox 投递短文同步到云端
+                    目录页每 45 秒静默检查、支持下拉立即同步，改动后 5 秒自动上传；开启后 ≤ 200 KB 短文及坚果云 inbox 投递短文同步到云端
                   </div>
                 </div>
                 <button
@@ -498,6 +511,15 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                   />
                 </button>
               </div>
+
+              {Boolean(config.username.trim() && config.password.trim()) && (
+                <div className="px-3.5 py-2 flex items-center justify-between text-[11.5px] text-[var(--fei-text-muted)]">
+                  <span>上次云端同步</span>
+                  <span className="font-code tabular-nums">
+                    {formatLastSyncedLabel(config.lastSyncedAt)}
+                  </span>
+                </div>
+              )}
             </div>
           </section>
 

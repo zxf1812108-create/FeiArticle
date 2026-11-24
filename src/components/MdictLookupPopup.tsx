@@ -807,10 +807,72 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         >
           {/* Subtle handle bar when docked at bottom */}
           {placement === 'bottom' && !isExpanded && (
-            <div className="flex justify-center pt-1.5 pb-0.5 bg-[var(--fei-popup-bg)] shrink-0">
+            <div className="flex justify-center pt-1.5 pb-0.5 bg-[var(--fei-popup-header-bg)] shrink-0">
               <span className="w-7 h-[3px] rounded-full bg-[var(--fei-popup-handle)]" />
             </div>
           )}
+
+          {/* Top Title Bar */}
+          <div
+            ref={headerRef}
+            className="relative px-3.5 py-2 bg-[var(--fei-popup-header-bg)] border-b border-[var(--fei-popup-divider)] flex items-center justify-between gap-2 shrink-0 select-none"
+          >
+            <div
+              style={!shiftExpandLeft ? { maxWidth: 'calc(50% - 22px)' } : undefined}
+              className="flex items-baseline gap-1.5 min-w-0 flex-1"
+            >
+              <BookA
+                className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0 self-center"
+                strokeWidth={1.75}
+              />
+              <span className="font-doc-body text-[15px] font-semibold text-[var(--fei-text-primary)] truncate">
+                {queryWord}
+              </span>
+            </div>
+
+            {!shiftExpandLeft && expandButton}
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {shiftExpandLeft && expandButton}
+
+              {displayedDictName ? (
+                matchCount > 1 ? (
+                  <button
+                    ref={(el) => {
+                      dictNameRef.current = el;
+                    }}
+                    type="button"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={onCycleDict}
+                    title="点击切换下一个包含该词的词典"
+                    aria-label={`当前词典 ${displayedDictName}，点击切换词典`}
+                    className="text-[12px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate max-w-[min(220px,52vw)] hover:opacity-75 transition-opacity cursor-pointer"
+                  >
+                    {displayedDictName}
+                  </button>
+                ) : (
+                  <span
+                    ref={(el) => {
+                      dictNameRef.current = el;
+                    }}
+                    className="text-[12px] text-[var(--fei-text-muted)] truncate max-w-[min(220px,52vw)]"
+                  >
+                    {displayedDictName}
+                  </span>
+                )
+              ) : null}
+
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onClose}
+                aria-label="关闭释义"
+                className="w-7 h-7 -mr-1 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
 
           {/* Scrollable Definition Body (Left half click => Page Up, Right half click => Page Down; partial lines masked) */}
           <div className="relative flex-1 min-h-0 flex flex-col">
@@ -880,71 +942,9 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
             )}
           </div>
 
-          {/* Bottom Title Bar (aligned with the reading view's bottom toolbar style) */}
-          <div
-            ref={headerRef}
-            className="relative px-3.5 py-2 bg-[var(--fei-popup-header-bg)] border-t border-[var(--fei-popup-divider)] flex items-center justify-between gap-2 shrink-0 select-none"
-          >
-            <div
-              style={!shiftExpandLeft ? { maxWidth: 'calc(50% - 22px)' } : undefined}
-              className="flex items-baseline gap-1.5 min-w-0 flex-1"
-            >
-              <BookA
-                className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0 self-center"
-                strokeWidth={1.75}
-              />
-              <span className="font-doc-body text-[15px] font-semibold text-[var(--fei-text-primary)] truncate">
-                {queryWord}
-              </span>
-            </div>
-
-            {!shiftExpandLeft && expandButton}
-
-            <div className="flex items-center gap-1.5 shrink-0">
-              {shiftExpandLeft && expandButton}
-
-              {displayedDictName ? (
-                matchCount > 1 ? (
-                  <button
-                    ref={(el) => {
-                      dictNameRef.current = el;
-                    }}
-                    type="button"
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onClick={onCycleDict}
-                    title="点击切换下一个包含该词的词典"
-                    aria-label={`当前词典 ${displayedDictName}，点击切换词典`}
-                    className="text-[12px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate max-w-[min(220px,52vw)] hover:opacity-75 transition-opacity cursor-pointer"
-                  >
-                    {displayedDictName}
-                  </button>
-                ) : (
-                  <span
-                    ref={(el) => {
-                      dictNameRef.current = el;
-                    }}
-                    className="text-[12px] text-[var(--fei-text-muted)] truncate max-w-[min(220px,52vw)]"
-                  >
-                    {displayedDictName}
-                  </span>
-                )
-              ) : null}
-
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={onClose}
-                aria-label="关闭释义"
-                className="w-7 h-7 -mr-1 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-
           {/* Subtle handle bar when docked at top */}
           {placement === 'top' && !isExpanded && (
-            <div className="flex justify-center pt-0.5 pb-1.5 bg-[var(--fei-popup-header-bg)] shrink-0">
+            <div className="flex justify-center pt-0.5 pb-1.5 bg-[var(--fei-popup-bg)] shrink-0">
               <span className="w-7 h-[3px] rounded-full bg-[var(--fei-popup-handle)]" />
             </div>
           )}

@@ -3,7 +3,7 @@ import { ArticleDoc, FolderNode, PurgedSyncRecords, SyncedTreeState } from '../t
 import { invalidateLocalImageCache, listLocalImageFiles, LocalImageFileMeta } from './localFs';
 import { StorageDirectoryConfig } from './storage';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
-import { isTrashExpired, purgeExpiredTrash } from './trash';
+import { isTrashExpired, pruneExpiredPurgedRecords, purgeExpiredTrash } from './trash';
 import { isDocBodyMissing } from './webdavSync';
 import {
   extractReadAnchorText,
@@ -276,28 +276,42 @@ export function mergeWifiCatalogIntoLocal(
   folders: FolderNode[];
   docs: ArticleDoc[];
   treeState: SyncedTreeState;
+  purgedRecords: PurgedSyncRecords;
   changed: boolean;
 } {
   const now = Date.now();
   let changed = false;
 
-  // Combine purge tombstones from both peers
-  const mergedPurgedDocs: Record<string, number> = { ...(localPurged?.docs || {}) };
+  // Combine purge tombstones from both peers and prune entries older than 30 days
+  const localPruned = pruneExpiredPurgedRecords(localPurged, now);
+  const mergedPurgedDocs: Record<string, number> = { ...localPruned.docs };
+  const mergedPurgedDocFormats: Record<string, 'txt' | 'md'> = { ...(localPruned.docFormats || {}) };
+  let purgedChanged = false;
   if (peerSnapshot.purgedRecords?.docs) {
     for (const [id, ts] of Object.entries(peerSnapshot.purgedRecords.docs)) {
       if (!mergedPurgedDocs[id] || ts > mergedPurgedDocs[id]) {
         mergedPurgedDocs[id] = ts;
+        const fmt = peerSnapshot.purgedRecords.docFormats?.[id];
+        if (fmt === 'md' || fmt === 'txt') {
+          mergedPurgedDocFormats[id] = fmt;
+        }
+        purgedChanged = true;
       }
     }
   }
-  const mergedPurgedFolders: Record<string, number> = { ...(localPurged?.folders || {}) };
+  const mergedPurgedFolders: Record<string, number> = { ...localPruned.folders };
   if (peerSnapshot.purgedRecords?.folders) {
     for (const [id, ts] of Object.entries(peerSnapshot.purgedRecords.folders)) {
       if (!mergedPurgedFolders[id] || ts > mergedPurgedFolders[id]) {
         mergedPurgedFolders[id] = ts;
+        purgedChanged = true;
       }
     }
   }
+  const mergedPurged = pruneExpiredPurgedRecords(
+    { docs: mergedPurgedDocs, docFormats: mergedPurgedDocFormats, folders: mergedPurgedFolders },
+    now
+  );
 
   // Merge folders (LWW)
   const folderMap = new Map<string, FolderNode>();
@@ -498,6 +512,20 @@ export function mergeWifiCatalogIntoLocal(
       changed = true;
     }
 
+    if (
+      !isDocBodyMissing(updated) &&
+      pd.hasBody &&
+      pd.contentHash &&
+      updated.contentHash === pd.contentHash &&
+      updated.lastSyncedContentHash !== updated.contentHash
+    ) {
+      updated = {
+        ...updated,
+        lastSyncedContentHash: updated.contentHash,
+      };
+      changed = true;
+    }
+
     docMap.set(pd.id, updated);
   }
 
@@ -506,7 +534,8 @@ export function mergeWifiCatalogIntoLocal(
     folders: purged.folders,
     docs: purged.docs,
     treeState: mergedTreeState,
-    changed: changed || purged.changed,
+    purgedRecords: mergedPurged,
+    changed: changed || purged.changed || purgedChanged,
   };
 }
 
@@ -521,7 +550,8 @@ export interface WifiSyncHostCallbacks {
   applyMergedCatalog: (
     folders: FolderNode[],
     docs: ArticleDoc[],
-    treeState: SyncedTreeState
+    treeState: SyncedTreeState,
+    purgedRecords?: PurgedSyncRecords
   ) => void;
   applyReceivedDocBody: (payload: WifiDocBodyPayload) => Promise<void>;
   onPeersChange: (peers: WifiPeer[]) => void;
@@ -586,13 +616,18 @@ export async function startWifiSyncHost(
           peerSnapshot
         );
         if (merged.changed) {
-          callbacks.applyMergedCatalog(merged.folders, merged.docs, merged.treeState);
+          callbacks.applyMergedCatalog(
+            merged.folders,
+            merged.docs,
+            merged.treeState,
+            merged.purgedRecords
+          );
         }
         const reply = buildWifiCatalogSnapshot(
           merged.folders,
           merged.docs,
           merged.treeState,
-          local.purgedRecords,
+          merged.purgedRecords,
           local.cloudConfigured
         );
         await WifiSyncNative.resolveServerRequest({
@@ -692,7 +727,8 @@ export async function runWifiBidirectionalSync(options: {
   applyMergedCatalog: (
     folders: FolderNode[],
     docs: ArticleDoc[],
-    treeState: SyncedTreeState
+    treeState: SyncedTreeState,
+    purgedRecords?: PurgedSyncRecords
   ) => void;
   applyReceivedDocBody: (payload: WifiDocBodyPayload) => Promise<void>;
   onProgress?: (progress: WifiSyncProgress) => void;
@@ -758,7 +794,12 @@ export async function runWifiBidirectionalSync(options: {
     );
     if (merged.changed) {
       catalogUpdated = true;
-      options.applyMergedCatalog(merged.folders, merged.docs, merged.treeState);
+      options.applyMergedCatalog(
+        merged.folders,
+        merged.docs,
+        merged.treeState,
+        merged.purgedRecords
+      );
     }
 
     // Step 2: Diff document bodies (bidirectional)
@@ -922,7 +963,47 @@ export function applyWifiReceivedDocToDocs(
     return prevDocs;
   }
   const excerpt = existing.encrypted ? '' : extractExcerpt(payload.content);
-  return prevDocs.map((d) => {
+  const bothSidesEdited = Boolean(
+    !isDocBodyMissing(existing) &&
+      existing.lastSyncedContentHash &&
+      existing.contentHash !== existing.lastSyncedContentHash &&
+      payload.contentHash !== existing.lastSyncedContentHash &&
+      payload.contentHash !== existing.contentHash
+  );
+
+  let conflictCopy: ArticleDoc | null = null;
+  if (bothSidesEdited) {
+    const copyTs = Date.now();
+    const baseTitle = (existing.title || '无标题文档').replace(/\s*\(冲突副本\)$/, '');
+    conflictCopy = {
+      id: `doc_${copyTs}_${Math.random().toString(36).slice(2, 6)}`,
+      title: `${baseTitle} (冲突副本)`,
+      folderId: existing.folderId,
+      order: existing.order + 0.5,
+      content: existing.content,
+      contentHash: existing.contentHash,
+      excerpt: existing.encrypted ? '' : extractExcerpt(existing.content),
+      tags: existing.tags || [],
+      starred: false,
+      readProgress: existing.readProgress ?? 0,
+      lastReadAt: existing.lastReadAt ?? null,
+      lastMode: existing.lastMode ?? 'read',
+      lastScrollTop: existing.lastScrollTop ?? 0,
+      lastCharOffset: existing.lastCharOffset ?? 0,
+      readAnchorText: existing.readAnchorText,
+      encrypted: Boolean(existing.encrypted),
+      format: existing.format ?? 'txt',
+      cloudBodySynced: false,
+      createdAt: copyTs,
+      updatedAt: copyTs,
+      syncStatus: 'dirty',
+      lastSyncedContentHash: existing.contentHash,
+      highlights: [],
+      byteSize: existing.byteSize || getByteSize(existing.content),
+    };
+  }
+
+  const mapped = prevDocs.map((d) => {
     if (d.id !== payload.id) return d;
     const prevOffset = Math.max(0, Math.round(d.lastCharOffset ?? 0));
     const anchor =
@@ -947,11 +1028,12 @@ export function applyWifiReceivedDocToDocs(
       ...d,
       content: payload.content,
       contentHash: payload.contentHash,
+      lastSyncedContentHash: payload.contentHash,
       byteSize: payload.byteSize,
       excerpt,
       format: payload.format ?? d.format ?? 'txt',
       updatedAt: Math.max(d.updatedAt, payload.updatedAt),
-      syncStatus: 'synced',
+      syncStatus: 'synced' as const,
       pendingRemoteProgress: nextPending,
       ...(relocated?.matched
         ? {
@@ -963,4 +1045,6 @@ export function applyWifiReceivedDocToDocs(
         : {}),
     };
   });
+
+  return conflictCopy ? [...mapped, conflictCopy] : mapped;
 }

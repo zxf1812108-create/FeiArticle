@@ -76,6 +76,7 @@ interface WebDavProxyPayload {
   relativePath?: string;
   body?: string;
   ifNoneMatch?: string;
+  ifMatch?: string;
   depth?: '0' | '1';
 }
 
@@ -116,6 +117,9 @@ app.post('/api/webdav/proxy', async (req, res) => {
 
     if (payload.ifNoneMatch) {
       headers['If-None-Match'] = payload.ifNoneMatch;
+    }
+    if (payload.ifMatch) {
+      headers['If-Match'] = payload.ifMatch;
     }
     if (payload.method === 'PROPFIND') {
       headers['Depth'] = payload.depth || '0';

@@ -8,6 +8,7 @@ import {
   WebDavConfig,
 } from '../types';
 import { createInitialQuotaStats, getCurrentMonthKey } from './webdavSync';
+import { pruneExpiredPurgedRecords } from './trash';
 
 const KEYS = {
   FOLDERS: 'feiartical_folders_v1',
@@ -255,16 +256,17 @@ export function loadPurgedSyncRecords(): PurgedSyncRecords {
     localStorage.getItem(KEYS.PURGED_RECORDS),
     {}
   );
-  return {
+  return pruneExpiredPurgedRecords({
     docs: parsed.docs && typeof parsed.docs === 'object' ? parsed.docs : {},
     docFormats:
       parsed.docFormats && typeof parsed.docFormats === 'object' ? parsed.docFormats : {},
     folders: parsed.folders && typeof parsed.folders === 'object' ? parsed.folders : {},
-  };
+  });
 }
 
 export function savePurgedSyncRecords(records: PurgedSyncRecords): void {
-  localStorage.setItem(KEYS.PURGED_RECORDS, JSON.stringify(records));
+  const pruned = pruneExpiredPurgedRecords(records);
+  localStorage.setItem(KEYS.PURGED_RECORDS, JSON.stringify(pruned));
 }
 
 export function loadActiveMdictId(): string | null {

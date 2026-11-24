@@ -1,7 +1,38 @@
-import { ArticleDoc, FolderNode } from '../types';
+import { ArticleDoc, FolderNode, PurgedSyncRecords } from '../types';
 
 export const TRASH_RETENTION_DAYS = 30;
 export const TRASH_RETENTION_MS = TRASH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+export function pruneExpiredPurgedRecords(
+  records: PurgedSyncRecords | undefined,
+  now = Date.now()
+): PurgedSyncRecords {
+  const docs: Record<string, number> = {};
+  const docFormats: Record<string, 'txt' | 'md'> = {};
+  const folders: Record<string, number> = {};
+
+  if (records?.docs) {
+    for (const [id, ts] of Object.entries(records.docs)) {
+      if (typeof ts === 'number' && Number.isFinite(ts) && now - ts < TRASH_RETENTION_MS) {
+        docs[id] = ts;
+        const fmt = records.docFormats?.[id];
+        if (fmt === 'md' || fmt === 'txt') {
+          docFormats[id] = fmt;
+        }
+      }
+    }
+  }
+
+  if (records?.folders) {
+    for (const [id, ts] of Object.entries(records.folders)) {
+      if (typeof ts === 'number' && Number.isFinite(ts) && now - ts < TRASH_RETENTION_MS) {
+        folders[id] = ts;
+      }
+    }
+  }
+
+  return { docs, docFormats, folders };
+}
 
 export function getItemDeletedAt(item: { deletedAt?: number; updatedAt: number }): number {
   return typeof item.deletedAt === 'number' && Number.isFinite(item.deletedAt)
