@@ -155,6 +155,7 @@ const AUTO_PROGRESS_SYNC_INTERVAL_MS = 60 * 1000;
 const AUTO_CATALOG_DEBOUNCE_MS = 5000;
 const AUTO_PULL_COOLDOWN_MS = 15_000;
 const AUTO_SYNC_BACKOFF_STEPS_MS = [30_000, 60_000, 180_000, 300_000];
+const TOOLBAR_TOAST_DURATION_MS = 1200;
 
 // Insert-below icon depicting placing the cut folder/article beneath the currently selected row
 const InsertBelowIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
@@ -823,10 +824,17 @@ export default function App() {
     });
   }, [lanRunning, selectedDocId]);
 
-  const showToast = (msg: string, durationMs = 3800) => {
+  const showToast = (msg: string, durationMs = TOOLBAR_TOAST_DURATION_MS) => {
     if (toastTimerRef.current !== null) {
       window.clearTimeout(toastTimerRef.current);
       toastTimerRef.current = null;
+    }
+    if (wifiQuickBubbleRef.current && wifiQuickBubbleRef.current.status !== 'syncing') {
+      if (wifiBubbleTimerRef.current !== null) {
+        window.clearTimeout(wifiBubbleTimerRef.current);
+        wifiBubbleTimerRef.current = null;
+      }
+      setWifiQuickBubble(null);
     }
     setToast({ msg });
     toastTimerRef.current = window.setTimeout(() => {
@@ -1590,7 +1598,7 @@ export default function App() {
               setWifiQuickBubble(null);
             } else {
               setWifiQuickBubble({ status: 'done', text: '同步完成' });
-              scheduleHideWifiBubble(1800);
+              scheduleHideWifiBubble(TOOLBAR_TOAST_DURATION_MS);
             }
           }
         } catch {
@@ -2638,10 +2646,15 @@ export default function App() {
     applyReceivedDocBody: applyWifiReceivedDocBody,
   };
 
-  const scheduleHideWifiBubble = (delayMs: number) => {
+  const scheduleHideWifiBubble = (delayMs = TOOLBAR_TOAST_DURATION_MS) => {
     if (wifiBubbleTimerRef.current !== null) {
       window.clearTimeout(wifiBubbleTimerRef.current);
     }
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    setToast(null);
     wifiBubbleTimerRef.current = window.setTimeout(() => {
       wifiBubbleTimerRef.current = null;
       setWifiQuickBubble(null);
@@ -2813,7 +2826,7 @@ export default function App() {
                     setWifiQuickBubble(null);
                   } else {
                     setWifiQuickBubble({ status: 'done', text: '同步完成' });
-                    scheduleHideWifiBubble(1800);
+                    scheduleHideWifiBubble(TOOLBAR_TOAST_DURATION_MS);
                   }
                 }
               }
@@ -2940,7 +2953,7 @@ export default function App() {
             setWifiQuickBubble(null);
           } else {
             setWifiQuickBubble({ status: 'done', text: '同步完成' });
-            scheduleHideWifiBubble(1800);
+            scheduleHideWifiBubble(TOOLBAR_TOAST_DURATION_MS);
           }
         }
       } catch (err) {
@@ -2966,7 +2979,7 @@ export default function App() {
               text: 'Wi-Fi 同步密码不一致',
               action: 'settings',
             });
-            scheduleHideWifiBubble(2600);
+            scheduleHideWifiBubble(TOOLBAR_TOAST_DURATION_MS);
           } else {
             // Peer may have just entered Reading Mode or locked screen; dismiss quietly
             setWifiQuickBubble(null);
