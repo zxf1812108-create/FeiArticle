@@ -984,6 +984,7 @@ export async function runAutoMetadataProgressSync(
         }
       }
       const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
+      const hasActiveWifiConflict = localDoc.pendingRemoteProgress?.source === 'wifi';
       const nextLocal: ArticleDoc = {
         ...localDoc,
         cloudBodySynced: cloudSynced,
@@ -991,7 +992,7 @@ export async function runAutoMetadataProgressSync(
         lastSyncedCharOffset: localOffset,
         lastSyncedProgress: localDoc.readProgress ?? 0,
         lastSyncedReadAt: localDoc.lastReadAt ?? 0,
-        pendingRemoteProgress: null,
+        pendingRemoteProgress: hasActiveWifiConflict ? localDoc.pendingRemoteProgress : null,
       };
       mergedDocsMap.set(localDoc.id, nextLocal);
       nextRemoteDocs[localDoc.id] = toManifestDocEntry(nextLocal, cloudSynced);
@@ -1011,87 +1012,90 @@ export async function runAutoMetadataProgressSync(
     let cloudSynced = Boolean(remoteEntry.cloudBodySynced);
 
     // Reading progress merge (Plan B open-book confirmation + last-synced baseline + text anchor guard)
-    const progMerge = reconcileReadingProgress(localDoc, remoteEntry, 'cloud');
-    if (progMerge.action === 'pull') {
-      const pulledOffset = progMerge.resolvedRemoteOffset;
-      nextLocal = {
-        ...nextLocal,
-        readProgress: progMerge.resolvedRemoteProgress,
-        lastCharOffset: pulledOffset,
-        lastScrollTop: Math.max(0, Math.round(remoteEntry.lastScrollTop ?? 0)),
-        lastMode: remoteEntry.lastMode ?? nextLocal.lastMode ?? 'read',
-        lastReadAt: remoteEntry.lastReadAt ?? progMerge.resolvedRemoteReadAt,
-        readAnchorText:
-          progMerge.resolvedRemoteAnchor ||
-          (nextLocal.content ? extractReadAnchorText(nextLocal.content, pulledOffset) : nextLocal.readAnchorText),
-        lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? pulledOffset,
-        lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
-        lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
-        pendingRemoteProgress: null,
-      };
-      pulledProgressDocIds[localDoc.id] = pulledOffset;
-      didPull = true;
-    } else if (progMerge.action === 'push') {
-      const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
-      const localAnchor = localDoc.encrypted
-        ? undefined
-        : localDoc.readAnchorText ||
-          (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : undefined) ||
-          undefined;
-      nextRemoteEntry.readProgress = localDoc.readProgress;
-      nextRemoteEntry.lastCharOffset = localOffset;
-      nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
-      nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
-      nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? Date.now();
-      nextRemoteEntry.readAnchorText = localAnchor;
-      nextLocal = {
-        ...nextLocal,
-        readAnchorText: localDoc.readAnchorText || localAnchor,
-        lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? localOffset,
-        lastSyncedProgress: progMerge.nextBaseline?.progress ?? localDoc.readProgress,
-        lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? (localDoc.lastReadAt ?? 0),
-        pendingRemoteProgress: null,
-      };
-      needManifestPush = true;
-    } else if (progMerge.action === 'prompt' && progMerge.pendingRemoteProgress) {
-      // Protect both local and cloud — stash remote progress for explicit user choice on book open
-      if (!pendingRemoteProgressEqual(localDoc.pendingRemoteProgress, progMerge.pendingRemoteProgress)) {
+    // Never overwrite or clear an active Wi-Fi progress conflict waiting for user resolution in Directory Mode
+    if (localDoc.pendingRemoteProgress?.source !== 'wifi') {
+      const progMerge = reconcileReadingProgress(localDoc, remoteEntry, 'cloud');
+      if (progMerge.action === 'pull') {
+        const pulledOffset = progMerge.resolvedRemoteOffset;
         nextLocal = {
           ...nextLocal,
-          pendingRemoteProgress: progMerge.pendingRemoteProgress,
-        };
-        didPull = true;
-      }
-    } else {
-      // action === 'noop': progress within tolerance; align baseline & clear stale pending prompt
-      const baselineChanged =
-        progMerge.nextBaseline &&
-        (localDoc.lastSyncedCharOffset !== progMerge.nextBaseline.charOffset ||
-          localDoc.lastSyncedProgress !== progMerge.nextBaseline.progress ||
-          Boolean(localDoc.pendingRemoteProgress));
-      if (baselineChanged && progMerge.nextBaseline) {
-        nextLocal = {
-          ...nextLocal,
-          lastSyncedCharOffset: progMerge.nextBaseline.charOffset,
-          lastSyncedProgress: progMerge.nextBaseline.progress,
-          lastSyncedReadAt: progMerge.nextBaseline.readAt,
+          readProgress: progMerge.resolvedRemoteProgress,
+          lastCharOffset: pulledOffset,
+          lastScrollTop: Math.max(0, Math.round(remoteEntry.lastScrollTop ?? 0)),
+          lastMode: remoteEntry.lastMode ?? nextLocal.lastMode ?? 'read',
+          lastReadAt: remoteEntry.lastReadAt ?? progMerge.resolvedRemoteReadAt,
+          readAnchorText:
+            progMerge.resolvedRemoteAnchor ||
+            (nextLocal.content ? extractReadAnchorText(nextLocal.content, pulledOffset) : nextLocal.readAnchorText),
+          lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? pulledOffset,
+          lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
+          lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
           pendingRemoteProgress: null,
         };
+        pulledProgressDocIds[localDoc.id] = pulledOffset;
         didPull = true;
-      }
-      if (progMerge.silentMinorAlign === 'local-to-remote') {
+      } else if (progMerge.action === 'push') {
         const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
+        const localAnchor = localDoc.encrypted
+          ? undefined
+          : localDoc.readAnchorText ||
+            (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : undefined) ||
+            undefined;
         nextRemoteEntry.readProgress = localDoc.readProgress;
         nextRemoteEntry.lastCharOffset = localOffset;
         nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
         nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
-        nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? nextRemoteEntry.lastReadAt;
-        if (!localDoc.encrypted) {
-          nextRemoteEntry.readAnchorText =
-            localDoc.readAnchorText ||
-            (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : nextRemoteEntry.readAnchorText);
-        }
+        nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? Date.now();
+        nextRemoteEntry.readAnchorText = localAnchor;
+        nextLocal = {
+          ...nextLocal,
+          readAnchorText: localDoc.readAnchorText || localAnchor,
+          lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? localOffset,
+          lastSyncedProgress: progMerge.nextBaseline?.progress ?? localDoc.readProgress,
+          lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? (localDoc.lastReadAt ?? 0),
+          pendingRemoteProgress: null,
+        };
         needManifestPush = true;
+      } else if (progMerge.action === 'prompt' && progMerge.pendingRemoteProgress) {
+        // Protect both local and cloud — stash remote progress for explicit user choice on book open
+        if (!pendingRemoteProgressEqual(localDoc.pendingRemoteProgress, progMerge.pendingRemoteProgress)) {
+          nextLocal = {
+            ...nextLocal,
+            pendingRemoteProgress: progMerge.pendingRemoteProgress,
+          };
+          didPull = true;
+        }
+      } else {
+        // action === 'noop': progress within tolerance; align baseline & clear stale pending prompt
+        const baselineChanged =
+          progMerge.nextBaseline &&
+          (localDoc.lastSyncedCharOffset !== progMerge.nextBaseline.charOffset ||
+            localDoc.lastSyncedProgress !== progMerge.nextBaseline.progress ||
+            Boolean(localDoc.pendingRemoteProgress));
+        if (baselineChanged && progMerge.nextBaseline) {
+          nextLocal = {
+            ...nextLocal,
+            lastSyncedCharOffset: progMerge.nextBaseline.charOffset,
+            lastSyncedProgress: progMerge.nextBaseline.progress,
+            lastSyncedReadAt: progMerge.nextBaseline.readAt,
+            pendingRemoteProgress: null,
+          };
+          didPull = true;
+        }
+        if (progMerge.silentMinorAlign === 'local-to-remote') {
+          const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
+          nextRemoteEntry.readProgress = localDoc.readProgress;
+          nextRemoteEntry.lastCharOffset = localOffset;
+          nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
+          nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
+          nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? nextRemoteEntry.lastReadAt;
+          if (!localDoc.encrypted) {
+            nextRemoteEntry.readAnchorText =
+              localDoc.readAnchorText ||
+              (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : nextRemoteEntry.readAnchorText);
+          }
+          needManifestPush = true;
+        }
       }
     }
 

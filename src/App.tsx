@@ -1668,6 +1668,8 @@ export default function App() {
       docViewRef.current?.jumpToCharOffset(finalOffset);
     }
     if (pending.source === 'wifi') {
+      autoProgressDirtyRef.current = true;
+      autoMutationSeqRef.current++;
       scheduleWifiPushAfterResolution(nextDocs, nextDismissed);
     }
     showToast(pending.source === 'wifi' ? '已采用对端阅读进度' : '已同步至云端阅读进度');
@@ -2218,6 +2220,13 @@ export default function App() {
     const cfg = webDavConfigRef.current;
     if (!cfg.username.trim() || !cfg.password.trim()) return;
     if (activeAutoSyncPromiseRef.current) return;
+    // Pause background WebDAV sync while user is resolving Wi-Fi progress conflicts in Directory Mode
+    if (
+      mainViewRef.current === 'tree' &&
+      docsRef.current.some((d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi')
+    ) {
+      return;
+    }
 
     const now = Date.now();
     if (now < autoSyncBackoffUntilRef.current) return;
@@ -2312,7 +2321,28 @@ export default function App() {
         if (outcome.didPull || outcome.didPush) {
           const outcomeDocMap = new Map(outcome.docs.map((d) => [d.id, d]));
           if (noConcurrentMutation) {
-            setDocs(outcome.docs);
+            setDocs((prev) => {
+              const prevMap = new Map(prev.map((d) => [d.id, d]));
+              const nextList = outcome.docs.map((next) => {
+                const curr = prevMap.get(next.id);
+                if (curr?.pendingRemoteProgress?.source === 'wifi') {
+                  return {
+                    ...next,
+                    readProgress: curr.readProgress,
+                    lastCharOffset: curr.lastCharOffset,
+                    lastScrollTop: curr.lastScrollTop,
+                    lastMode: curr.lastMode,
+                    lastReadAt: curr.lastReadAt,
+                    readAnchorText: curr.readAnchorText,
+                    progressOverrideAt: curr.progressOverrideAt,
+                    pendingRemoteProgress: curr.pendingRemoteProgress,
+                  };
+                }
+                return next;
+              });
+              docsRef.current = nextList;
+              return nextList;
+            });
           } else {
             setDocs((prev) => {
               const seenIds = new Set<string>();
@@ -2320,21 +2350,26 @@ export default function App() {
                 seenIds.add(curr.id);
                 const next = outcomeDocMap.get(curr.id);
                 if (!next) return curr;
+                const keepWifiConflict = curr.pendingRemoteProgress?.source === 'wifi';
                 const currProgressTs = curr.lastReadAt ?? 0;
                 const nextProgressTs = next.lastReadAt ?? 0;
-                const useNextProgress = nextProgressTs > currProgressTs;
+                const useNextProgress = !keepWifiConflict && nextProgressTs > currProgressTs;
                 const useNextCatalog = next.updatedAt > curr.updatedAt;
                 const downloadedBody =
                   curr.syncStatus === 'remote-only' && !curr.content && Boolean(next.content);
                 const cloudFlagChanged = Boolean(next.cloudBodySynced) !== Boolean(curr.cloudBodySynced);
                 const pendingChanged =
-                  (next.pendingRemoteProgress?.lastCharOffset ?? -1) !==
+                  !keepWifiConflict &&
+                  ((next.pendingRemoteProgress?.lastCharOffset ?? -1) !==
                     (curr.pendingRemoteProgress?.lastCharOffset ?? -1) ||
-                  (next.pendingRemoteProgress?.lastReadAt ?? -1) !==
-                    (curr.pendingRemoteProgress?.lastReadAt ?? -1);
+                    (next.pendingRemoteProgress?.lastReadAt ?? -1) !==
+                      (curr.pendingRemoteProgress?.lastReadAt ?? -1) ||
+                    (next.pendingRemoteProgress?.source ?? '') !==
+                      (curr.pendingRemoteProgress?.source ?? ''));
                 const baselineChanged =
-                  next.lastSyncedCharOffset !== curr.lastSyncedCharOffset ||
-                  next.lastSyncedProgress !== curr.lastSyncedProgress;
+                  !keepWifiConflict &&
+                  (next.lastSyncedCharOffset !== curr.lastSyncedCharOffset ||
+                    next.lastSyncedProgress !== curr.lastSyncedProgress);
                 if (
                   !useNextProgress &&
                   !useNextCatalog &&
@@ -2395,7 +2430,10 @@ export default function App() {
               });
               // Option A: append newly discovered remote catalog docs not yet present locally
               const addedRemote = outcome.docs.filter((d) => !seenIds.has(d.id));
-              return addedRemote.length > 0 ? [...updatedExisting, ...addedRemote] : updatedExisting;
+              const nextList =
+                addedRemote.length > 0 ? [...updatedExisting, ...addedRemote] : updatedExisting;
+              docsRef.current = nextList;
+              return nextList;
             });
           }
 
@@ -2565,7 +2603,20 @@ export default function App() {
       setTreeStateUpdatedAt(nextTreeState.updatedAt);
     }
     setFoldersDirty(true);
-    markAutoCatalogDirty();
+    const hasUnresolvedWifiConflict = nextDocs.some(
+      (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
+    );
+    if (hasUnresolvedWifiConflict) {
+      // Record mutation so any in-flight WebDAV sync won't clobber the Wi-Fi conflict modal,
+      // and hold off scheduling a new cloud push until the user confirms their choice.
+      autoMutationSeqRef.current++;
+      if (autoCatalogDebounceTimerRef.current !== null) {
+        window.clearTimeout(autoCatalogDebounceTimerRef.current);
+        autoCatalogDebounceTimerRef.current = null;
+      }
+    } else {
+      markAutoCatalogDirty();
+    }
   };
 
   const applyWifiReceivedDocBody = async (payload: WifiDocBodyPayload) => {
