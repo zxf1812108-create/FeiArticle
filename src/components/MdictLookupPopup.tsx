@@ -437,13 +437,6 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
   return doc.body.innerHTML;
 }
 
-function escapeHtmlText(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
 interface PopupVisualLine {
   top: number;
   bottom: number;
@@ -725,9 +718,27 @@ const MdictShadowDefinition: React.FC<{
       .map((html) => `<div class="mdx-entry">${html}</div>`)
       .join('');
 
-    shadow.innerHTML = `<style>${baseStyle}</style>${
-      hasCustomCss ? `<style>${escapeHtmlText(safeDictCss)}</style>` : ''
-    }<style>${fontScaleOverride}${themeAdaptStyle}</style><div class="mdx-surface">${entriesHtml}</div>`;
+    shadow.replaceChildren();
+
+    const baseStyleEl = document.createElement('style');
+    baseStyleEl.textContent = baseStyle;
+    shadow.appendChild(baseStyleEl);
+
+    if (hasCustomCss) {
+      const dictStyleEl = document.createElement('style');
+      dictStyleEl.textContent = safeDictCss;
+      shadow.appendChild(dictStyleEl);
+    }
+
+    const overrideStyleEl = document.createElement('style');
+    overrideStyleEl.textContent = `${fontScaleOverride}${themeAdaptStyle}`;
+    shadow.appendChild(overrideStyleEl);
+
+    const surfaceEl = document.createElement('div');
+    surfaceEl.className = 'mdx-surface';
+    surfaceEl.innerHTML = entriesHtml;
+    shadow.appendChild(surfaceEl);
+
     onContentRenderedRef.current?.();
   }, [sanitizedEntries, safeDictCss, isDark, fontSize]);
 
