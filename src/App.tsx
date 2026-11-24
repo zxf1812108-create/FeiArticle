@@ -11,6 +11,7 @@ import {
   Plus,
   Scissors,
   Settings,
+  StickyNote,
   Trash2,
 } from 'lucide-react';
 import { ImportModal } from './components/ImportModal';
@@ -22,6 +23,8 @@ import {
   MinimalDocView,
   MinimalDocViewHandle,
 } from './components/MinimalDocView';
+import { NoteAnchorTarget, ReadingNotePopover } from './components/ReadingNotePopover';
+import { ReadingNotesListModal } from './components/ReadingNotesListModal';
 import {
   DragPayload,
   InsertPosition,
@@ -51,10 +54,12 @@ import {
   MdictLookupResult,
   PurgedSyncRecords,
   QuotaStats,
+  ReadingNote,
   SyncedTreeState,
   WebDavConfig,
   WhistleSensitivity,
 } from './types';
+import { getActiveNotes, sanitizeNotesList } from './utils/notes';
 import {
   attachMdictCss,
   deleteMdictDictionary,
@@ -253,6 +258,14 @@ export default function App() {
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTrashModal, setShowTrashModal] = useState(false);
   const [showFontSizeBar, setShowFontSizeBar] = useState(false);
+  const [visibleNoteIds, setVisibleNoteIds] = useState<string[]>([]);
+  const [notePopoverState, setNotePopoverState] = useState<{
+    screenNoteIds: string[];
+    initialNoteId: string | null;
+    defaultAnchor: NoteAnchorTarget;
+    canCreateAtDefaultAnchor: boolean;
+  } | null>(null);
+  const [showNotesListModal, setShowNotesListModal] = useState(false);
   const [fontSize, setFontSize] = useState<number>(() => {
     const raw = loadReaderSettings().fontSize;
     if (!Number.isFinite(raw)) return DEFAULT_READER_SETTINGS.fontSize;
@@ -1539,6 +1552,9 @@ export default function App() {
     setSelectedDocId(docId);
     setLiveReadProgress(target?.readProgress ?? 0);
     setLiveProgressDecimals(0);
+    setVisibleNoteIds([]);
+    setNotePopoverState(null);
+    setShowNotesListModal(false);
     // Plan B: clear session dismissal on book open so any unresolved pending progress prompts cleanly
     setDismissedConflictKeys((prev) => {
       if (!prev[docId]) return prev;
@@ -1818,11 +1834,180 @@ export default function App() {
     setMdictLookupPending(false);
     setMdictLookup(null);
     setShowFontSizeBar(false);
+    setNotePopoverState(null);
+    setShowNotesListModal(false);
+    setVisibleNoteIds([]);
     setWhistleEnabled(false);
     setMainView('tree');
     if (autoProgressDirtyRef.current || autoCatalogDirtyRef.current) {
       void runSilentAutoSyncRef.current({ bypassThrottle: true });
     }
+  };
+
+  const handleSaveReadingNote = (payload: {
+    noteId: string | null;
+    charOffset: number;
+    anchorText: string;
+    content: string;
+  }) => {
+    const docId = selectedDocIdRef.current;
+    if (!docId) return;
+    const now = Date.now();
+    const trimmed = payload.content.trim();
+
+    let changed = false;
+    const nextDocs = docsRef.current.map((doc) => {
+      if (doc.id !== docId) return doc;
+      const existing = sanitizeNotesList(doc.notes) ?? [];
+
+      if (payload.noteId) {
+        const idx = existing.findIndex((n) => n.id === payload.noteId);
+        if (idx === -1) {
+          if (!trimmed) return doc;
+          const created: ReadingNote = {
+            id: payload.noteId,
+            charOffset: Math.max(0, Math.round(payload.charOffset)),
+            anchorText: payload.anchorText.trim(),
+            content: trimmed,
+            createdAt: now,
+            updatedAt: now,
+          };
+          changed = true;
+          return { ...doc, notes: sanitizeNotesList([...existing, created]) };
+        }
+        const prevNote = existing[idx];
+        if (!trimmed) {
+          // Emptying an existing note soft-deletes it so sync propagates cleanly
+          const updated: ReadingNote = {
+            ...prevNote,
+            deleted: true,
+            deletedAt: now,
+            updatedAt: now,
+          };
+          const nextNotes = [...existing];
+          nextNotes[idx] = updated;
+          changed = true;
+          return { ...doc, notes: sanitizeNotesList(nextNotes) };
+        }
+        if (prevNote.content === trimmed && !prevNote.deleted) return doc;
+        const updated: ReadingNote = {
+          ...prevNote,
+          content: trimmed,
+          updatedAt: now,
+          deleted: undefined,
+          deletedAt: undefined,
+        };
+        const nextNotes = [...existing];
+        nextNotes[idx] = updated;
+        changed = true;
+        return { ...doc, notes: sanitizeNotesList(nextNotes) };
+      }
+
+      if (!trimmed) return doc;
+      const created: ReadingNote = {
+        id: `note-${now}-${Math.random().toString(36).slice(2, 8)}`,
+        charOffset: Math.max(0, Math.round(payload.charOffset)),
+        anchorText: payload.anchorText.trim(),
+        content: trimmed,
+        createdAt: now,
+        updatedAt: now,
+      };
+      changed = true;
+      return { ...doc, notes: sanitizeNotesList([...existing, created]) };
+    });
+
+    if (!changed) return;
+    docsRef.current = nextDocs;
+    setDocs(nextDocs);
+    markAutoCatalogDirty();
+  };
+
+  const handleDeleteReadingNote = (noteId: string) => {
+    const docId = selectedDocIdRef.current;
+    if (!docId) return;
+    const now = Date.now();
+    let changed = false;
+    const nextDocs = docsRef.current.map((doc) => {
+      if (doc.id !== docId) return doc;
+      const existing = sanitizeNotesList(doc.notes) ?? [];
+      const idx = existing.findIndex((n) => n.id === noteId);
+      if (idx === -1 || existing[idx].deleted) return doc;
+      const nextNotes = [...existing];
+      nextNotes[idx] = {
+        ...existing[idx],
+        deleted: true,
+        deletedAt: now,
+        updatedAt: now,
+      };
+      changed = true;
+      return { ...doc, notes: sanitizeNotesList(nextNotes) };
+    });
+    if (!changed) return;
+    docsRef.current = nextDocs;
+    setDocs(nextDocs);
+    markAutoCatalogDirty();
+    showToast('已删除笔记');
+  };
+
+  const handleOpenNotePopover = () => {
+    if (notePopoverState) {
+      setNotePopoverState(null);
+      return;
+    }
+    if (!selectedDoc) return;
+    setShowFontSizeBar(false);
+    setShowNotesListModal(false);
+    setMdictLookup(null);
+
+    const ctx = docViewRef.current?.captureNoteAnchorContext();
+    const defaultAnchor: NoteAnchorTarget = ctx?.defaultAnchor ?? {
+      charOffset: Math.max(0, Math.round(selectedDoc.lastCharOffset ?? 0)),
+      anchorText: '',
+    };
+    const screenNoteIds = ctx?.screenNoteIds ?? [];
+    const defaultAnchorHasNote = ctx?.defaultAnchorHasNote ?? false;
+
+    setNotePopoverState({
+      screenNoteIds,
+      initialNoteId: screenNoteIds[0] ?? null,
+      defaultAnchor,
+      canCreateAtDefaultAnchor: !defaultAnchorHasNote,
+    });
+  };
+
+  const handleOpenNoteFromMargin = (noteId: string) => {
+    if (!selectedDoc) return;
+    setShowFontSizeBar(false);
+    setShowNotesListModal(false);
+    setMdictLookup(null);
+
+    const ctx = docViewRef.current?.captureNoteAnchorContext();
+    const defaultAnchor: NoteAnchorTarget = ctx?.defaultAnchor ?? {
+      charOffset: Math.max(0, Math.round(selectedDoc.lastCharOffset ?? 0)),
+      anchorText: '',
+    };
+    const rawVisible = ctx?.screenNoteIds ?? [];
+    const screenNoteIds = rawVisible.includes(noteId) ? rawVisible : [noteId, ...rawVisible];
+    const defaultAnchorHasNote = ctx?.defaultAnchorHasNote ?? false;
+
+    setNotePopoverState({
+      screenNoteIds,
+      initialNoteId: noteId,
+      defaultAnchor,
+      canCreateAtDefaultAnchor: !defaultAnchorHasNote,
+    });
+  };
+
+  const handleOpenNotesListModal = () => {
+    setShowFontSizeBar(false);
+    setNotePopoverState(null);
+    setMdictLookup(null);
+    setShowNotesListModal(true);
+  };
+
+  const handleJumpToNoteFromList = (note: ReadingNote) => {
+    setShowNotesListModal(false);
+    docViewRef.current?.jumpToCharOffset(note.charOffset);
   };
 
   const handleChangeFontSize = (nextSize: number) => {
@@ -3304,11 +3489,12 @@ export default function App() {
     };
   }, []);
 
-  // Drag-to-reorder handler for all movable bottom toolbar icons (both touch & mouse)
+  // Drag-to-reorder handler (plus optional non-conflicting long-press) for movable bottom toolbar icons
   const handleToolbarIconPointerDown = (
     e: React.PointerEvent<HTMLButtonElement>,
     iconId: TreeToolbarIconId | DocToolbarIconId,
-    mode: MainView
+    mode: MainView,
+    onLongPress?: () => void
   ) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
 
@@ -3316,14 +3502,38 @@ export default function App() {
     const startX = e.clientX;
     const startY = e.clientY;
     let dragging = false;
+    let longPressTriggered = false;
+    let longPressTimer: number | null = null;
+
+    const clearLongPressTimer = () => {
+      if (longPressTimer !== null) {
+        window.clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+    };
+
+    if (onLongPress) {
+      longPressTimer = window.setTimeout(() => {
+        longPressTimer = null;
+        if (dragging) return;
+        longPressTriggered = true;
+        suppressToolbarClickRef.current = true;
+        onLongPress();
+        window.setTimeout(() => {
+          suppressToolbarClickRef.current = false;
+        }, 260);
+      }, 450);
+    }
 
     const onPointerMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
+      if (longPressTriggered) return;
       const dx = moveEvent.clientX - startX;
       const dy = moveEvent.clientY - startY;
 
       if (!dragging) {
         if (Math.abs(dx) >= 10 || Math.hypot(dx, dy) >= 14) {
+          clearLongPressTimer();
           dragging = true;
           suppressToolbarClickRef.current = true;
           setDraggingToolbarIconId(`${mode}:${iconId}`);
@@ -3374,6 +3584,7 @@ export default function App() {
 
     const cleanup = (endEvent: PointerEvent) => {
       if (endEvent.pointerId !== pointerId) return;
+      clearLongPressTimer();
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', cleanup);
       window.removeEventListener('pointercancel', cleanup);
@@ -3515,6 +3726,7 @@ export default function App() {
             isMdictLookupPending={mdictLookupPending}
             onEnglishWordSelected={({ word, placement }) => {
               setShowFontSizeBar(false);
+              setNotePopoverState(null);
               pendingMdictAutoExpandRef.current = false;
               void runMdictLookup(word, placement);
             }}
@@ -3549,6 +3761,8 @@ export default function App() {
                 prev === metrics.progressDecimals ? prev : metrics.progressDecimals
               );
             }}
+            onVisibleNotesChange={setVisibleNoteIds}
+            onOpenNoteFromMargin={handleOpenNoteFromMargin}
             onFetchRemoteBody={() => handleFetchRemoteBody(selectedDoc.id)}
             onReturnToTree={handleExitDocToTree}
           />
@@ -3884,6 +4098,67 @@ export default function App() {
                   );
                 }
 
+                if (iconId === 'note') {
+                  const hasVisibleNotes = visibleNoteIds.length > 0;
+                  const noteActive = hasVisibleNotes || Boolean(notePopoverState);
+                  return (
+                    <button
+                      key={iconId}
+                      ref={bindRef}
+                      type="button"
+                      onPointerDown={(e) =>
+                        handleToolbarIconPointerDown(e, 'note', 'doc', handleOpenNotesListModal)
+                      }
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        handleOpenNotesListModal();
+                      }}
+                      onClick={() => {
+                        if (suppressToolbarClickRef.current) return;
+                        handleOpenNotePopover();
+                      }}
+                      aria-label={
+                        hasVisibleNotes
+                          ? `当前页有 ${visibleNoteIds.length} 条读书笔记（点击编辑，长按查看全部笔记）`
+                          : '添加读书笔记（长按查看全部笔记）'
+                      }
+                      aria-pressed={noteActive}
+                      title={
+                        hasVisibleNotes
+                          ? `当前页有 ${visibleNoteIds.length} 条笔记（点击查看/编辑，长按或右键打开全部笔记列表）`
+                          : '读书笔记（点击记录，长按或右键查看全部笔记，可拖动调整位置）'
+                      }
+                      className={`relative w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
+                        isDraggingThis
+                          ? dragCls
+                          : noteActive
+                            ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)]'
+                            : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
+                      }`}
+                    >
+                      <StickyNote
+                        className="w-[20px] h-[20px]"
+                        strokeWidth={hasVisibleNotes ? 2.1 : 1.8}
+                      />
+                      {hasVisibleNotes &&
+                        (visibleNoteIds.length > 1 ? (
+                          <span
+                            aria-hidden="true"
+                            className="absolute top-1.5 right-1.5 min-w-[13px] h-[13px] px-0.5 rounded-full bg-[var(--fei-text-primary)] text-[var(--fei-bg)] text-[9px] font-semibold tabular-nums leading-none inline-flex items-center justify-center"
+                          >
+                            {visibleNoteIds.length > 9 ? '9+' : visibleNoteIds.length}
+                          </span>
+                        ) : (
+                          <span
+                            aria-hidden="true"
+                            className="absolute top-2 right-2 w-[6px] h-[6px] rounded-full bg-[var(--fei-text-primary)]"
+                          />
+                        ))}
+                    </button>
+                  );
+                }
+
                 return (
                   <button
                     key={iconId}
@@ -3892,7 +4167,10 @@ export default function App() {
                     onPointerDown={(e) => handleToolbarIconPointerDown(e, 'font', 'doc')}
                     onClick={() => {
                       if (suppressToolbarClickRef.current) return;
-                      setShowFontSizeBar((prev) => !prev);
+                      setShowFontSizeBar((prev) => {
+                        if (!prev) setNotePopoverState(null);
+                        return !prev;
+                      });
                     }}
                     aria-label="字号与断字设置"
                     title="字号与断字设置（可拖动调整图标位置）"
@@ -4186,6 +4464,35 @@ export default function App() {
             void runMdictLookup(nextWord, mdictLookup.placement, currentDictId);
           }}
           onClose={() => setMdictLookup(null)}
+        />
+      )}
+
+      {/* Reading Note Input Popover in Browse Mode */}
+      {mainView === 'doc' && selectedDoc && notePopoverState && (
+        <ReadingNotePopover
+          screenNotes={getActiveNotes(selectedDoc.notes).filter((n) =>
+            notePopoverState.screenNoteIds.includes(n.id)
+          )}
+          initialNoteId={notePopoverState.initialNoteId}
+          defaultAnchor={notePopoverState.defaultAnchor}
+          canCreateAtDefaultAnchor={notePopoverState.canCreateAtDefaultAnchor}
+          fontSize={fontSize}
+          onSaveNote={handleSaveReadingNote}
+          onDeleteNote={handleDeleteReadingNote}
+          onClose={() => setNotePopoverState(null)}
+        />
+      )}
+
+      {/* Reading Notes List Modal (Long-press Note Toolbar Icon) */}
+      {mainView === 'doc' && selectedDoc && showNotesListModal && (
+        <ReadingNotesListModal
+          docTitle={selectedDoc.title}
+          docContentLength={selectedDoc.content.length}
+          notes={selectedDoc.notes}
+          onJumpToNote={handleJumpToNoteFromList}
+          onDeleteNote={handleDeleteReadingNote}
+          onCopySuccess={showToast}
+          onClose={() => setShowNotesListModal(false)}
         />
       )}
 

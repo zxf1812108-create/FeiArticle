@@ -3,6 +3,7 @@ import { ArticleDoc, FolderNode } from '../types';
 import { LocalStorageBackendMode, StorageDirectoryConfig } from './storage';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
 import { extractReadAnchorText, relocateCharOffsetByAnchor } from './progressSync';
+import { relocateNotesAfterContentEdit } from './notes';
 
 export interface FsBatchOp {
   op: 'mkdir' | 'write' | 'delete' | 'rmdirIfEmpty';
@@ -1442,6 +1443,10 @@ export function checkAndPullExternalLocalFsChanges(
               readProgress: relocatedPending.progress,
             };
           }
+        }
+
+        if (existingDoc.notes && existingDoc.notes.length > 0 && diskContent.length > 0) {
+          existingDoc.notes = relocateNotesAfterContentEdit(existingDoc.notes, diskContent);
         }
 
         updatedCount += 1;

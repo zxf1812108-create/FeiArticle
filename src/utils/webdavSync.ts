@@ -19,6 +19,7 @@ import {
 } from './inbox';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
 import { isTrashExpired, purgeExpiredTrash } from './trash';
+import { mergeReadingNotes, notesEqual, sanitizeNotesList } from './notes';
 import {
   extractReadAnchorText,
   isProgressMeaningfullyDifferent,
@@ -459,6 +460,11 @@ function toManifestDocEntry(doc: ArticleDoc, cloudBodySynced?: boolean): Manifes
     deleted: doc.deleted,
     deletedAt: doc.deletedAt,
     deletedByFolderId: doc.deletedByFolderId,
+    notes: (() => {
+      const clean = sanitizeNotesList(doc.notes);
+      if (clean.length === 0) return undefined;
+      return doc.encrypted ? clean.map((n) => ({ ...n, anchorText: '' })) : clean;
+    })(),
     byteSize: doc.byteSize,
   };
 }
@@ -519,7 +525,8 @@ function catalogFieldsDiffer(localDoc: ArticleDoc, remoteEntry: ManifestDocEntry
     (localDoc.deletedAt ?? undefined) !== (remoteEntry.deletedAt ?? undefined) ||
     (localDoc.deletedByFolderId ?? undefined) !== (remoteEntry.deletedByFolderId ?? undefined) ||
     Boolean(localDoc.encrypted) !== Boolean(remoteEntry.encrypted) ||
-    !tagsEqual(localDoc.tags, remoteEntry.tags)
+    !tagsEqual(localDoc.tags, remoteEntry.tags) ||
+    !notesEqual(localDoc.notes, remoteEntry.notes)
   );
 }
 
@@ -1546,6 +1553,25 @@ export async function runAutoMetadataProgressSync(
       ? ''
       : trimManifestExcerpt(nextRemoteEntry.excerpt);
 
+    const mergedNotes = mergeReadingNotes(nextLocal.notes, remoteEntry.notes, syncNow);
+    if (!notesEqual(nextLocal.notes, mergedNotes)) {
+      nextLocal = {
+        ...nextLocal,
+        notes: mergedNotes.length > 0 ? mergedNotes : undefined,
+      };
+      didPull = true;
+    }
+    const nextRemoteNotes =
+      mergedNotes.length > 0
+        ? nextRemoteEntry.encrypted
+          ? mergedNotes.map((n) => ({ ...n, anchorText: '' }))
+          : mergedNotes
+        : undefined;
+    if (!notesEqual(remoteEntry.notes, nextRemoteNotes)) {
+      nextRemoteEntry.notes = nextRemoteNotes;
+      needManifestPush = true;
+    }
+
     mergedDocsMap.set(localDoc.id, nextLocal);
     nextRemoteDocs[localDoc.id] = nextRemoteEntry;
   }
@@ -1611,6 +1637,9 @@ export async function runAutoMetadataProgressSync(
             deletedAt: rEntry.deletedAt,
             deletedByFolderId: rEntry.deletedByFolderId,
             highlights: [],
+            notes: sanitizeNotesList(rEntry.notes, syncNow).length > 0
+              ? sanitizeNotesList(rEntry.notes, syncNow)
+              : undefined,
             byteSize: downloaded.byteSize,
             syncStatus: 'synced',
             lastSyncedContentHash: downloaded.contentHash,
@@ -1626,6 +1655,7 @@ export async function runAutoMetadataProgressSync(
       }
 
       // Option A: show catalog entry immediately on this device with remote-only status
+      const stubNotes = sanitizeNotesList(rEntry.notes, syncNow);
       const stubDoc: ArticleDoc = {
         id: rEntry.id,
         title: rEntry.title,
@@ -1656,6 +1686,7 @@ export async function runAutoMetadataProgressSync(
         deletedAt: rEntry.deletedAt,
         deletedByFolderId: rEntry.deletedByFolderId,
         highlights: [],
+        notes: stubNotes.length > 0 ? stubNotes : undefined,
         byteSize: rEntry.byteSize ?? 0,
         syncStatus: rEntry.deleted ? 'synced' : 'remote-only',
       };

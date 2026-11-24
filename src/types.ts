@@ -10,6 +10,17 @@ export interface HighlightItem {
   createdAt: number;
 }
 
+export interface ReadingNote {
+  id: string;
+  charOffset: number;
+  anchorText: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+  deleted?: boolean;
+  deletedAt?: number;
+}
+
 export interface FolderNode {
   id: string;
   name: string;
@@ -63,6 +74,7 @@ export interface ArticleDoc {
   deletedAt?: number;
   deletedByFolderId?: string;
   highlights: HighlightItem[];
+  notes?: ReadingNote[];
   byteSize: number;
 }
 
@@ -90,6 +102,7 @@ export interface ManifestDocEntry {
   deleted?: boolean;
   deletedAt?: number;
   deletedByFolderId?: string;
+  notes?: ReadingNote[];
   byteSize: number;
 }
 

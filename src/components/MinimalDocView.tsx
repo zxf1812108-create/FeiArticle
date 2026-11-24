@@ -10,8 +10,9 @@ import React, {
   useState,
 } from 'react';
 import { CloudDownload, Copy, Wifi, X } from 'lucide-react';
-import { ArticleDoc } from '../types';
+import { ArticleDoc, ReadingNote } from '../types';
 import { extractLookupWord } from '../utils/mdict';
+import { extractNoteAnchorExcerpt, getActiveNotes } from '../utils/notes';
 import { DocImageBlock, DocImagePreviewPayload } from './DocImageBlock';
 import { DocOutlineModal } from './DocOutlineModal';
 import { BlockNode, formatBytes, parseDocumentBlocks, TocItem } from '../utils/textParser';
@@ -54,11 +55,21 @@ export interface DocReadMetrics {
   totalPages: number;
 }
 
+export interface ScreenNoteAnchorContext {
+  defaultAnchor: {
+    charOffset: number;
+    anchorText: string;
+  };
+  screenNoteIds: string[];
+  defaultAnchorHasNote: boolean;
+}
+
 export interface MinimalDocViewHandle {
   captureTypographyAnchor: () => void;
   flushAndCaptureViewState: () => DocViewStateSnapshot;
   turnPageDown: () => void;
   jumpToCharOffset: (charOffset: number) => void;
+  captureNoteAnchorContext: () => ScreenNoteAnchorContext | null;
 }
 
 interface MinimalDocViewProps {
@@ -78,6 +89,8 @@ interface MinimalDocViewProps {
   onViewStateChange: (state: DocViewStateSnapshot) => void;
   onReadProgressChange?: (progress: number) => void;
   onReadMetricsChange?: (metrics: DocReadMetrics) => void;
+  onVisibleNotesChange?: (visibleNoteIds: string[]) => void;
+  onOpenNoteFromMargin?: (noteId: string) => void;
   onFetchRemoteBody: () => Promise<void>;
   onReturnToTree: () => void;
 }
@@ -373,6 +386,52 @@ interface BlockRenderContext {
   docFolderName?: string | null;
   onImageLoaded: () => void;
   onPreviewImage: (payload: DocImagePreviewPayload) => void;
+  notesByBlockIdx?: Map<number, ReadingNote[]>;
+  onOpenNoteFromMargin?: (noteId: string) => void;
+}
+
+function getBlockPlainText(block: BlockNode): string {
+  switch (block.type) {
+    case 'paragraph':
+    case 'heading':
+    case 'blockquote':
+      return block.text;
+    case 'list':
+      return block.items.join(' ');
+    case 'code':
+      return block.code;
+    case 'table':
+      return [...block.headers, ...block.rows.flat()].join(' ');
+    case 'image':
+      return block.alt || '';
+    case 'hr':
+      return '';
+  }
+}
+
+function renderMarginNoteMarker(
+  anchoredNotes: ReadingNote[] | undefined,
+  onOpenNoteFromMargin?: (noteId: string) => void
+): React.ReactNode {
+  if (!anchoredNotes || anchoredNotes.length === 0) return null;
+  const primaryNote = anchoredNotes[0];
+  return (
+    <button
+      type="button"
+      data-note-marker="true"
+      aria-label="查看本段读书笔记"
+      title="查看本段读书笔记"
+      onPointerDown={(e) => e.stopPropagation()}
+      onTouchStart={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpenNoteFromMargin?.(primaryNote.id);
+      }}
+      className="absolute -left-3.5 top-[0.22em] bottom-[0.22em] w-3 flex items-stretch justify-start select-none cursor-pointer group/note"
+    >
+      <span className="w-[2.5px] rounded-full bg-[var(--fei-text-muted)]/60 group-hover/note:bg-[var(--fei-text-primary)] eink:bg-[var(--fei-text-primary)] transition-colors" />
+    </button>
+  );
 }
 
 function renderBlock(
@@ -390,6 +449,9 @@ function renderBlock(
   const topZero = isFirstOverall ? 'mt-0' : '';
   const justifyCls = autoHyphenate ? 'text-justify' : '';
   const maybeHyphenate = (s: string) => (autoHyphenate ? hyphenateEnglishWords(s) : s);
+  const anchoredNotes = renderCtx?.notesByBlockIdx?.get(idx);
+  const noteMarker = renderMarginNoteMarker(anchoredNotes, renderCtx?.onOpenNoteFromMargin);
+  const relativeCls = noteMarker ? 'relative' : '';
 
   switch (block.type) {
     case 'heading': {
@@ -399,8 +461,9 @@ function renderBlock(
             key={idx}
             data-toc-id={block.id}
             {...offsetAttrs}
-            className={`text-[1.15em] font-semibold leading-snug ${topZero || 'mt-5'} mb-2 text-[var(--fei-text-primary)] text-balance`}
+            className={`${relativeCls} text-[1.15em] font-semibold leading-snug ${topZero || 'mt-5'} mb-2 text-[var(--fei-text-primary)] text-balance`}
           >
+            {noteMarker}
             {maybeHyphenate(block.text)}
           </h1>
         );
@@ -411,8 +474,9 @@ function renderBlock(
             key={idx}
             data-toc-id={block.id}
             {...offsetAttrs}
-            className={`text-[1.03em] font-semibold leading-snug ${topZero || 'mt-4'} mb-1.5 text-[var(--fei-text-primary)]`}
+            className={`${relativeCls} text-[1.03em] font-semibold leading-snug ${topZero || 'mt-4'} mb-1.5 text-[var(--fei-text-primary)]`}
           >
+            {noteMarker}
             {maybeHyphenate(block.text)}
           </h2>
         );
@@ -422,8 +486,9 @@ function renderBlock(
           key={idx}
           data-toc-id={block.id}
           {...offsetAttrs}
-          className={`text-[1em] font-semibold leading-snug ${topZero || 'mt-3.5'} mb-1.5 text-[var(--fei-text-primary)]`}
+          className={`${relativeCls} text-[1em] font-semibold leading-snug ${topZero || 'mt-3.5'} mb-1.5 text-[var(--fei-text-primary)]`}
         >
+          {noteMarker}
           {maybeHyphenate(block.text)}
         </h3>
       );
@@ -433,8 +498,9 @@ function renderBlock(
         <p
           key={idx}
           {...offsetAttrs}
-          className={`${topZero || 'mt-3'} mb-3 whitespace-pre-line ${justifyCls}`}
+          className={`${relativeCls} ${topZero || 'mt-3'} mb-3 whitespace-pre-line ${justifyCls}`}
         >
+          {noteMarker}
           {renderInline(block.text, autoHyphenate)}
         </p>
       );
@@ -443,29 +509,41 @@ function renderBlock(
         <blockquote
           key={idx}
           {...offsetAttrs}
-          className={`${topZero || 'mt-4'} mb-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-transparent eink:border-[var(--fei-border)] text-[var(--fei-text-primary)] text-[0.94em] ${justifyCls}`}
+          className={`${relativeCls} ${topZero || 'mt-4'} mb-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-transparent eink:border-[var(--fei-border)] text-[var(--fei-text-primary)] text-[0.94em] ${justifyCls}`}
         >
+          {noteMarker}
           <span className="whitespace-pre-line">{renderInline(block.text, autoHyphenate)}</span>
         </blockquote>
       );
-    case 'code':
-      return (
+    case 'code': {
+      const preNode = (
         <pre
-          key={idx}
-          {...offsetAttrs}
-          className={`${topZero || 'mt-4'} mb-4 p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] border border-transparent eink:border-[var(--fei-border)] overflow-x-auto text-[0.8125em] leading-relaxed font-code text-[var(--fei-text-primary)] hyphens-none text-left`}
+          key={noteMarker ? undefined : idx}
+          {...(noteMarker ? {} : offsetAttrs)}
+          className={`${noteMarker ? '' : `${topZero || 'mt-4'} mb-4`} p-4 max-w-full rounded-lg bg-[var(--fei-bg-subtle)] border border-transparent eink:border-[var(--fei-border)] overflow-x-auto text-[0.8125em] leading-relaxed font-code text-[var(--fei-text-primary)] hyphens-none text-left`}
         >
           <code>{block.code}</code>
         </pre>
       );
+      if (noteMarker) {
+        return (
+          <div key={idx} {...offsetAttrs} className={`relative ${topZero || 'mt-4'} mb-4`}>
+            {noteMarker}
+            {preNode}
+          </div>
+        );
+      }
+      return preNode;
+    }
     case 'list':
       if (block.ordered) {
         return (
           <ol
             key={idx}
             {...offsetAttrs}
-            className={`${topZero || 'mt-3'} mb-3 pl-5 list-decimal space-y-1.5 marker:text-[var(--fei-text-muted)] ${justifyCls}`}
+            className={`${relativeCls} ${topZero || 'mt-3'} mb-3 pl-5 list-decimal space-y-1.5 marker:text-[var(--fei-text-muted)] ${justifyCls}`}
           >
+            {noteMarker}
             {block.items.map((item, i) => (
               <li key={i}>{renderInline(item, autoHyphenate)}</li>
             ))}
@@ -476,8 +554,9 @@ function renderBlock(
         <ul
           key={idx}
           {...offsetAttrs}
-          className={`${topZero || 'mt-3'} mb-3 pl-5 list-disc space-y-1.5 marker:text-[var(--fei-text-muted)] ${justifyCls}`}
+          className={`${relativeCls} ${topZero || 'mt-3'} mb-3 pl-5 list-disc space-y-1.5 marker:text-[var(--fei-text-muted)] ${justifyCls}`}
         >
+          {noteMarker}
           {block.items.map((item, i) => (
             <li key={i}>{renderInline(item, autoHyphenate)}</li>
           ))}
@@ -573,6 +652,8 @@ const DocBlockChunk = memo(function DocBlockChunk({
   docFolderName,
   onImageLoaded,
   onPreviewImage,
+  notesByBlockIdx,
+  onOpenNoteFromMargin,
 }: {
   blocks: BlockNode[];
   startIdx: number;
@@ -582,12 +663,16 @@ const DocBlockChunk = memo(function DocBlockChunk({
   docFolderName?: string | null;
   onImageLoaded: () => void;
   onPreviewImage: (payload: DocImagePreviewPayload) => void;
+  notesByBlockIdx?: Map<number, ReadingNote[]>;
+  onOpenNoteFromMargin?: (noteId: string) => void;
 }) {
   const renderCtx: BlockRenderContext = {
     storageDir,
     docFolderName,
     onImageLoaded,
     onPreviewImage,
+    notesByBlockIdx,
+    onOpenNoteFromMargin,
   };
   const nodes: React.ReactNode[] = [];
   for (let i = startIdx; i < endIdx; i++) {
@@ -621,6 +706,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       onViewStateChange,
       onReadProgressChange,
       onReadMetricsChange,
+      onVisibleNotesChange,
+      onOpenNoteFromMargin,
       onFetchRemoteBody,
       onReturnToTree,
     },
@@ -716,11 +803,40 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     onReadProgressChangeRef.current = onReadProgressChange;
     const onReadMetricsChangeRef = useRef(onReadMetricsChange);
     onReadMetricsChangeRef.current = onReadMetricsChange;
+    const onVisibleNotesChangeRef = useRef(onVisibleNotesChange);
+    onVisibleNotesChangeRef.current = onVisibleNotesChange;
+    const onOpenNoteFromMarginRef = useRef(onOpenNoteFromMargin);
+    onOpenNoteFromMarginRef.current = onOpenNoteFromMargin;
+    const lastReportedVisibleNotesKeyRef = useRef<string>('');
 
     const { blocks, toc } = useMemo(
       () => getParsedDocumentCached(doc.id, content),
       [doc.id, content]
     );
+
+    const activeNotes = useMemo(() => getActiveNotes(doc.notes), [doc.notes]);
+
+    const notesByBlockIdx = useMemo(() => {
+      const map = new Map<number, ReadingNote[]>();
+      if (blocks.length === 0 || activeNotes.length === 0) return map;
+      for (const note of activeNotes) {
+        const idx = findBlockIndexByCharOffset(blocks, note.charOffset);
+        const list = map.get(idx);
+        if (list) {
+          list.push(note);
+        } else {
+          map.set(idx, [note]);
+        }
+      }
+      return map;
+    }, [blocks, activeNotes]);
+
+    const notesByBlockIdxRef = useRef(notesByBlockIdx);
+    notesByBlockIdxRef.current = notesByBlockIdx;
+
+    const handleOpenNoteFromMarginStable = useCallback((noteId: string) => {
+      onOpenNoteFromMarginRef.current?.(noteId);
+    }, []);
 
     const isVirtualized = blocks.length > VIRTUAL_THRESHOLD_BLOCKS;
     const chunkCount = isVirtualized ? Math.ceil(blocks.length / CHUNK_SIZE) : 0;
@@ -1154,6 +1270,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       hadSelectionOnDownRef.current = false;
       lastReportedProgressRef.current = -1;
       lastReportedPageKeyRef.current = '';
+      lastReportedVisibleNotesKeyRef.current = '';
       restoredDocIdRef.current = null;
       pendingJumpRef.current = null;
       pendingWindowAnchorRef.current = null;
@@ -1216,6 +1333,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         bottomClipPxRef.current = 0;
         setTopClipPx((prev) => (prev === 0 ? prev : 0));
         setBottomClipPx((prev) => (prev === 0 ? prev : 0));
+        reportVisibleNotesRef.current();
         return;
       }
 
@@ -1275,7 +1393,105 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       bottomClipPxRef.current = nextBottom;
       setTopClipPx((prev) => (prev === nextTop ? prev : nextTop));
       setBottomClipPx((prev) => (prev === nextBottom ? prev : nextBottom));
+      reportVisibleNotesRef.current();
     };
+
+    const computeScreenNoteAnchorContext = (): ScreenNoteAnchorContext | null => {
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      if (!el || !articleEl || blocks.length === 0) return null;
+
+      const containerRect = el.getBoundingClientRect();
+      const effectiveTop = containerRect.top + topClipPxRef.current;
+      const effectiveBottom = containerRect.bottom - bottomClipPxRef.current;
+      const blockEls = Array.from(articleEl.querySelectorAll<HTMLElement>('[data-block-idx]'));
+
+      const visibleNoteIds: string[] = [];
+      const seenNoteIds = new Set<string>();
+      const noteMap = notesByBlockIdxRef.current;
+
+      let firstCompleteTextIdx: number | null = null;
+      let firstStartInViewTextIdx: number | null = null;
+      let firstOverlappingTextIdx: number | null = null;
+      let firstOverlappingAnyIdx: number | null = null;
+
+      for (const bEl of blockEls) {
+        const r = bEl.getBoundingClientRect();
+        if (r.bottom <= effectiveTop + 4 || r.top >= effectiveBottom - 4) continue;
+        const idx = Number(bEl.getAttribute('data-block-idx'));
+        if (!Number.isFinite(idx) || idx < 0 || idx >= blocks.length) continue;
+
+        const blockNotes = noteMap.get(idx);
+        if (blockNotes && blockNotes.length > 0) {
+          for (const n of blockNotes) {
+            if (!seenNoteIds.has(n.id)) {
+              seenNoteIds.add(n.id);
+              visibleNoteIds.push(n.id);
+            }
+          }
+        }
+
+        const block = blocks[idx];
+        if (firstOverlappingAnyIdx === null) {
+          firstOverlappingAnyIdx = idx;
+        }
+        const isTextBlock = block.type !== 'hr' && block.type !== 'image';
+        if (isTextBlock) {
+          if (firstOverlappingTextIdx === null) {
+            firstOverlappingTextIdx = idx;
+          }
+          if (firstStartInViewTextIdx === null && r.top >= effectiveTop - 3 && r.top < effectiveBottom - 4) {
+            firstStartInViewTextIdx = idx;
+          }
+          if (
+            firstCompleteTextIdx === null &&
+            r.top >= effectiveTop - 3 &&
+            r.bottom <= effectiveBottom + 3
+          ) {
+            firstCompleteTextIdx = idx;
+          }
+        }
+      }
+
+      const chosenIdx =
+        firstCompleteTextIdx ??
+        firstStartInViewTextIdx ??
+        firstOverlappingTextIdx ??
+        firstOverlappingAnyIdx ??
+        0;
+      const chosenBlock = blocks[chosenIdx] ?? blocks[0];
+      const anchorText = extractNoteAnchorExcerpt(getBlockPlainText(chosenBlock));
+      const defaultAnchorHasNote = (noteMap.get(chosenIdx)?.length ?? 0) > 0;
+
+      return {
+        defaultAnchor: {
+          charOffset: chosenBlock.startOffset,
+          anchorText,
+        },
+        screenNoteIds: visibleNoteIds,
+        defaultAnchorHasNote,
+      };
+    };
+
+    const reportVisibleNotes = () => {
+      const ctx = computeScreenNoteAnchorContext();
+      const ids = ctx?.screenNoteIds ?? [];
+      const key = ids.join(',');
+      if (key !== lastReportedVisibleNotesKeyRef.current) {
+        lastReportedVisibleNotesKeyRef.current = key;
+        onVisibleNotesChangeRef.current?.(ids);
+      }
+    };
+
+    const reportVisibleNotesRef = useRef(reportVisibleNotes);
+    reportVisibleNotesRef.current = reportVisibleNotes;
+
+    useEffect(() => {
+      const raf = window.requestAnimationFrame(() => {
+        reportVisibleNotesRef.current();
+      });
+      return () => window.cancelAnimationFrame(raf);
+    }, [doc.id, activeNotes, blocks]);
 
     const scheduleEdgeClipUpdate = () => {
       if (clipRafRef.current !== null) {
@@ -1285,6 +1501,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         clipRafRef.current = null;
         updateEdgeClips();
         reportReadProgress();
+        reportVisibleNotes();
       });
     };
 
@@ -1657,7 +1874,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         if (
           showOutlineRef.current ||
           isMdictPopupOpenRef.current ||
-          document.querySelector('[role="dialog"]')
+          document.querySelector('[role="dialog"], [data-note-popover="true"], [data-notes-list-modal="true"]')
         ) {
           return;
         }
@@ -1682,6 +1899,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           }
         }
         reportReadProgress();
+        window.requestAnimationFrame(() => {
+          reportVisibleNotesRef.current();
+        });
+      },
+      captureNoteAnchorContext() {
+        return computeScreenNoteAnchorContext();
       },
     }));
 
@@ -2699,7 +2922,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       void setNativeVolumeKeyIntercept(true);
       const unsubscribeNative = subscribeNativeVolumeKeys((direction) => {
-        if (document.querySelector('[role="dialog"]')) return;
+        if (
+          document.querySelector(
+            '[role="dialog"], [data-note-popover="true"], [data-notes-list-modal="true"]'
+          )
+        ) {
+          return;
+        }
         if (isMdictPopupOpenRef.current) {
           onMdictPopupVolumeKeyRef.current?.(direction);
           return;
@@ -2712,7 +2941,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       });
 
       const handleKeyDown = (e: KeyboardEvent) => {
-        if (document.querySelector('[role="dialog"]')) return;
+        if (
+          document.querySelector(
+            '[role="dialog"], [data-note-popover="true"], [data-notes-list-modal="true"]'
+          )
+        ) {
+          return;
+        }
         const activeTag = (document.activeElement as HTMLElement | null)?.tagName;
         if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
 
@@ -2751,7 +2986,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const target = e.target as HTMLElement | null;
       if (
         target?.closest(
-          'button, a, img, input, textarea, select, [data-image-block="true"], [data-image-preview="true"], [data-outline-modal="true"], [data-copy-popover="true"]'
+          'button, a, img, input, textarea, select, [data-note-marker="true"], [data-image-block="true"], [data-image-preview="true"], [data-outline-modal="true"], [data-copy-popover="true"]'
         )
       ) {
         return;
@@ -3009,6 +3244,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                                 docFolderName={docFolderName}
                                 onImageLoaded={handleDocImageLoaded}
                                 onPreviewImage={handleDocImagePreview}
+                                notesByBlockIdx={notesByBlockIdx}
+                                onOpenNoteFromMargin={handleOpenNoteFromMarginStable}
                               />
                             </div>
                           );
@@ -3024,6 +3261,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                           docFolderName,
                           onImageLoaded: handleDocImageLoaded,
                           onPreviewImage: handleDocImagePreview,
+                          notesByBlockIdx,
+                          onOpenNoteFromMargin: handleOpenNoteFromMarginStable,
                         })
                       )
                     )}

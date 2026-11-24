@@ -1,10 +1,11 @@
 import { Capacitor, PluginListenerHandle, registerPlugin } from '@capacitor/core';
-import { ArticleDoc, FolderNode, PurgedSyncRecords, SyncedTreeState } from '../types';
+import { ArticleDoc, FolderNode, PurgedSyncRecords, ReadingNote, SyncedTreeState } from '../types';
 import { invalidateLocalImageCache, listLocalImageFiles, LocalImageFileMeta } from './localFs';
 import { StorageDirectoryConfig } from './storage';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
 import { isTrashExpired, pruneExpiredPurgedRecords, purgeExpiredTrash } from './trash';
 import { isDocBodyMissing } from './webdavSync';
+import { mergeReadingNotes, notesEqual, notesSignature, sanitizeNotesList } from './notes';
 import {
   extractReadAnchorText,
   reconcileReadingProgress,
@@ -54,6 +55,7 @@ export interface WifiDocCatalogMeta {
   deleted?: boolean;
   deletedAt?: number;
   deletedByFolderId?: string;
+  notes?: ReadingNote[];
   byteSize: number;
   hasBody: boolean;
 }
@@ -183,11 +185,12 @@ export async function computeWifiSyncFingerprint(
       const charOffset = Math.max(0, Math.round(d.lastCharOffset || 0));
       const lastRead = d.lastReadAt || 0;
       const overrideAt = d.progressOverrideAt || 0;
+      const notesSig = notesSignature(d.notes);
       return `${d.id}|${d.title}|${d.folderId || ''}|${d.order}|${d.contentHash || ''}|${hasBody}|${progressRounded}|${charOffset}|${lastRead}|${overrideAt}|${
         d.encrypted ? 1 : 0
       }|${d.format || 'txt'}|${d.updatedAt}|${d.deleted ? 1 : 0}|${
         d.deleted ? d.deletedAt || 0 : 0
-      }`;
+      }|${notesSig}`;
     })
     .sort();
 
@@ -238,6 +241,7 @@ export function buildWifiCatalogSnapshot(
       deleted: d.deleted,
       deletedAt: d.deletedAt,
       deletedByFolderId: d.deletedByFolderId,
+      notes: sanitizeNotesList(d.notes).length > 0 ? sanitizeNotesList(d.notes) : undefined,
       byteSize: d.byteSize ?? 0,
       hasBody: !d.deleted && !isDocBodyMissing(d),
     })),
@@ -393,6 +397,7 @@ export function mergeWifiCatalogIntoLocal(
         deletedAt: pd.deletedAt,
         deletedByFolderId: pd.deletedByFolderId,
         highlights: [],
+        notes: sanitizeNotesList(pd.notes, now).length > 0 ? sanitizeNotesList(pd.notes, now) : undefined,
         byteSize: pd.byteSize ?? 0,
         syncStatus: pd.deleted ? 'synced' : 'remote-only',
       });
@@ -522,6 +527,15 @@ export function mergeWifiCatalogIntoLocal(
       updated = {
         ...updated,
         lastSyncedContentHash: updated.contentHash,
+      };
+      changed = true;
+    }
+
+    const mergedNotes = mergeReadingNotes(updated.notes, pd.notes, now);
+    if (!notesEqual(updated.notes, mergedNotes)) {
+      updated = {
+        ...updated,
+        notes: mergedNotes.length > 0 ? mergedNotes : undefined,
       };
       changed = true;
     }
