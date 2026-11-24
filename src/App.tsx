@@ -280,10 +280,15 @@ export default function App() {
     text?: string;
     action?: 'settings';
   } | null>(null);
+  const wifiQuickBubbleRef = useRef(wifiQuickBubble);
+  wifiQuickBubbleRef.current = wifiQuickBubble;
+  const wifiServerInfoRef = useRef<WifiServerInfo | null>(wifiServerInfo);
+  wifiServerInfoRef.current = wifiServerInfo;
   const [wifiBubbleDots, setWifiBubbleDots] = useState(1);
   const wifiAutoSyncingRef = useRef(false);
   const wifiBubbleTimerRef = useRef<number | null>(null);
   const wifiIncomingSyncTimerRef = useRef<number | null>(null);
+  const wifiResolutionPushTimerRef = useRef<number | null>(null);
   const wifiLastSyncedPairRef = useRef<
     Map<
       string,
@@ -300,6 +305,7 @@ export default function App() {
   const toastTimerRef = useRef<number | null>(null);
   const [windowDragging, setWindowDragging] = useState(false);
   const [dismissedConflictKeys, setDismissedConflictKeys] = useState<Record<string, string>>({});
+  const [wifiConflictBatchTotal, setWifiConflictBatchTotal] = useState(0);
 
   const docViewRef = useRef<MinimalDocViewHandle>(null);
   const treeViewRef = useRef<MinimalTreeViewHandle>(null);
@@ -1498,6 +1504,107 @@ export default function App() {
     return `${Math.round(p.lastCharOffset)}:${Math.round(p.readProgress * 1000)}:${p.lastReadAt}:${p.source}`;
   };
 
+  const wifiConflictDocs = useMemo(() => {
+    if (mainView !== 'tree') return [];
+    return docs.filter(
+      (d) =>
+        !d.deleted &&
+        d.pendingRemoteProgress?.source === 'wifi' &&
+        dismissedConflictKeys[d.id] !== getConflictSnapshotKey(d)
+    );
+  }, [mainView, docs, dismissedConflictKeys]);
+
+  const hasPendingWifiConflicts = wifiConflictDocs.length > 0;
+
+  useEffect(() => {
+    if (wifiConflictDocs.length === 0) {
+      setWifiConflictBatchTotal(0);
+    } else if (wifiConflictDocs.length > wifiConflictBatchTotal) {
+      setWifiConflictBatchTotal(wifiConflictDocs.length);
+    }
+  }, [wifiConflictDocs.length, wifiConflictBatchTotal]);
+
+  const scheduleWifiPushAfterResolution = (
+    nextDocs: ArticleDoc[],
+    nextDismissed: Record<string, string>
+  ) => {
+    wifiLastSyncedPairRef.current.clear();
+    if (wifiResolutionPushTimerRef.current !== null) {
+      window.clearTimeout(wifiResolutionPushTimerRef.current);
+      wifiResolutionPushTimerRef.current = null;
+    }
+
+    // Wait until the user resolves all queued Wi-Fi conflicts before pushing in one clean round-trip
+    const remainingWifiConflicts = nextDocs.filter(
+      (d) =>
+        !d.deleted &&
+        d.pendingRemoteProgress?.source === 'wifi' &&
+        nextDismissed[d.id] !== getConflictSnapshotKey(d)
+    );
+    if (remainingWifiConflicts.length > 0 || mainViewRef.current !== 'tree') {
+      return;
+    }
+
+    // Fallback direct push for the non-leader (host) device if the leader hasn't already initiated sync
+    wifiResolutionPushTimerRef.current = window.setTimeout(() => {
+      wifiResolutionPushTimerRef.current = null;
+      if (
+        !appMountedRef.current ||
+        mainViewRef.current !== 'tree' ||
+        wifiAutoSyncingRef.current ||
+        wifiQuickBubbleRef.current?.status === 'syncing'
+      ) {
+        return;
+      }
+      const password = (webDavConfigRef.current.encryptionPassword || '').trim();
+      const myInfo = wifiServerInfoRef.current;
+      const peer = wifiPeersRef.current[0];
+      if (!password || !myInfo?.running || !peer) return;
+      // Leader automatically syncs via effect once fingerprint updates; non-leader pushes directly
+      if (myInfo.instanceId < peer.id) return;
+
+      const pushToPeer = async () => {
+        wifiAutoSyncingRef.current = true;
+        if (wifiBubbleTimerRef.current !== null) {
+          window.clearTimeout(wifiBubbleTimerRef.current);
+          wifiBubbleTimerRef.current = null;
+        }
+        setWifiQuickBubble({ status: 'syncing' });
+        try {
+          await runWifiBidirectionalSync({
+            host: peer.ip,
+            port: peer.port,
+            password,
+            storageDir: storageDirRef.current,
+            getLocalState: () => wifiCallbacksRef.current.getLocalState(),
+            applyMergedCatalog: (...args) => wifiCallbacksRef.current.applyMergedCatalog(...args),
+            applyReceivedDocBody: (payload) =>
+              wifiCallbacksRef.current.applyReceivedDocBody(payload),
+          });
+          setWifiImageVersion((v) => v + 1);
+          if (appMountedRef.current && mainViewRef.current === 'tree') {
+            const stillHasWifiConflict = docsRef.current.some(
+              (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
+            );
+            if (stillHasWifiConflict) {
+              setWifiQuickBubble(null);
+            } else {
+              setWifiQuickBubble({ status: 'done', text: '同步完成' });
+              scheduleHideWifiBubble(1800);
+            }
+          }
+        } catch {
+          if (appMountedRef.current && mainViewRef.current === 'tree') {
+            setWifiQuickBubble(null);
+          }
+        } finally {
+          wifiAutoSyncingRef.current = false;
+        }
+      };
+      void pushToPeer();
+    }, 650);
+  };
+
   const handleAcceptRemoteProgress = (docId: string) => {
     const target = docsRef.current.find((d) => d.id === docId);
     const pending = target?.pendingRemoteProgress;
@@ -1521,6 +1628,15 @@ export default function App() {
       (target.content ? extractReadAnchorText(target.content, finalOffset) : '') ||
       pending.anchorText ||
       target.readAnchorText;
+    const resolvedOverrideAt =
+      pending.source === 'wifi'
+        ? Math.max(
+            Date.now(),
+            (pending.lastReadAt || 0) + 1000,
+            (target.lastReadAt || 0) + 1000,
+            (target.progressOverrideAt || 0) + 1
+          )
+        : target.progressOverrideAt;
 
     const nextDocs = docsRef.current.map((d) =>
       d.id === docId
@@ -1535,23 +1651,26 @@ export default function App() {
             lastSyncedCharOffset: Math.max(0, Math.round(pending.lastCharOffset)),
             lastSyncedProgress: pending.readProgress,
             lastSyncedReadAt: pending.lastReadAt,
+            progressOverrideAt: resolvedOverrideAt,
             pendingRemoteProgress: null,
           }
         : d
     );
     docsRef.current = nextDocs;
     setDocs(nextDocs);
-    setDismissedConflictKeys((prev) => {
-      if (!prev[docId]) return prev;
-      const next = { ...prev };
-      delete next[docId];
-      return next;
-    });
-    setLiveReadProgress(finalProgress);
+    const nextDismissed = { ...dismissedConflictKeys };
+    delete nextDismissed[docId];
+    setDismissedConflictKeys(nextDismissed);
+    if (selectedDocIdRef.current === docId) {
+      setLiveReadProgress(finalProgress);
+    }
     if (mainViewRef.current === 'doc' && selectedDocIdRef.current === docId) {
       docViewRef.current?.jumpToCharOffset(finalOffset);
     }
-    showToast(pending.source === 'wifi' ? '已同步至对端阅读进度' : '已同步至云端阅读进度');
+    if (pending.source === 'wifi') {
+      scheduleWifiPushAfterResolution(nextDocs, nextDismissed);
+    }
+    showToast(pending.source === 'wifi' ? '已采用对端阅读进度' : '已同步至云端阅读进度');
   };
 
   const handleKeepLocalProgress = (docId: string) => {
@@ -1570,7 +1689,12 @@ export default function App() {
       localScrollTop = Math.max(0, Math.round(live.scrollTop));
     }
 
-    const overrideTs = Math.max(Date.now(), (pending.lastReadAt || 0) + 1000);
+    const overrideTs = Math.max(
+      Date.now(),
+      (pending.lastReadAt || 0) + 1000,
+      (target.lastReadAt || 0) + 1000,
+      (target.progressOverrideAt || 0) + 1
+    );
     const localAnchor = target.content
       ? extractReadAnchorText(target.content, localOffset) || target.readAnchorText
       : target.readAnchorText;
@@ -1585,6 +1709,7 @@ export default function App() {
             readAnchorText: localAnchor,
             lastReadAt: overrideTs,
             updatedAt: Math.max(d.updatedAt, overrideTs),
+            progressOverrideAt: overrideTs,
             // Acknowledge rejected remote snapshot as baseline so next sync pushes local cleanly even if offline right now
             lastSyncedCharOffset: Math.max(0, Math.round(pending.lastCharOffset)),
             lastSyncedProgress: pending.readProgress,
@@ -1595,17 +1720,18 @@ export default function App() {
     );
     docsRef.current = nextDocs;
     setDocs(nextDocs);
-    setDismissedConflictKeys((prev) => {
-      if (!prev[docId]) return prev;
-      const next = { ...prev };
-      delete next[docId];
-      return next;
-    });
+    const nextDismissed = { ...dismissedConflictKeys };
+    delete nextDismissed[docId];
+    setDismissedConflictKeys(nextDismissed);
     setFoldersDirty(true);
     autoProgressDirtyRef.current = true;
     autoMutationSeqRef.current++;
-    void runSilentAutoSyncRef.current({ bypassThrottle: true });
-    showToast(pending.source === 'wifi' ? '已保留本机进度' : '已保留本机进度并覆盖云端');
+    if (pending.source === 'wifi') {
+      scheduleWifiPushAfterResolution(nextDocs, nextDismissed);
+    } else {
+      void runSilentAutoSyncRef.current({ bypassThrottle: true });
+    }
+    showToast(pending.source === 'wifi' ? '已保留本机进度并覆盖对端' : '已保留本机进度并覆盖云端');
   };
 
   const handleDismissProgressConflict = (doc: ArticleDoc) => {
@@ -2427,7 +2553,10 @@ export default function App() {
     nextDocs: ArticleDoc[],
     nextTreeState: SyncedTreeState
   ) => {
-    setFolders(nextFolders.map((f) => ({ ...f, parentId: null })));
+    const normalizedFolders = nextFolders.map((f) => ({ ...f, parentId: null }));
+    foldersRef.current = normalizedFolders;
+    docsRef.current = nextDocs;
+    setFolders(normalizedFolders);
     setDocs(nextDocs);
     if (nextTreeState.updatedAt > treeStateUpdatedAtRef.current) {
       setCollapsedFolderIds(nextTreeState.collapsedIds);
@@ -2440,7 +2569,11 @@ export default function App() {
   };
 
   const applyWifiReceivedDocBody = async (payload: WifiDocBodyPayload) => {
-    setDocs((prev) => applyWifiReceivedDocToDocs(prev, payload));
+    setDocs((prev) => {
+      const next = applyWifiReceivedDocToDocs(prev, payload);
+      docsRef.current = next;
+      return next;
+    });
   };
 
   const wifiCallbacksRef = useRef({
@@ -2622,8 +2755,15 @@ export default function App() {
                 clearWifiIncomingSafetyTimer();
                 setWifiImageVersion((v) => v + 1);
                 if (mainViewRef.current === 'tree' && !wifiAutoSyncingRef.current) {
-                  setWifiQuickBubble({ status: 'done', text: '同步完成' });
-                  scheduleHideWifiBubble(1800);
+                  const hasWifiConflict = docsRef.current.some(
+                    (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
+                  );
+                  if (hasWifiConflict) {
+                    setWifiQuickBubble(null);
+                  } else {
+                    setWifiQuickBubble({ status: 'done', text: '同步完成' });
+                    scheduleHideWifiBubble(1800);
+                  }
                 }
               }
             },
@@ -2681,6 +2821,7 @@ export default function App() {
     const password = (webDavConfig.encryptionPassword || '').trim();
     if (
       mainView !== 'tree' ||
+      hasPendingWifiConflicts ||
       !password ||
       !wifiServerInfo?.running ||
       !wifiLocalStateHash ||
@@ -2741,8 +2882,15 @@ export default function App() {
         setWifiImageVersion((v) => v + 1);
 
         if (appMountedRef.current && mainViewRef.current === 'tree') {
-          setWifiQuickBubble({ status: 'done', text: '同步完成' });
-          scheduleHideWifiBubble(1800);
+          const hasWifiConflict = docsRef.current.some(
+            (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
+          );
+          if (hasWifiConflict) {
+            setWifiQuickBubble(null);
+          } else {
+            setWifiQuickBubble({ status: 'done', text: '同步完成' });
+            scheduleHideWifiBubble(1800);
+          }
         }
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err || '');
@@ -2781,6 +2929,7 @@ export default function App() {
     void runAutoSync();
   }, [
     mainView,
+    hasPendingWifiConflicts,
     wifiServerInfo,
     wifiPeers,
     wifiLocalStateHash,
@@ -2810,6 +2959,10 @@ export default function App() {
       if (wifiBubbleTimerRef.current !== null) {
         window.clearTimeout(wifiBubbleTimerRef.current);
         wifiBubbleTimerRef.current = null;
+      }
+      if (wifiResolutionPushTimerRef.current !== null) {
+        window.clearTimeout(wifiResolutionPushTimerRef.current);
+        wifiResolutionPushTimerRef.current = null;
       }
       clearWifiIncomingSafetyTimer();
     };
@@ -3545,6 +3698,37 @@ export default function App() {
           onClose={() => setShowTrashModal(false)}
         />
       )}
+
+      {/* Wi-Fi Sync Reading Progress Conflict Modal — resolve all conflicts immediately in Directory Mode */}
+      {mainView === 'tree' &&
+        wifiConflictDocs.length > 0 &&
+        wifiQuickBubble?.status !== 'syncing' &&
+        !showSyncModal &&
+        !showImportModal &&
+        !showTrashModal &&
+        !showStorageFolderModal &&
+        wifiConflictDocs[0].pendingRemoteProgress && (
+          <ProgressConflictModal
+            doc={wifiConflictDocs[0]}
+            pending={wifiConflictDocs[0].pendingRemoteProgress}
+            queuePosition={
+              Math.max(wifiConflictBatchTotal, wifiConflictDocs.length) > 1
+                ? {
+                    current: Math.max(
+                      1,
+                      Math.max(wifiConflictBatchTotal, wifiConflictDocs.length) -
+                        wifiConflictDocs.length +
+                        1
+                    ),
+                    total: Math.max(wifiConflictBatchTotal, wifiConflictDocs.length),
+                  }
+                : undefined
+            }
+            onAcceptRemote={() => handleAcceptRemoteProgress(wifiConflictDocs[0].id)}
+            onKeepLocal={() => handleKeepLocalProgress(wifiConflictDocs[0].id)}
+            onDismiss={() => handleDismissProgressConflict(wifiConflictDocs[0])}
+          />
+        )}
 
       {/* Plan-B Reading Progress Confirmation Modal (on book open or immediately if already open) */}
       {mainView === 'doc' &&

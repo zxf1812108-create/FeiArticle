@@ -13,6 +13,7 @@ import {
 interface ProgressConflictModalProps {
   doc: ArticleDoc;
   pending: PendingRemoteProgress;
+  queuePosition?: { current: number; total: number };
   onAcceptRemote: () => void;
   onKeepLocal: () => void;
   onDismiss: () => void;
@@ -21,6 +22,7 @@ interface ProgressConflictModalProps {
 export const ProgressConflictModal: React.FC<ProgressConflictModalProps> = ({
   doc,
   pending,
+  queuePosition,
   onAcceptRemote,
   onKeepLocal,
   onDismiss,
@@ -110,9 +112,16 @@ export const ProgressConflictModal: React.FC<ProgressConflictModalProps> = ({
           {/* Header */}
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <h3 className="text-[14.5px] font-medium text-[var(--fei-text-primary)] leading-snug">
-                确认阅读进度
-              </h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-[14.5px] font-medium text-[var(--fei-text-primary)] leading-snug">
+                  确认阅读进度
+                </h3>
+                {queuePosition && queuePosition.total > 1 && (
+                  <span className="text-[11.5px] font-code tabular-nums text-[var(--fei-text-muted)] leading-none">
+                    {queuePosition.current}/{queuePosition.total}
+                  </span>
+                )}
+              </div>
               <p className="text-[12px] text-[var(--fei-text-muted)] truncate mt-0.5">
                 {doc.title}
               </p>

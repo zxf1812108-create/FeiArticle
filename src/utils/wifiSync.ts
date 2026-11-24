@@ -9,6 +9,7 @@ import {
   extractReadAnchorText,
   reconcileReadingProgress,
   relocateCharOffsetByAnchor,
+  resolveComparableProgressPercent,
 } from './progressSync';
 
 export const DEFAULT_WIFI_SYNC_PORT = 48765;
@@ -44,6 +45,7 @@ export interface WifiDocCatalogMeta {
   lastScrollTop?: number;
   lastCharOffset?: number;
   readAnchorText?: string;
+  progressOverrideAt?: number;
   encrypted?: boolean;
   format?: 'txt' | 'md';
   cloudBodySynced?: boolean;
@@ -178,7 +180,8 @@ export async function computeWifiSyncFingerprint(
       const progressRounded = Math.round((d.readProgress || 0) * 1000);
       const charOffset = Math.max(0, Math.round(d.lastCharOffset || 0));
       const lastRead = d.lastReadAt || 0;
-      return `${d.id}|${d.title}|${d.folderId || ''}|${d.order}|${d.contentHash || ''}|${hasBody}|${progressRounded}|${charOffset}|${lastRead}|${
+      const overrideAt = d.progressOverrideAt || 0;
+      return `${d.id}|${d.title}|${d.folderId || ''}|${d.order}|${d.contentHash || ''}|${hasBody}|${progressRounded}|${charOffset}|${lastRead}|${overrideAt}|${
         d.encrypted ? 1 : 0
       }|${d.format || 'txt'}|${d.updatedAt}|${d.deleted ? 1 : 0}|${
         d.deleted ? d.deletedAt || 0 : 0
@@ -223,6 +226,7 @@ export function buildWifiCatalogSnapshot(
         : d.readAnchorText ||
           (d.content ? extractReadAnchorText(d.content, d.lastCharOffset ?? 0) : undefined) ||
           undefined,
+      progressOverrideAt: d.progressOverrideAt || undefined,
       encrypted: Boolean(d.encrypted),
       format: d.format ?? 'txt',
       cloudBodySynced: Boolean(d.cloudBodySynced),
@@ -360,6 +364,7 @@ export function mergeWifiCatalogIntoLocal(
         lastSyncedCharOffset: Math.max(0, Math.round(pd.lastCharOffset ?? 0)),
         lastSyncedProgress: pd.readProgress ?? 0,
         lastSyncedReadAt: pd.lastReadAt ?? 0,
+        progressOverrideAt: pd.progressOverrideAt || undefined,
         pendingRemoteProgress: null,
         encrypted: Boolean(pd.encrypted),
         format: pd.format ?? 'txt',
@@ -378,48 +383,96 @@ export function mergeWifiCatalogIntoLocal(
     }
 
     let updated = { ...ld };
-    const progMerge = reconcileReadingProgress(ld, pd, 'wifi');
-    if (progMerge.action === 'pull') {
+    const localOverrideAt = ld.progressOverrideAt ?? 0;
+    const peerOverrideAt = pd.progressOverrideAt ?? 0;
+    const localReadTs = Math.max(ld.lastReadAt ?? 0, localOverrideAt);
+    const peerAuthoritativeOverride =
+      peerOverrideAt > localOverrideAt && peerOverrideAt > localReadTs;
+
+    if (peerAuthoritativeOverride) {
+      const rawPeerOffset = Math.max(0, Math.round(pd.lastCharOffset ?? 0));
+      const relocated =
+        updated.content && pd.readAnchorText
+          ? relocateCharOffsetByAnchor(updated.content, rawPeerOffset, pd.readAnchorText)
+          : null;
+      const finalOffset = relocated?.matched ? relocated.offset : rawPeerOffset;
+      const finalProgress = updated.content
+        ? resolveComparableProgressPercent(
+            updated.content.length,
+            finalOffset,
+            pd.readProgress ?? 0,
+            true
+          )
+        : (pd.readProgress ?? 0);
+      const finalReadAt = pd.lastReadAt ?? peerOverrideAt;
       updated = {
         ...updated,
-        readProgress: progMerge.resolvedRemoteProgress,
-        lastCharOffset: progMerge.resolvedRemoteOffset,
-        lastScrollTop: Math.max(0, Math.round(pd.lastScrollTop ?? 0)),
+        readProgress: finalProgress,
+        lastCharOffset: finalOffset,
+        lastScrollTop: relocated?.matched ? 0 : Math.max(0, Math.round(pd.lastScrollTop ?? 0)),
         lastMode: pd.lastMode ?? updated.lastMode ?? 'read',
-        lastReadAt: pd.lastReadAt ?? progMerge.resolvedRemoteReadAt,
+        lastReadAt: finalReadAt,
         readAnchorText:
-          progMerge.resolvedRemoteAnchor ||
-          (updated.content
-            ? extractReadAnchorText(updated.content, progMerge.resolvedRemoteOffset)
+          pd.readAnchorText ||
+          (updated.content && !updated.encrypted
+            ? extractReadAnchorText(updated.content, finalOffset)
             : updated.readAnchorText),
-        lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? progMerge.resolvedRemoteOffset,
-        lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
-        lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
+        lastSyncedCharOffset: finalOffset,
+        lastSyncedProgress: finalProgress,
+        lastSyncedReadAt: finalReadAt,
+        progressOverrideAt: peerOverrideAt,
         pendingRemoteProgress: null,
       };
       changed = true;
-    } else if (progMerge.action === 'prompt' && progMerge.pendingRemoteProgress) {
-      if (!pendingWifiProgressEqual(ld.pendingRemoteProgress, progMerge.pendingRemoteProgress)) {
+    } else {
+      const progMerge = reconcileReadingProgress(ld, pd, 'wifi');
+      if (progMerge.action === 'pull') {
         updated = {
           ...updated,
-          pendingRemoteProgress: progMerge.pendingRemoteProgress,
-        };
-        changed = true;
-      }
-    } else if (progMerge.action === 'noop' && progMerge.nextBaseline) {
-      if (
-        ld.lastSyncedCharOffset !== progMerge.nextBaseline.charOffset ||
-        ld.lastSyncedProgress !== progMerge.nextBaseline.progress ||
-        Boolean(ld.pendingRemoteProgress)
-      ) {
-        updated = {
-          ...updated,
-          lastSyncedCharOffset: progMerge.nextBaseline.charOffset,
-          lastSyncedProgress: progMerge.nextBaseline.progress,
-          lastSyncedReadAt: progMerge.nextBaseline.readAt,
+          readProgress: progMerge.resolvedRemoteProgress,
+          lastCharOffset: progMerge.resolvedRemoteOffset,
+          lastScrollTop: Math.max(0, Math.round(pd.lastScrollTop ?? 0)),
+          lastMode: pd.lastMode ?? updated.lastMode ?? 'read',
+          lastReadAt: pd.lastReadAt ?? progMerge.resolvedRemoteReadAt,
+          readAnchorText:
+            progMerge.resolvedRemoteAnchor ||
+            (updated.content
+              ? extractReadAnchorText(updated.content, progMerge.resolvedRemoteOffset)
+              : updated.readAnchorText),
+          lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? progMerge.resolvedRemoteOffset,
+          lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
+          lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
+          progressOverrideAt:
+            peerOverrideAt > localOverrideAt ? peerOverrideAt : updated.progressOverrideAt,
           pendingRemoteProgress: null,
         };
         changed = true;
+      } else if (progMerge.action === 'prompt' && progMerge.pendingRemoteProgress) {
+        if (!pendingWifiProgressEqual(ld.pendingRemoteProgress, progMerge.pendingRemoteProgress)) {
+          updated = {
+            ...updated,
+            pendingRemoteProgress: progMerge.pendingRemoteProgress,
+          };
+          changed = true;
+        }
+      } else if (progMerge.action === 'noop' && progMerge.nextBaseline) {
+        const needsOverrideSync = peerOverrideAt > localOverrideAt;
+        if (
+          ld.lastSyncedCharOffset !== progMerge.nextBaseline.charOffset ||
+          ld.lastSyncedProgress !== progMerge.nextBaseline.progress ||
+          Boolean(ld.pendingRemoteProgress) ||
+          needsOverrideSync
+        ) {
+          updated = {
+            ...updated,
+            lastSyncedCharOffset: progMerge.nextBaseline.charOffset,
+            lastSyncedProgress: progMerge.nextBaseline.progress,
+            lastSyncedReadAt: progMerge.nextBaseline.readAt,
+            progressOverrideAt: needsOverrideSync ? peerOverrideAt : updated.progressOverrideAt,
+            pendingRemoteProgress: null,
+          };
+          changed = true;
+        }
       }
     }
 

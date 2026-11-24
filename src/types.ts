@@ -50,6 +50,7 @@ export interface ArticleDoc {
   lastSyncedCharOffset?: number;
   lastSyncedProgress?: number;
   lastSyncedReadAt?: number;
+  progressOverrideAt?: number;
   pendingRemoteProgress?: PendingRemoteProgress | null;
   encrypted?: boolean;
   format?: 'txt' | 'md';
