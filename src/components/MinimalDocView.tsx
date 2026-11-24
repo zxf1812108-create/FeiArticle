@@ -948,8 +948,47 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       typographyLockUntilRef.current = 0;
     };
 
-    const computeReadMetrics = (): DocReadMetrics => {
-      if (!contentRef.current.trim()) {
+    const estimateViewportTopCharOffset = (
+      el: HTMLElement,
+      articleEl: HTMLElement,
+      rawLen: number
+    ): number | null => {
+      if (rawLen <= 0) return 0;
+      const containerRect = el.getBoundingClientRect();
+      const effectiveClientTop = containerRect.top + topClipPxRef.current;
+      const nearBlocks = findBlocksInClientYRange(
+        articleEl,
+        effectiveClientTop - 8,
+        containerRect.bottom + 8
+      );
+      if (nearBlocks.length === 0) return null;
+
+      let chosen: HTMLElement | null = null;
+      for (let i = 0; i < nearBlocks.length; i++) {
+        const b = nearBlocks[i];
+        const r = b.getBoundingClientRect();
+        if (r.bottom > effectiveClientTop + 2) {
+          chosen = b;
+          break;
+        }
+      }
+      if (!chosen) chosen = nearBlocks[nearBlocks.length - 1];
+
+      const start = Number(chosen.getAttribute('data-start-offset'));
+      const end = Number(chosen.getAttribute('data-end-offset'));
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+
+      const rect = chosen.getBoundingClientRect();
+      if (rect.top >= effectiveClientTop - 2 || rect.height <= 1) {
+        return Math.min(rawLen, Math.max(0, start));
+      }
+      const intraRatio = Math.min(1, Math.max(0, (effectiveClientTop - rect.top) / rect.height));
+      return Math.min(rawLen, Math.max(0, start + intraRatio * Math.max(0, end - start)));
+    };
+
+    const computeReadMetrics = (exactCharOffset?: number): DocReadMetrics => {
+      const raw = contentRef.current;
+      if (!raw.trim()) {
         return { progress: 0, progressDecimals: 0, currentPage: 1, totalPages: 1 };
       }
       const el = scrollRef.current;
@@ -999,7 +1038,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         return { progress: 100, progressDecimals, currentPage: totalPages, totalPages };
       }
 
-      const rawPct = Math.min(100, Math.max(0, (el.scrollTop / effectiveMax) * 100));
+      // Use device-independent character position ratio so the same sentence produces the exact
+      // same percentage across phones, e-readers, desktops, font sizes, and virtualized chunks
+      const resolvedCharPos =
+        typeof exactCharOffset === 'number' && Number.isFinite(exactCharOffset)
+          ? Math.min(raw.length, Math.max(0, exactCharOffset))
+          : estimateViewportTopCharOffset(el, articleEl, raw.length);
+      const rawPct =
+        resolvedCharPos !== null && raw.length > 0
+          ? Math.min(99.999, Math.max(0, (resolvedCharPos / raw.length) * 100))
+          : Math.min(100, Math.max(0, (el.scrollTop / effectiveMax) * 100));
       const progress = Math.round(rawPct * 1000) / 1000;
       const currentPage = Math.min(
         totalPages,
@@ -1009,10 +1057,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return { progress, progressDecimals, currentPage, totalPages };
     };
 
-    const computeReadProgress = (): number => computeReadMetrics().progress;
+    const computeReadProgress = (exactCharOffset?: number): number =>
+      computeReadMetrics(exactCharOffset).progress;
 
-    const reportReadProgress = (): number => {
-      const metrics = computeReadMetrics();
+    const reportReadProgress = (exactCharOffset?: number): number => {
+      const metrics = computeReadMetrics(exactCharOffset);
       if (metrics.progress !== lastReportedProgressRef.current) {
         lastReportedProgressRef.current = metrics.progress;
         onReadProgressChangeRef.current?.(metrics.progress);
@@ -1084,7 +1133,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const el = scrollRef.current;
       const scrollTop = el?.scrollTop ?? 0;
       const charOffset = captureCurrentCharOffset();
-      const readProgress = reportReadProgress();
+      const readProgress = reportReadProgress(charOffset);
       onViewStateChangeRef.current({ mode: 'read', scrollTop, charOffset, readProgress });
     };
 
@@ -1319,7 +1368,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       const targetOffset = anchor.kind === 'top' ? 0 : anchor.charOffset;
       const nextTop = scrollReadToCharOffset(targetOffset);
-      const readProgress = reportReadProgress();
+      const readProgress = reportReadProgress(targetOffset);
       onViewStateChangeRef.current({
         mode: 'read',
         scrollTop: nextTop,
@@ -1596,11 +1645,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           debounceScrollRef.current = null;
         }
         const activeEl = scrollRef.current;
+        const charOffset = captureCurrentCharOffset();
         return {
           mode: 'read',
           scrollTop: activeEl?.scrollTop ?? 0,
-          charOffset: captureCurrentCharOffset(),
-          readProgress: computeReadProgress(),
+          charOffset,
+          readProgress: computeReadProgress(charOffset),
         };
       },
       turnPageDown() {

@@ -52,6 +52,28 @@ export function estimateProgressFromOffset(contentLength: number, charOffset: nu
 }
 
 /**
+ * Calibrate a reading progress percentage onto a single canonical scale (`charOffset / contentLength`)
+ * whenever the document content is available locally. This eliminates cross-device / cross-font-size /
+ * virtualized-height drift so percentage ordering always strictly matches real character position.
+ */
+export function resolveComparableProgressPercent(
+  contentLength: number,
+  charOffset: number,
+  rawProgress: number | undefined | null,
+  allowHundredSnap = true
+): number {
+  const safeRaw = roundProgress3(rawProgress);
+  if (contentLength <= 0) return safeRaw;
+  const safeOffset = Math.max(0, Math.round(charOffset || 0));
+  if (safeOffset <= 0) {
+    return safeRaw > 0.05 ? safeRaw : 0;
+  }
+  if (safeOffset >= contentLength) return 100;
+  if (allowHundredSnap && safeRaw >= 99.999) return 100;
+  return estimateProgressFromOffset(contentLength, safeOffset);
+}
+
+/**
  * Extract a short, clean plaintext reading anchor (~36 chars) starting near `charOffset`.
  * Used both to re-locate the exact reading sentence after external edits and to preview
  * reading locations inside the progress confirmation modal.
@@ -296,8 +318,13 @@ export function reconcileReadingProgress(
   remote: RemoteProgressInput,
   source: 'cloud' | 'wifi'
 ): ProgressReconcileResult {
+  const contentLen = localDoc.content ? localDoc.content.length : 0;
   const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
-  const localProgress = roundProgress3(localDoc.readProgress);
+  const rawLocalProgress = roundProgress3(localDoc.readProgress);
+  const localProgress =
+    contentLen > 0
+      ? resolveComparableProgressPercent(contentLen, localOffset, rawLocalProgress, true)
+      : rawLocalProgress;
   const localTs = getEffectiveProgressTimestamp(
     localDoc.lastReadAt,
     localDoc.readProgress,
@@ -325,11 +352,15 @@ export function reconcileReadingProgress(
     );
     if (relocated.matched) {
       resolvedRemoteOffset = relocated.offset;
-      // Preserve remote's exact percentage when offsets are close; otherwise use calibrated ratio
-      if (Math.abs(relocated.offset - rawRemoteOffset) >= 60) {
-        resolvedRemoteProgress = relocated.progress;
-      }
     }
+  }
+  if (contentLen > 0) {
+    resolvedRemoteProgress = resolveComparableProgressPercent(
+      contentLen,
+      resolvedRemoteOffset,
+      rawRemoteProgress,
+      true
+    );
   }
 
   const resolvedRemoteAnchor =
@@ -349,7 +380,7 @@ export function reconcileReadingProgress(
   if (!meaningfulDiff) {
     const agreedTs = Math.max(localTs, remoteTs);
     const exactDiff =
-      Math.round(localProgress * 1000) !== Math.round(rawRemoteProgress * 1000) ||
+      Math.round(localProgress * 1000) !== Math.round(resolvedRemoteProgress * 1000) ||
       localOffset !== rawRemoteOffset;
     return {
       action: 'noop',
@@ -360,7 +391,10 @@ export function reconcileReadingProgress(
       pendingRemoteProgress: null,
       nextBaseline: {
         charOffset: rawRemoteOffset > 0 || localOffset === 0 ? rawRemoteOffset : localOffset,
-        progress: rawRemoteProgress > 0 || localProgress === 0 ? rawRemoteProgress : localProgress,
+        progress:
+          resolvedRemoteProgress > 0 || localProgress === 0
+            ? resolvedRemoteProgress
+            : localProgress,
         readAt: agreedTs,
       },
       silentMinorAlign: exactDiff
@@ -380,11 +414,19 @@ export function reconcileReadingProgress(
     typeof localDoc.lastSyncedCharOffset === 'number' ||
     typeof localDoc.lastSyncedProgress === 'number';
   const baselineOffset = Math.max(0, Math.round(localDoc.lastSyncedCharOffset ?? 0));
-  const baselineProgress = roundProgress3(localDoc.lastSyncedProgress);
+  const rawBaselineProgress = roundProgress3(localDoc.lastSyncedProgress);
+  const baselineProgress =
+    contentLen > 0
+      ? resolveComparableProgressPercent(contentLen, baselineOffset, rawBaselineProgress, true)
+      : rawBaselineProgress;
+  const comparableRawRemoteProgress =
+    contentLen > 0
+      ? resolveComparableProgressPercent(contentLen, rawRemoteOffset, rawRemoteProgress, true)
+      : rawRemoteProgress;
   const remoteChangedFromBaseline = hasBaseline
     ? isProgressMeaningfullyDifferent(
         rawRemoteOffset,
-        rawRemoteProgress,
+        comparableRawRemoteProgress,
         baselineOffset,
         baselineProgress
       )

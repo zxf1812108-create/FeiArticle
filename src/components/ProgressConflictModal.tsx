@@ -7,6 +7,7 @@ import {
   formatProgressTimestamp,
   isRemoteFurtherThanLocal,
   relocateCharOffsetByAnchor,
+  resolveComparableProgressPercent,
 } from '../utils/progressSync';
 
 interface ProgressConflictModalProps {
@@ -24,32 +25,57 @@ export const ProgressConflictModal: React.FC<ProgressConflictModalProps> = ({
   onKeepLocal,
   onDismiss,
 }) => {
+  const contentLen = doc.content ? doc.content.length : 0;
   const localOffset = Math.max(0, Math.round(doc.lastCharOffset ?? 0));
-  const localProgress = doc.readProgress ?? 0;
+  const rawLocalProgress = doc.readProgress ?? 0;
 
   const relocatedRemote = doc.content
     ? relocateCharOffsetByAnchor(doc.content, pending.lastCharOffset, pending.anchorText)
     : null;
   const effectiveRemoteOffset = relocatedRemote?.matched
     ? relocatedRemote.offset
-    : pending.lastCharOffset;
-  const effectiveRemoteProgress =
-    relocatedRemote?.matched && Math.abs(relocatedRemote.offset - pending.lastCharOffset) >= 60
-      ? relocatedRemote.progress
-      : pending.readProgress;
+    : Math.max(0, Math.round(pending.lastCharOffset));
+
+  const comparableLocal = resolveComparableProgressPercent(
+    contentLen,
+    localOffset,
+    rawLocalProgress,
+    true
+  );
+  const comparableRemote = resolveComparableProgressPercent(
+    contentLen,
+    effectiveRemoteOffset,
+    pending.readProgress,
+    true
+  );
 
   const remoteIsFurther = isRemoteFurtherThanLocal(
     localOffset,
-    localProgress,
+    comparableLocal,
     effectiveRemoteOffset,
-    effectiveRemoteProgress
+    comparableRemote
   );
   const localIsFurther = isRemoteFurtherThanLocal(
     effectiveRemoteOffset,
-    effectiveRemoteProgress,
+    comparableRemote,
     localOffset,
-    localProgress
+    comparableLocal
   );
+
+  // Calibrate display percentages on the exact same character scale so "更靠后" can never show a smaller number
+  const localProgress =
+    contentLen > 0
+      ? resolveComparableProgressPercent(contentLen, localOffset, rawLocalProgress, !remoteIsFurther)
+      : comparableLocal;
+  const effectiveRemoteProgress =
+    contentLen > 0
+      ? resolveComparableProgressPercent(
+          contentLen,
+          effectiveRemoteOffset,
+          pending.readProgress,
+          !localIsFurther
+        )
+      : comparableRemote;
 
   const remoteSourceLabel = pending.source === 'wifi' ? '局域网设备进度' : '云端进度';
   const remoteShortLabel = pending.source === 'wifi' ? '对端进度' : '云端进度';

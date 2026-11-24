@@ -145,6 +145,7 @@ import { formatMicErrorMessage, WhistleDetector } from './utils/whistleDetector'
 import {
   extractReadAnchorText,
   relocateCharOffsetByAnchor,
+  resolveComparableProgressPercent,
 } from './utils/progressSync';
 import { ProgressConflictModal } from './components/ProgressConflictModal';
 
@@ -1508,10 +1509,14 @@ export default function App() {
     const finalOffset = relocated?.matched
       ? relocated.offset
       : Math.max(0, Math.round(pending.lastCharOffset));
-    const finalProgress =
-      relocated?.matched && Math.abs(relocated.offset - pending.lastCharOffset) >= 60
-        ? relocated.progress
-        : pending.readProgress;
+    const finalProgress = target.content
+      ? resolveComparableProgressPercent(
+          target.content.length,
+          finalOffset,
+          pending.readProgress,
+          true
+        )
+      : pending.readProgress;
     const finalAnchor =
       (target.content ? extractReadAnchorText(target.content, finalOffset) : '') ||
       pending.anchorText ||
