@@ -63,6 +63,7 @@ export interface WifiCatalogSnapshot {
   docs: WifiDocCatalogMeta[];
   treeState: SyncedTreeState;
   purgedRecords?: PurgedSyncRecords;
+  cloudConfigured?: boolean;
 }
 
 export interface WifiDocBodyPayload {
@@ -88,6 +89,7 @@ export interface WifiSyncSummary {
   pulledImages: number;
   pushedImages: number;
   catalogUpdated: boolean;
+  peerCloudConfigured: boolean;
 }
 
 interface WifiSyncNativePlugin {
@@ -203,7 +205,8 @@ export function buildWifiCatalogSnapshot(
   folders: FolderNode[],
   docs: ArticleDoc[],
   treeState: SyncedTreeState,
-  purgedRecords?: PurgedSyncRecords
+  purgedRecords?: PurgedSyncRecords,
+  cloudConfigured?: boolean
 ): WifiCatalogSnapshot {
   return {
     folders,
@@ -240,6 +243,7 @@ export function buildWifiCatalogSnapshot(
     })),
     treeState,
     purgedRecords,
+    cloudConfigured: Boolean(cloudConfigured),
   };
 }
 
@@ -512,6 +516,7 @@ export interface WifiSyncHostCallbacks {
     docs: ArticleDoc[];
     treeState: SyncedTreeState;
     purgedRecords: PurgedSyncRecords;
+    cloudConfigured?: boolean;
   };
   applyMergedCatalog: (
     folders: FolderNode[],
@@ -523,6 +528,7 @@ export interface WifiSyncHostCallbacks {
   onImageReceived?: (relPath: string) => void;
   onIncomingSync?: (status: 'start' | 'end') => void;
   onIncomingActivity?: () => void;
+  onPeerCloudStatus?: (peerCloudConfigured: boolean) => void;
 }
 
 export async function startWifiSyncHost(
@@ -570,6 +576,7 @@ export async function startWifiSyncHost(
       const payload = JSON.parse(evt.payloadJson || '{}');
       if (evt.action === 'mergeCatalog') {
         const peerSnapshot = payload as WifiCatalogSnapshot;
+        callbacks.onPeerCloudStatus?.(Boolean(peerSnapshot.cloudConfigured));
         const local = callbacks.getLocalState();
         const merged = mergeWifiCatalogIntoLocal(
           local.folders,
@@ -585,7 +592,8 @@ export async function startWifiSyncHost(
           merged.folders,
           merged.docs,
           merged.treeState,
-          local.purgedRecords
+          local.purgedRecords,
+          local.cloudConfigured
         );
         await WifiSyncNative.resolveServerRequest({
           reqId: evt.reqId,
@@ -679,6 +687,7 @@ export async function runWifiBidirectionalSync(options: {
     docs: ArticleDoc[];
     treeState: SyncedTreeState;
     purgedRecords: PurgedSyncRecords;
+    cloudConfigured?: boolean;
   };
   applyMergedCatalog: (
     folders: FolderNode[],
@@ -718,6 +727,7 @@ export async function runWifiBidirectionalSync(options: {
   let pulledImages = 0;
   let pushedImages = 0;
   let catalogUpdated = false;
+  let peerCloudConfigured = false;
 
   try {
     // Step 1: Exchange & merge catalog / folders / reading progress
@@ -727,7 +737,8 @@ export async function runWifiBidirectionalSync(options: {
       localBefore.folders,
       localBefore.docs,
       localBefore.treeState,
-      localBefore.purgedRecords
+      localBefore.purgedRecords,
+      localBefore.cloudConfigured
     );
 
     const catRes = await WifiSyncNative.peerRpc({
@@ -736,6 +747,7 @@ export async function runWifiBidirectionalSync(options: {
       payloadJson: JSON.stringify(localSnapshot),
     });
     const peerCatalog = JSON.parse(catRes.payloadJson || '{}') as WifiCatalogSnapshot;
+    peerCloudConfigured = Boolean(peerCatalog.cloudConfigured);
 
     const merged = mergeWifiCatalogIntoLocal(
       localBefore.folders,
@@ -894,6 +906,7 @@ export async function runWifiBidirectionalSync(options: {
       pulledImages,
       pushedImages,
       catalogUpdated,
+      peerCloudConfigured,
     };
   } finally {
     await WifiSyncNative.peerDisconnect({ sessionId }).catch(() => {});

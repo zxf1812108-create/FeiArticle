@@ -347,6 +347,11 @@ export default function App() {
   const lastAutoPullAtRef = useRef(0);
   const autoSyncFailCountRef = useRef(0);
   const autoSyncBackoffUntilRef = useRef(0);
+  const lastWifiPeerCloudConfiguredRef = useRef(false);
+  const wifiCloudSyncNeededRef = useRef(false);
+  const triggerPostWifiCloudSyncRef = useRef<
+    (isInitiator: boolean, peerCloudConfigured: boolean) => void
+  >(() => {});
   const storageDirRef = useRef<StorageDirectoryConfig>(storageDir);
   storageDirRef.current = storageDir;
   const localFsTimerRef = useRef<number | null>(null);
@@ -1567,7 +1572,10 @@ export default function App() {
       const password = (webDavConfigRef.current.encryptionPassword || '').trim();
       const myInfo = wifiServerInfoRef.current;
       const peer = wifiPeersRef.current[0];
-      if (!password || !myInfo?.running || !peer) return;
+      if (!password || !myInfo?.running || !peer) {
+        triggerPostWifiCloudSyncRef.current(true, false);
+        return;
+      }
       // Leader automatically syncs via effect once fingerprint updates; non-leader pushes directly
       if (myInfo.instanceId < peer.id) return;
 
@@ -1579,7 +1587,7 @@ export default function App() {
         }
         setWifiQuickBubble({ status: 'syncing' });
         try {
-          await runWifiBidirectionalSync({
+          const summary = await runWifiBidirectionalSync({
             host: peer.ip,
             port: peer.port,
             password,
@@ -1590,10 +1598,10 @@ export default function App() {
               wifiCallbacksRef.current.applyReceivedDocBody(payload),
           });
           setWifiImageVersion((v) => v + 1);
+          const stillHasWifiConflict = docsRef.current.some(
+            (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
+          );
           if (appMountedRef.current && mainViewRef.current === 'tree') {
-            const stillHasWifiConflict = docsRef.current.some(
-              (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
-            );
             if (stillHasWifiConflict) {
               setWifiQuickBubble(null);
             } else {
@@ -1601,9 +1609,18 @@ export default function App() {
               scheduleHideWifiBubble(TOOLBAR_TOAST_DURATION_MS);
             }
           }
+          if (!stillHasWifiConflict) {
+            triggerPostWifiCloudSyncRef.current(true, summary.peerCloudConfigured);
+          }
         } catch {
           if (appMountedRef.current && mainViewRef.current === 'tree') {
             setWifiQuickBubble(null);
+          }
+          const stillHasWifiConflict = docsRef.current.some(
+            (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
+          );
+          if (!stillHasWifiConflict) {
+            triggerPostWifiCloudSyncRef.current(true, false);
           }
         } finally {
           wifiAutoSyncingRef.current = false;
@@ -1678,6 +1695,7 @@ export default function App() {
     if (pending.source === 'wifi') {
       autoProgressDirtyRef.current = true;
       autoMutationSeqRef.current++;
+      wifiCloudSyncNeededRef.current = true;
       scheduleWifiPushAfterResolution(nextDocs, nextDismissed);
     }
     showToast(pending.source === 'wifi' ? '已采用对端阅读进度' : '已同步至云端阅读进度');
@@ -1737,6 +1755,7 @@ export default function App() {
     autoProgressDirtyRef.current = true;
     autoMutationSeqRef.current++;
     if (pending.source === 'wifi') {
+      wifiCloudSyncNeededRef.current = true;
       scheduleWifiPushAfterResolution(nextDocs, nextDismissed);
     } else {
       void runSilentAutoSyncRef.current({ bypassThrottle: true });
@@ -2358,10 +2377,16 @@ export default function App() {
                 seenIds.add(curr.id);
                 const next = outcomeDocMap.get(curr.id);
                 if (!next) return curr;
-                const keepWifiConflict = curr.pendingRemoteProgress?.source === 'wifi';
+                const currOverrideTs = curr.progressOverrideAt ?? 0;
+                const nextOverrideTs = next.progressOverrideAt ?? 0;
+                const keepWifiConflict =
+                  curr.pendingRemoteProgress?.source === 'wifi' ||
+                  currOverrideTs > nextOverrideTs;
                 const currProgressTs = curr.lastReadAt ?? 0;
                 const nextProgressTs = next.lastReadAt ?? 0;
-                const useNextProgress = !keepWifiConflict && nextProgressTs > currProgressTs;
+                const useNextProgress =
+                  !keepWifiConflict &&
+                  (nextOverrideTs > currOverrideTs || nextProgressTs > currProgressTs);
                 const useNextCatalog = next.updatedAt > curr.updatedAt;
                 const downloadedBody =
                   curr.syncStatus === 'remote-only' && !curr.content && Boolean(next.content);
@@ -2432,6 +2457,7 @@ export default function App() {
                         lastMode: next.lastMode,
                         lastReadAt: next.lastReadAt,
                         readAnchorText: next.readAnchorText ?? curr.readAnchorText,
+                        progressOverrideAt: next.progressOverrideAt ?? curr.progressOverrideAt,
                       }
                     : {}),
                 };
@@ -2581,6 +2607,7 @@ export default function App() {
       mainViewRef.current === 'tree'
         ? treeViewRef.current?.getScrollTop() ?? treeScrollTopRef.current
         : treeScrollTopRef.current;
+    const cfg = webDavConfigRef.current;
     return {
       folders: foldersRef.current,
       docs: docsRef.current,
@@ -2591,6 +2618,7 @@ export default function App() {
         updatedAt: treeStateUpdatedAtRef.current,
       },
       purgedRecords: purgedRecordsRef.current,
+      cloudConfigured: Boolean(cfg.username.trim() && cfg.password.trim()),
     };
   };
 
@@ -2614,26 +2642,65 @@ export default function App() {
     const hasUnresolvedWifiConflict = nextDocs.some(
       (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
     );
-    if (hasUnresolvedWifiConflict) {
-      // Record mutation so any in-flight WebDAV sync won't clobber the Wi-Fi conflict modal,
-      // and hold off scheduling a new cloud push until the user confirms their choice.
-      autoMutationSeqRef.current++;
-      if (autoCatalogDebounceTimerRef.current !== null) {
-        window.clearTimeout(autoCatalogDebounceTimerRef.current);
-        autoCatalogDebounceTimerRef.current = null;
-      }
-    } else {
-      markAutoCatalogDirty();
+    // Record mutation so any in-flight WebDAV sync won't clobber newly merged Wi-Fi state,
+    // and let triggerPostWifiCloudSync coordinate a single-side cloud push once Wi-Fi completes.
+    autoMutationSeqRef.current++;
+    if (autoCatalogDebounceTimerRef.current !== null) {
+      window.clearTimeout(autoCatalogDebounceTimerRef.current);
+      autoCatalogDebounceTimerRef.current = null;
+    }
+    if (!hasUnresolvedWifiConflict) {
+      wifiCloudSyncNeededRef.current = true;
     }
   };
 
   const applyWifiReceivedDocBody = async (payload: WifiDocBodyPayload) => {
+    wifiCloudSyncNeededRef.current = true;
     setDocs((prev) => {
       const next = applyWifiReceivedDocToDocs(prev, payload);
       docsRef.current = next;
       return next;
     });
   };
+
+  const triggerPostWifiCloudSync = (isInitiator: boolean, peerCloudConfigured: boolean) => {
+    const cfg = webDavConfigRef.current;
+    if (!cfg.username.trim() || !cfg.password.trim()) return;
+    if (docsRef.current.some((d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi')) {
+      return;
+    }
+    // Single-side coordination: prefer the Wi-Fi initiator to sync to WebDAV cloud so both devices
+    // never race against Jianguoyun at the same instant; fall back to host if initiator has no cloud.
+    if (!isInitiator && peerCloudConfigured) {
+      wifiCloudSyncNeededRef.current = false;
+      return;
+    }
+    const needsSync =
+      wifiCloudSyncNeededRef.current ||
+      autoProgressDirtyRef.current ||
+      autoCatalogDirtyRef.current;
+    // Anti-ping-pong guard: if we just pulled from cloud (<4s ago) and Wi-Fi didn't bring new
+    // changes or conflict resolutions back to us, skip a redundant immediate cloud round-trip.
+    if (!needsSync && Date.now() - lastAutoPullAtRef.current < 4000) {
+      return;
+    }
+
+    wifiCloudSyncNeededRef.current = false;
+    autoCatalogDirtyRef.current = true;
+    autoProgressDirtyRef.current = true;
+    autoSyncBackoffUntilRef.current = 0;
+
+    const trigger = () => {
+      if (!appMountedRef.current) return;
+      void runSilentAutoSyncRef.current({ forcePullCheck: true, bypassThrottle: true });
+    };
+    if (activeAutoSyncPromiseRef.current) {
+      void activeAutoSyncPromiseRef.current.finally(trigger);
+    } else {
+      trigger();
+    }
+  };
+  triggerPostWifiCloudSyncRef.current = triggerPostWifiCloudSync;
 
   const wifiCallbacksRef = useRef({
     getLocalState: getWifiLocalState,
@@ -2804,9 +2871,15 @@ export default function App() {
                 armWifiIncomingSafetyTimer();
               }
             },
+            onPeerCloudStatus: (peerCloudConfigured) => {
+              if (!disposed && runId === lifecycleId) {
+                lastWifiPeerCloudConfiguredRef.current = peerCloudConfigured;
+              }
+            },
             onIncomingSync: (status) => {
               if (disposed || runId !== lifecycleId) return;
               if (status === 'start') {
+                lastWifiPeerCloudConfiguredRef.current = false;
                 if (mainViewRef.current === 'tree' && !wifiAutoSyncingRef.current) {
                   if (wifiBubbleTimerRef.current !== null) {
                     window.clearTimeout(wifiBubbleTimerRef.current);
@@ -2818,15 +2891,23 @@ export default function App() {
               } else if (status === 'end') {
                 clearWifiIncomingSafetyTimer();
                 setWifiImageVersion((v) => v + 1);
-                if (mainViewRef.current === 'tree' && !wifiAutoSyncingRef.current) {
+                if (!wifiAutoSyncingRef.current) {
                   const hasWifiConflict = docsRef.current.some(
                     (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
                   );
-                  if (hasWifiConflict) {
-                    setWifiQuickBubble(null);
-                  } else {
-                    setWifiQuickBubble({ status: 'done', text: '同步完成' });
-                    scheduleHideWifiBubble(TOOLBAR_TOAST_DURATION_MS);
+                  if (mainViewRef.current === 'tree') {
+                    if (hasWifiConflict) {
+                      setWifiQuickBubble(null);
+                    } else {
+                      setWifiQuickBubble({ status: 'done', text: '同步完成' });
+                      scheduleHideWifiBubble(TOOLBAR_TOAST_DURATION_MS);
+                    }
+                  }
+                  if (!hasWifiConflict) {
+                    triggerPostWifiCloudSyncRef.current(
+                      false,
+                      lastWifiPeerCloudConfiguredRef.current
+                    );
                   }
                 }
               }
@@ -2927,7 +3008,7 @@ export default function App() {
       setWifiQuickBubble({ status: 'syncing' });
 
       try {
-        await runWifiBidirectionalSync({
+        const summary = await runWifiBidirectionalSync({
           host: candidate.ip,
           port: candidate.port,
           password,
@@ -2945,16 +3026,19 @@ export default function App() {
         });
         setWifiImageVersion((v) => v + 1);
 
+        const hasWifiConflict = docsRef.current.some(
+          (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
+        );
         if (appMountedRef.current && mainViewRef.current === 'tree') {
-          const hasWifiConflict = docsRef.current.some(
-            (d) => !d.deleted && d.pendingRemoteProgress?.source === 'wifi'
-          );
           if (hasWifiConflict) {
             setWifiQuickBubble(null);
           } else {
             setWifiQuickBubble({ status: 'done', text: '同步完成' });
             scheduleHideWifiBubble(TOOLBAR_TOAST_DURATION_MS);
           }
+        }
+        if (!hasWifiConflict) {
+          triggerPostWifiCloudSyncRef.current(true, summary.peerCloudConfigured);
         }
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err || '');

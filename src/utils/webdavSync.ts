@@ -448,6 +448,7 @@ function toManifestDocEntry(doc: ArticleDoc, cloudBodySynced?: boolean): Manifes
       : doc.readAnchorText ||
         (doc.content ? extractReadAnchorText(doc.content, doc.lastCharOffset ?? 0) : undefined) ||
         undefined,
+    progressOverrideAt: doc.progressOverrideAt || undefined,
     encrypted: Boolean(doc.encrypted),
     format: doc.format ?? 'txt',
     cloudBodySynced: Boolean(cloudBodySynced ?? doc.cloudBodySynced),
@@ -631,13 +632,21 @@ export async function runAutoMetadataProgressSync(
         d.lastSyncedProgress ?? 0
       )
   );
+  const hasUnpushedProgressOverride = localDocs.some(
+    (d) =>
+      !d.deleted &&
+      !d.pendingRemoteProgress &&
+      typeof d.progressOverrideAt === 'number' &&
+      d.progressOverrideAt > (d.lastSyncedReadAt ?? 0)
+  );
 
   const shouldBypass304 =
     hasLocalChanges ||
     hasPendingPurges ||
     hasEligibleUnbackedShortDoc ||
     hasRemoteShortDocToAutoPull ||
-    hasUnpushedLocalProgress;
+    hasUnpushedLocalProgress ||
+    hasUnpushedProgressOverride;
 
   // Step 1: Conditional fetch _manifest.json (304 = 0 bytes when unchanged)
   requestCount++;
@@ -1014,87 +1023,175 @@ export async function runAutoMetadataProgressSync(
     // Reading progress merge (Plan B open-book confirmation + last-synced baseline + text anchor guard)
     // Never overwrite or clear an active Wi-Fi progress conflict waiting for user resolution in Directory Mode
     if (localDoc.pendingRemoteProgress?.source !== 'wifi') {
-      const progMerge = reconcileReadingProgress(localDoc, remoteEntry, 'cloud');
-      if (progMerge.action === 'pull') {
-        const pulledOffset = progMerge.resolvedRemoteOffset;
-        nextLocal = {
-          ...nextLocal,
-          readProgress: progMerge.resolvedRemoteProgress,
-          lastCharOffset: pulledOffset,
-          lastScrollTop: Math.max(0, Math.round(remoteEntry.lastScrollTop ?? 0)),
-          lastMode: remoteEntry.lastMode ?? nextLocal.lastMode ?? 'read',
-          lastReadAt: remoteEntry.lastReadAt ?? progMerge.resolvedRemoteReadAt,
-          readAnchorText:
-            progMerge.resolvedRemoteAnchor ||
-            (nextLocal.content ? extractReadAnchorText(nextLocal.content, pulledOffset) : nextLocal.readAnchorText),
-          lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? pulledOffset,
-          lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
-          lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
-          pendingRemoteProgress: null,
-        };
-        pulledProgressDocIds[localDoc.id] = pulledOffset;
-        didPull = true;
-      } else if (progMerge.action === 'push') {
+      const localOverrideAt = localDoc.progressOverrideAt ?? 0;
+      const remoteOverrideAt = remoteEntry.progressOverrideAt ?? 0;
+      const remoteReadTs = Math.max(remoteEntry.lastReadAt ?? 0, remoteOverrideAt);
+      const localReadTs = Math.max(localDoc.lastReadAt ?? 0, localOverrideAt);
+      const localAuthoritativeOverride =
+        localOverrideAt > remoteOverrideAt && localOverrideAt > remoteReadTs;
+      const remoteAuthoritativeOverride =
+        remoteOverrideAt > localOverrideAt && remoteOverrideAt > localReadTs;
+
+      if (localAuthoritativeOverride) {
+        // Explicit user conflict resolution (e.g. from Wi-Fi sync) directly overrides older cloud progress
         const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
         const localAnchor = localDoc.encrypted
           ? undefined
           : localDoc.readAnchorText ||
             (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : undefined) ||
             undefined;
+        const syncedTs = Math.max(localDoc.lastReadAt ?? 0, localOverrideAt);
         nextRemoteEntry.readProgress = localDoc.readProgress;
         nextRemoteEntry.lastCharOffset = localOffset;
         nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
         nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
-        nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? Date.now();
+        nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? localOverrideAt;
         nextRemoteEntry.readAnchorText = localAnchor;
+        nextRemoteEntry.progressOverrideAt = localOverrideAt;
         nextLocal = {
           ...nextLocal,
           readAnchorText: localDoc.readAnchorText || localAnchor,
-          lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? localOffset,
-          lastSyncedProgress: progMerge.nextBaseline?.progress ?? localDoc.readProgress,
-          lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? (localDoc.lastReadAt ?? 0),
+          lastSyncedCharOffset: localOffset,
+          lastSyncedProgress: localDoc.readProgress,
+          lastSyncedReadAt: syncedTs,
           pendingRemoteProgress: null,
         };
         needManifestPush = true;
-      } else if (progMerge.action === 'prompt' && progMerge.pendingRemoteProgress) {
-        // Protect both local and cloud — stash remote progress for explicit user choice on book open
-        if (!pendingRemoteProgressEqual(localDoc.pendingRemoteProgress, progMerge.pendingRemoteProgress)) {
-          nextLocal = {
-            ...nextLocal,
-            pendingRemoteProgress: progMerge.pendingRemoteProgress,
-          };
-          didPull = true;
-        }
+      } else if (remoteAuthoritativeOverride) {
+        // Another device explicitly resolved a conflict and pushed to cloud; adopt cleanly without re-prompting
+        const rawRemoteOffset = Math.max(0, Math.round(remoteEntry.lastCharOffset ?? 0));
+        const relocated =
+          nextLocal.content && remoteEntry.readAnchorText
+            ? relocateCharOffsetByAnchor(nextLocal.content, rawRemoteOffset, remoteEntry.readAnchorText)
+            : null;
+        const pulledOffset = relocated?.matched ? relocated.offset : rawRemoteOffset;
+        const pulledProgress =
+          relocated?.matched && Math.abs(relocated.offset - rawRemoteOffset) >= 60
+            ? relocated.progress
+            : (remoteEntry.readProgress ?? 0);
+        const syncedTs = Math.max(remoteEntry.lastReadAt ?? 0, remoteOverrideAt);
+        nextLocal = {
+          ...nextLocal,
+          readProgress: pulledProgress,
+          lastCharOffset: pulledOffset,
+          lastScrollTop: relocated?.matched ? 0 : Math.max(0, Math.round(remoteEntry.lastScrollTop ?? 0)),
+          lastMode: remoteEntry.lastMode ?? nextLocal.lastMode ?? 'read',
+          lastReadAt: remoteEntry.lastReadAt ?? remoteOverrideAt,
+          readAnchorText:
+            remoteEntry.readAnchorText ||
+            (nextLocal.content && !nextLocal.encrypted
+              ? extractReadAnchorText(nextLocal.content, pulledOffset)
+              : nextLocal.readAnchorText),
+          lastSyncedCharOffset: pulledOffset,
+          lastSyncedProgress: pulledProgress,
+          lastSyncedReadAt: syncedTs,
+          progressOverrideAt: remoteOverrideAt,
+          pendingRemoteProgress: null,
+        };
+        pulledProgressDocIds[localDoc.id] = pulledOffset;
+        didPull = true;
       } else {
-        // action === 'noop': progress within tolerance; align baseline & clear stale pending prompt
-        const baselineChanged =
-          progMerge.nextBaseline &&
-          (localDoc.lastSyncedCharOffset !== progMerge.nextBaseline.charOffset ||
-            localDoc.lastSyncedProgress !== progMerge.nextBaseline.progress ||
-            Boolean(localDoc.pendingRemoteProgress));
-        if (baselineChanged && progMerge.nextBaseline) {
+        const progMerge = reconcileReadingProgress(localDoc, remoteEntry, 'cloud');
+        if (progMerge.action === 'pull') {
+          const pulledOffset = progMerge.resolvedRemoteOffset;
           nextLocal = {
             ...nextLocal,
-            lastSyncedCharOffset: progMerge.nextBaseline.charOffset,
-            lastSyncedProgress: progMerge.nextBaseline.progress,
-            lastSyncedReadAt: progMerge.nextBaseline.readAt,
+            readProgress: progMerge.resolvedRemoteProgress,
+            lastCharOffset: pulledOffset,
+            lastScrollTop: Math.max(0, Math.round(remoteEntry.lastScrollTop ?? 0)),
+            lastMode: remoteEntry.lastMode ?? nextLocal.lastMode ?? 'read',
+            lastReadAt: remoteEntry.lastReadAt ?? progMerge.resolvedRemoteReadAt,
+            readAnchorText:
+              progMerge.resolvedRemoteAnchor ||
+              (nextLocal.content ? extractReadAnchorText(nextLocal.content, pulledOffset) : nextLocal.readAnchorText),
+            lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? pulledOffset,
+            lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
+            lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
+            progressOverrideAt:
+              remoteOverrideAt > localOverrideAt ? remoteOverrideAt : nextLocal.progressOverrideAt,
             pendingRemoteProgress: null,
           };
+          pulledProgressDocIds[localDoc.id] = pulledOffset;
           didPull = true;
-        }
-        if (progMerge.silentMinorAlign === 'local-to-remote') {
+        } else if (progMerge.action === 'push') {
           const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
+          const localAnchor = localDoc.encrypted
+            ? undefined
+            : localDoc.readAnchorText ||
+              (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : undefined) ||
+              undefined;
           nextRemoteEntry.readProgress = localDoc.readProgress;
           nextRemoteEntry.lastCharOffset = localOffset;
           nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
           nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
-          nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? nextRemoteEntry.lastReadAt;
-          if (!localDoc.encrypted) {
-            nextRemoteEntry.readAnchorText =
-              localDoc.readAnchorText ||
-              (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : nextRemoteEntry.readAnchorText);
+          nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? Date.now();
+          nextRemoteEntry.readAnchorText = localAnchor;
+          if (localOverrideAt > remoteOverrideAt) {
+            nextRemoteEntry.progressOverrideAt = localOverrideAt;
           }
+          nextLocal = {
+            ...nextLocal,
+            readAnchorText: localDoc.readAnchorText || localAnchor,
+            lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? localOffset,
+            lastSyncedProgress: progMerge.nextBaseline?.progress ?? localDoc.readProgress,
+            lastSyncedReadAt: Math.max(
+              progMerge.nextBaseline?.readAt ?? (localDoc.lastReadAt ?? 0),
+              localOverrideAt
+            ),
+            pendingRemoteProgress: null,
+          };
           needManifestPush = true;
+        } else if (progMerge.action === 'prompt' && progMerge.pendingRemoteProgress) {
+          // Protect both local and cloud — stash remote progress for explicit user choice on book open
+          if (!pendingRemoteProgressEqual(localDoc.pendingRemoteProgress, progMerge.pendingRemoteProgress)) {
+            nextLocal = {
+              ...nextLocal,
+              pendingRemoteProgress: progMerge.pendingRemoteProgress,
+            };
+            didPull = true;
+          }
+        } else {
+          // action === 'noop': progress within tolerance; align baseline & clear stale pending prompt
+          const baselineChanged =
+            progMerge.nextBaseline &&
+            (localDoc.lastSyncedCharOffset !== progMerge.nextBaseline.charOffset ||
+              localDoc.lastSyncedProgress !== progMerge.nextBaseline.progress ||
+              Boolean(localDoc.pendingRemoteProgress) ||
+              remoteOverrideAt > localOverrideAt);
+          if (baselineChanged && progMerge.nextBaseline) {
+            nextLocal = {
+              ...nextLocal,
+              lastSyncedCharOffset: progMerge.nextBaseline.charOffset,
+              lastSyncedProgress: progMerge.nextBaseline.progress,
+              lastSyncedReadAt: Math.max(
+                progMerge.nextBaseline.readAt,
+                localOverrideAt,
+                remoteOverrideAt
+              ),
+              progressOverrideAt:
+                remoteOverrideAt > localOverrideAt ? remoteOverrideAt : nextLocal.progressOverrideAt,
+              pendingRemoteProgress: null,
+            };
+            didPull = true;
+          }
+          if (localOverrideAt > remoteOverrideAt) {
+            nextRemoteEntry.progressOverrideAt = localOverrideAt;
+            needManifestPush = true;
+          }
+          if (progMerge.silentMinorAlign === 'local-to-remote') {
+            const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
+            nextRemoteEntry.readProgress = localDoc.readProgress;
+            nextRemoteEntry.lastCharOffset = localOffset;
+            nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
+            nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
+            nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? nextRemoteEntry.lastReadAt;
+            if (!localDoc.encrypted) {
+              nextRemoteEntry.readAnchorText =
+                localDoc.readAnchorText ||
+                (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : nextRemoteEntry.readAnchorText);
+            }
+            needManifestPush = true;
+          }
         }
       }
     }
@@ -1319,7 +1416,8 @@ export async function runAutoMetadataProgressSync(
               (rEntry.encrypted ? undefined : extractReadAnchorText(downloaded.content, finalOffset) || undefined),
             lastSyncedCharOffset: finalOffset,
             lastSyncedProgress: finalProgress,
-            lastSyncedReadAt: rEntry.lastReadAt ?? 0,
+            lastSyncedReadAt: Math.max(rEntry.lastReadAt ?? 0, rEntry.progressOverrideAt ?? 0),
+            progressOverrideAt: rEntry.progressOverrideAt || undefined,
             pendingRemoteProgress: null,
             encrypted: Boolean(rEntry.encrypted),
             format: rEntry.format ?? 'txt',
@@ -1362,7 +1460,8 @@ export async function runAutoMetadataProgressSync(
         readAnchorText: rEntry.encrypted ? undefined : rEntry.readAnchorText,
         lastSyncedCharOffset: Math.max(0, Math.round(rEntry.lastCharOffset ?? 0)),
         lastSyncedProgress: rEntry.readProgress ?? 0,
-        lastSyncedReadAt: rEntry.lastReadAt ?? 0,
+        lastSyncedReadAt: Math.max(rEntry.lastReadAt ?? 0, rEntry.progressOverrideAt ?? 0),
+        progressOverrideAt: rEntry.progressOverrideAt || undefined,
         pendingRemoteProgress: null,
         encrypted: Boolean(rEntry.encrypted),
         format: rEntry.format ?? 'txt',

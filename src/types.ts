@@ -80,6 +80,7 @@ export interface ManifestDocEntry {
   lastScrollTop?: number;
   lastCharOffset?: number;
   readAnchorText?: string;
+  progressOverrideAt?: number;
   encrypted?: boolean;
   format?: 'txt' | 'md';
   cloudBodySynced?: boolean;
