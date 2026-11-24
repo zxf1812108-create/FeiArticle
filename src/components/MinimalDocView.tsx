@@ -100,7 +100,7 @@ const DOC_LINE_HEIGHT = '1.62';
 const DOC_LINE_HEIGHT_NUM = 1.62;
 const VIRTUAL_THRESHOLD_BLOCKS = 200;
 const CHUNK_SIZE = 40;
-const OVERSCAN_CHUNKS = 2;
+const OVERSCAN_CHUNKS = 3;
 
 // Small LRU cache so reopening a large document from directory mode is instantaneous (0ms)
 interface ParsedDocCacheEntry {
@@ -155,20 +155,40 @@ function findBlockIndexByCharOffset(blocks: BlockNode[], charOffset: number): nu
   return best;
 }
 
+function estimateWrappedLines(text: string, fontSize: number, availWidth: number): number {
+  const safeWidth = Math.max(180, availWidth);
+  const emPerLine = Math.max(10, safeWidth / Math.max(10, fontSize));
+  const hardLines = text.split('\n');
+  let total = 0;
+  for (let i = 0; i < hardLines.length; i++) {
+    const line = hardLines[i];
+    if (!line) {
+      total += 1;
+      continue;
+    }
+    let visualEms = 0;
+    for (let j = 0; j < line.length; j++) {
+      visualEms += line.charCodeAt(j) > 255 ? 1.0 : 0.56;
+    }
+    total += Math.max(1, Math.ceil(visualEms / emPerLine));
+  }
+  return Math.max(1, total);
+}
+
 function estimateBlockHeight(block: BlockNode, fontSize: number, contentWidth: number): number {
   const linePx = fontSize * DOC_LINE_HEIGHT_NUM;
-  const charsPerLine = Math.max(14, Math.floor(Math.max(240, contentWidth) / (fontSize * 0.92)));
+  const safeWidth = Math.max(240, contentWidth);
   switch (block.type) {
     case 'heading': {
-      const lines = Math.max(1, Math.ceil(block.text.length / Math.max(10, charsPerLine * 0.9)));
+      const lines = estimateWrappedLines(block.text, fontSize * 1.08, safeWidth);
       return Math.round(lines * linePx * 1.1 + 26);
     }
     case 'paragraph': {
-      const lines = Math.max(1, Math.ceil(block.text.length / charsPerLine));
+      const lines = estimateWrappedLines(block.text, fontSize, safeWidth);
       return Math.round(lines * linePx + 12);
     }
     case 'blockquote': {
-      const lines = Math.max(1, Math.ceil(block.text.length / Math.max(12, charsPerLine - 4)));
+      const lines = estimateWrappedLines(block.text, fontSize * 0.94, safeWidth - 32);
       return Math.round(lines * linePx + 36);
     }
     case 'code': {
@@ -178,7 +198,7 @@ function estimateBlockHeight(block: BlockNode, fontSize: number, contentWidth: n
     case 'list': {
       let total = 16;
       for (const item of block.items) {
-        total += Math.max(1, Math.ceil(item.length / Math.max(12, charsPerLine - 3))) * linePx + 6;
+        total += estimateWrappedLines(item, fontSize, safeWidth - 24) * linePx + 6;
       }
       return Math.round(total);
     }
@@ -720,6 +740,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const measuredChunkHeightsRef = useRef<number[]>([]);
     const chunkElMapRef = useRef<Map<number, HTMLDivElement>>(new Map());
     const pendingJumpRef = useRef<PendingJumpTarget | null>(null);
+    const pendingWindowAnchorRef = useRef<{ chunkIdx: number; prevClientOffset: number } | null>(null);
+    const prevLayoutMountedRangeRef = useRef<{ start: number; end: number } | null>(null);
 
     // Reset measured heights when document/typography/width changes
     const layoutKey = `${doc.id}|${content.length}|${fontSize}|${autoHyphenate ? '1' : '0'}|${Math.round(contentWidth)}`;
@@ -793,21 +815,128 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return chunkCount - 1;
     };
 
+    const measureMountedChunksNow = (): void => {
+      if (!isVirtualized || chunkCount === 0) return;
+      const cur = mountedRangeRef.current;
+      const safeStart = Math.max(0, cur.start);
+      const safeEnd = Math.min(chunkCount - 1, cur.end);
+      for (let c = safeStart; c <= safeEnd; c++) {
+        const node = chunkElMapRef.current.get(c);
+        if (!node) continue;
+        const measured = Math.round(node.offsetHeight);
+        if (measured > 0) {
+          measuredChunkHeightsRef.current[c] = measured;
+        }
+      }
+    };
+    const measureMountedChunksNowRef = useRef(measureMountedChunksNow);
+    measureMountedChunksNowRef.current = measureMountedChunksNow;
+
     const syncMountedWindowToScroll = (scrollTop: number, viewHeight: number) => {
       if (!isVirtualized || chunkCount === 0) return;
-      const firstVis = findChunkIndexAtY(Math.max(0, scrollTop));
-      const lastVis = findChunkIndexAtY(Math.max(0, scrollTop + Math.max(200, viewHeight)));
+      // Always sync live DOM chunk heights before computing window boundaries or unmounting top chunks
+      measureMountedChunksNow();
+
       const cur = mountedRangeRef.current;
+      const el = scrollRef.current;
+      const safeViewHeight = Math.max(200, viewHeight);
+      const safeStart = Math.max(0, Math.min(chunkCount - 1, cur.start));
+      const safeEnd = Math.max(safeStart, Math.min(chunkCount - 1, cur.end));
 
-      // Only slide window when approaching within 1 chunk of the mounted boundary so mid-window page turns cause 0 React renders
-      const nearTop = firstVis <= cur.start && cur.start > 0;
-      const nearBottom = lastVis >= cur.end && cur.end < chunkCount - 1;
-      const outOfRange = firstVis > cur.end || lastVis < cur.start;
+      let firstVis = -1;
+      let lastVis = -1;
+      let needBottomExpand = false;
+      let needTopExpand = false;
+      let elRectTop = 0;
 
-      if (nearTop || nearBottom || outOfRange) {
-        const nextStart = Math.max(0, firstVis - OVERSCAN_CHUNKS);
-        const nextEnd = Math.min(chunkCount - 1, lastVis + OVERSCAN_CHUNKS);
+      let outBelowMounted = false;
+      let outAboveMounted = false;
+
+      // Primary path: inspect REAL DOM bounding rects of currently mounted chunks so stale estimates
+      // or font/image reflows can NEVER strand the viewport inside an empty top/bottom spacer
+      if (el) {
+        elRectTop = el.getBoundingClientRect().top;
+        const firstNode = chunkElMapRef.current.get(safeStart);
+        const lastNode = chunkElMapRef.current.get(safeEnd);
+        if (firstNode && lastNode) {
+          const mountedTopClient = firstNode.getBoundingClientRect().top - elRectTop;
+          const mountedBottomClient = lastNode.getBoundingClientRect().bottom - elRectTop;
+          const overlapsViewport = mountedBottomClient >= -4 && mountedTopClient <= safeViewHeight + 4;
+
+          if (overlapsViewport) {
+            for (let c = safeStart; c <= safeEnd; c++) {
+              const node = chunkElMapRef.current.get(c);
+              if (!node) continue;
+              const r = node.getBoundingClientRect();
+              const topC = r.top - elRectTop;
+              const bottomC = r.bottom - elRectTop;
+              if (bottomC >= 0 && topC <= safeViewHeight) {
+                if (firstVis === -1) firstVis = c;
+                lastVis = c;
+              }
+            }
+            if (firstVis === -1) {
+              firstVis = mountedTopClient > safeViewHeight ? safeStart : safeEnd;
+              lastVis = firstVis;
+            }
+            // Keep at least ~1.2 full screens of real DOM buffered both below and above viewport
+            needBottomExpand = safeEnd < chunkCount - 1 && mountedBottomClient < safeViewHeight * 2.2;
+            needTopExpand = safeStart > 0 && mountedTopClient > -safeViewHeight * 1.2;
+          } else if (mountedBottomClient < -4) {
+            outBelowMounted = true;
+          } else if (mountedTopClient > safeViewHeight + 4) {
+            outAboveMounted = true;
+          }
+        }
+      }
+
+      // Fallback path when viewport jumped completely outside the currently mounted DOM range
+      if (firstVis === -1 || lastVis === -1) {
+        firstVis = findChunkIndexAtY(Math.max(0, scrollTop));
+        lastVis = findChunkIndexAtY(Math.max(0, scrollTop + safeViewHeight));
+        if (outBelowMounted && safeEnd < chunkCount - 1) {
+          firstVis = Math.max(firstVis, Math.min(chunkCount - 1, safeEnd + 1));
+          lastVis = Math.max(lastVis, firstVis);
+          needBottomExpand = true;
+        } else if (outAboveMounted && safeStart > 0) {
+          lastVis = Math.min(lastVis, Math.max(0, safeStart - 1));
+          firstVis = Math.min(firstVis, lastVis);
+          needTopExpand = true;
+        }
+      }
+
+      const nearTop = firstVis <= safeStart && safeStart > 0;
+      const nearBottom = lastVis >= safeEnd && safeEnd < chunkCount - 1;
+      const outOfRange = firstVis > safeEnd || lastVis < safeStart;
+
+      if (nearTop || nearBottom || outOfRange || needTopExpand || needBottomExpand) {
+        let nextStart = Math.max(0, firstVis - OVERSCAN_CHUNKS);
+        let nextEnd = Math.min(chunkCount - 1, lastVis + OVERSCAN_CHUNKS);
+
+        // If DOM chunks are short and pixel buffer is still low even at OVERSCAN_CHUNKS, grow window further
+        if (needBottomExpand && nextEnd <= safeEnd) {
+          nextEnd = Math.min(chunkCount - 1, safeEnd + OVERSCAN_CHUNKS);
+        }
+        if (needTopExpand && nextStart >= safeStart) {
+          nextStart = Math.max(0, safeStart - OVERSCAN_CHUNKS);
+        }
+
         if (nextStart !== cur.start || nextEnd !== cur.end) {
+          // Record a live DOM anchor chunk in the overlap so scroll position stays pixel-locked across window slides
+          if (el && !pendingJumpRef.current) {
+            const overlapStart = Math.max(safeStart, nextStart);
+            const overlapEnd = Math.min(safeEnd, nextEnd);
+            if (overlapStart <= overlapEnd) {
+              const anchorIdx = Math.min(overlapEnd, Math.max(overlapStart, firstVis));
+              const anchorNode = chunkElMapRef.current.get(anchorIdx);
+              if (anchorNode) {
+                pendingWindowAnchorRef.current = {
+                  chunkIdx: anchorIdx,
+                  prevClientOffset: anchorNode.getBoundingClientRect().top - elRectTop,
+                };
+              }
+            }
+          }
           mountedRangeRef.current = { start: nextStart, end: nextEnd };
           setMountedRange({ start: nextStart, end: nextEnd });
         }
@@ -978,6 +1107,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       lastReportedPageKeyRef.current = '';
       restoredDocIdRef.current = null;
       pendingJumpRef.current = null;
+      pendingWindowAnchorRef.current = null;
+      prevLayoutMountedRangeRef.current = null;
       measuredChunkHeightsRef.current = [];
       clearTypographyLock();
       if (debounceScrollRef.current) {
@@ -1112,6 +1243,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     scheduleEdgeClipUpdateRef.current = scheduleEdgeClipUpdate;
 
     const handleDocImageLoaded = useCallback(() => {
+      measureMountedChunksNowRef.current();
       scheduleEdgeClipUpdateRef.current();
     }, []);
 
@@ -1197,11 +1329,20 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return true;
     };
 
-    // Measure mounted virtual chunks synchronously & compensate scrollTop if chunks above viewport changed height
+    // Measure mounted virtual chunks synchronously & keep viewport pixel-locked across window slides
     useLayoutEffect(() => {
-      if (!isVirtualized) return;
+      if (!isVirtualized) {
+        prevLayoutMountedRangeRef.current = null;
+        return;
+      }
       const el = scrollRef.current;
       if (!el) return;
+
+      const prevRange = prevLayoutMountedRangeRef.current;
+      const rangeChanged =
+        prevRange !== null &&
+        (prevRange.start !== mountedRange.start || prevRange.end !== mountedRange.end);
+      prevLayoutMountedRangeRef.current = { start: mountedRange.start, end: mountedRange.end };
 
       const viewTop = el.scrollTop;
       const firstVisChunk = findChunkIndexAtY(Math.max(0, viewTop));
@@ -1215,13 +1356,30 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         const prev = measuredChunkHeightsRef.current[c] || chunkEstimatedHeights[c] || 0;
         if (measured !== prev) {
           measuredChunkHeightsRef.current[c] = measured;
-          if (c < firstVisChunk && !pendingJumpRef.current) {
+          // Only accumulate fallback aboveDelta for chunks that newly entered the mounted window above viewport
+          const wasMounted = prevRange !== null && c >= prevRange.start && c <= prevRange.end;
+          if (rangeChanged && !wasMounted && c < firstVisChunk && !pendingJumpRef.current) {
             aboveDelta += measured - prev;
           }
         }
       }
 
-      if (aboveDelta !== 0 && !pendingJumpRef.current) {
+      // Prefer exact live DOM anchor compensation over estimated aboveDelta to prevent any drift/blank gap
+      const winAnchor = pendingWindowAnchorRef.current;
+      pendingWindowAnchorRef.current = null;
+      if (winAnchor && !pendingJumpRef.current) {
+        const anchorNode = chunkElMapRef.current.get(winAnchor.chunkIdx);
+        if (anchorNode) {
+          const elRectTop = el.getBoundingClientRect().top;
+          const newClientOffset = anchorNode.getBoundingClientRect().top - elRectTop;
+          const delta = Math.round(newClientOffset - winAnchor.prevClientOffset);
+          if (Math.abs(delta) >= 1) {
+            lastProgrammaticScrollAtRef.current = performance.now();
+            el.scrollTop = Math.max(0, el.scrollTop + delta);
+            lastProgrammaticScrollTopRef.current = el.scrollTop;
+          }
+        }
+      } else if (aboveDelta !== 0 && !pendingJumpRef.current) {
         lastProgrammaticScrollAtRef.current = performance.now();
         el.scrollTop = Math.max(0, el.scrollTop + aboveDelta);
         lastProgrammaticScrollTopRef.current = el.scrollTop;
@@ -1249,6 +1407,27 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
         updateEdgeClips();
         reportReadProgress();
+        return;
+      }
+
+      // Self-healing guard: if viewport is still not covered by real mounted DOM (e.g. ultra-short chunks),
+      // immediately expand/re-center the window so a blank spacer page can never persist
+      if (restoredDocIdRef.current === doc.id && el.clientHeight > 0) {
+        const firstNode = chunkElMapRef.current.get(mountedRange.start);
+        const lastNode = chunkElMapRef.current.get(mountedRange.end);
+        if (firstNode && lastNode) {
+          const elRectTop = el.getBoundingClientRect().top;
+          const mountedTopClient = firstNode.getBoundingClientRect().top - elRectTop;
+          const mountedBottomClient = lastNode.getBoundingClientRect().bottom - elRectTop;
+          const uncoveredBottom =
+            mountedRange.end < chunkCount - 1 && mountedBottomClient < el.clientHeight + 40;
+          const uncoveredTop = mountedRange.start > 0 && mountedTopClient > -40;
+          if (uncoveredBottom || uncoveredTop) {
+            syncMountedWindowToScroll(el.scrollTop, el.clientHeight);
+          }
+        }
+        updateEdgeClips();
+        reportReadProgress();
       }
     }, [isVirtualized, mountedRange, fontSize, autoHyphenate, contentWidth, doc.id, content]);
 
@@ -1268,13 +1447,27 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const ro = new ResizeObserver(() => {
         const nextW = Math.round(articleEl.clientWidth);
         if (nextW > 120) {
-          setContentWidth((prev) => (Math.abs(prev - nextW) > 6 ? nextW : prev));
+          setContentWidth((prev) => {
+            if (Math.abs(prev - nextW) <= 6) return prev;
+            // Capture reading anchor before contentWidth resets virtual chunk heights so scroll never drifts
+            if (
+              restoredDocIdRef.current === doc.id &&
+              !pendingTypographyAnchorRef.current &&
+              el.scrollTop > 10
+            ) {
+              const anchorOffset = captureCurrentCharOffset();
+              pendingTypographyAnchorRef.current = { kind: 'read', charOffset: anchorOffset };
+              typographyLockUntilRef.current = Date.now() + 1200;
+            }
+            return nextW;
+          });
         }
         const needed = isVirtualized || articleEl.offsetHeight + 24 > el.clientHeight;
         setArticleOverflow((prev) => (prev === needed ? prev : needed));
         if (pendingTypographyAnchorRef.current && Date.now() <= typographyLockUntilRef.current) {
           applyTypographyAnchorIfLocked();
         } else {
+          measureMountedChunksNowRef.current();
           scheduleEdgeClipUpdate();
         }
       });
@@ -1294,6 +1487,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         rafId = window.requestAnimationFrame(() => {
           rafId = null;
           if (cancelled) return;
+          measureMountedChunksNowRef.current();
           if (pendingTypographyAnchorRef.current && Date.now() <= typographyLockUntilRef.current) {
             applyTypographyAnchorIfLocked();
           } else {
