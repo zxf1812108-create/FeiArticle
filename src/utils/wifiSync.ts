@@ -5,6 +5,11 @@ import { StorageDirectoryConfig } from './storage';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
 import { isTrashExpired, purgeExpiredTrash } from './trash';
 import { isDocBodyMissing } from './webdavSync';
+import {
+  extractReadAnchorText,
+  reconcileReadingProgress,
+  relocateCharOffsetByAnchor,
+} from './progressSync';
 
 export const DEFAULT_WIFI_SYNC_PORT = 48765;
 
@@ -38,6 +43,7 @@ export interface WifiDocCatalogMeta {
   lastMode?: 'read' | 'edit';
   lastScrollTop?: number;
   lastCharOffset?: number;
+  readAnchorText?: string;
   encrypted?: boolean;
   format?: 'txt' | 'md';
   cloudBodySynced?: boolean;
@@ -212,6 +218,11 @@ export function buildWifiCatalogSnapshot(
       lastMode: d.lastMode ?? 'read',
       lastScrollTop: d.lastScrollTop ?? 0,
       lastCharOffset: d.lastCharOffset ?? 0,
+      readAnchorText: d.encrypted
+        ? undefined
+        : d.readAnchorText ||
+          (d.content ? extractReadAnchorText(d.content, d.lastCharOffset ?? 0) : undefined) ||
+          undefined,
       encrypted: Boolean(d.encrypted),
       format: d.format ?? 'txt',
       cloudBodySynced: Boolean(d.cloudBodySynced),
@@ -228,19 +239,19 @@ export function buildWifiCatalogSnapshot(
   };
 }
 
-function getEffectiveProgressTs(
-  lastReadAt: number | null | undefined,
-  readProgress: number | undefined,
-  lastCharOffset: number | undefined,
-  fallbackUpdatedAt: number
-): number {
-  if (typeof lastReadAt === 'number' && Number.isFinite(lastReadAt) && lastReadAt > 0) {
-    return lastReadAt;
-  }
-  if ((lastCharOffset ?? 0) > 0 || (readProgress ?? 0) > 0) {
-    return fallbackUpdatedAt;
-  }
-  return 0;
+function pendingWifiProgressEqual(
+  a?: ArticleDoc['pendingRemoteProgress'],
+  b?: ArticleDoc['pendingRemoteProgress']
+): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return (
+    Math.round(a.lastCharOffset) === Math.round(b.lastCharOffset) &&
+    Math.round(a.readProgress * 1000) === Math.round(b.readProgress * 1000) &&
+    a.lastReadAt === b.lastReadAt &&
+    (a.anchorText || '') === (b.anchorText || '') &&
+    a.source === b.source
+  );
 }
 
 /**
@@ -345,6 +356,11 @@ export function mergeWifiCatalogIntoLocal(
         lastMode: pd.lastMode ?? 'read',
         lastScrollTop: pd.lastScrollTop ?? 0,
         lastCharOffset: pd.lastCharOffset ?? 0,
+        readAnchorText: pd.encrypted ? undefined : pd.readAnchorText,
+        lastSyncedCharOffset: Math.max(0, Math.round(pd.lastCharOffset ?? 0)),
+        lastSyncedProgress: pd.readProgress ?? 0,
+        lastSyncedReadAt: pd.lastReadAt ?? 0,
+        pendingRemoteProgress: null,
         encrypted: Boolean(pd.encrypted),
         format: pd.format ?? 'txt',
         cloudBodySynced: Boolean(pd.cloudBodySynced),
@@ -362,28 +378,49 @@ export function mergeWifiCatalogIntoLocal(
     }
 
     let updated = { ...ld };
-    const localProgressTs = getEffectiveProgressTs(
-      ld.lastReadAt,
-      ld.readProgress,
-      ld.lastCharOffset,
-      ld.updatedAt
-    );
-    const peerProgressTs = getEffectiveProgressTs(
-      pd.lastReadAt,
-      pd.readProgress,
-      pd.lastCharOffset,
-      pd.updatedAt
-    );
-    if (peerProgressTs > localProgressTs) {
+    const progMerge = reconcileReadingProgress(ld, pd, 'wifi');
+    if (progMerge.action === 'pull') {
       updated = {
         ...updated,
-        readProgress: pd.readProgress,
-        lastCharOffset: Math.max(0, Math.round(pd.lastCharOffset ?? 0)),
+        readProgress: progMerge.resolvedRemoteProgress,
+        lastCharOffset: progMerge.resolvedRemoteOffset,
         lastScrollTop: Math.max(0, Math.round(pd.lastScrollTop ?? 0)),
         lastMode: pd.lastMode ?? updated.lastMode ?? 'read',
-        lastReadAt: pd.lastReadAt ?? peerProgressTs,
+        lastReadAt: pd.lastReadAt ?? progMerge.resolvedRemoteReadAt,
+        readAnchorText:
+          progMerge.resolvedRemoteAnchor ||
+          (updated.content
+            ? extractReadAnchorText(updated.content, progMerge.resolvedRemoteOffset)
+            : updated.readAnchorText),
+        lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? progMerge.resolvedRemoteOffset,
+        lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
+        lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
+        pendingRemoteProgress: null,
       };
       changed = true;
+    } else if (progMerge.action === 'prompt' && progMerge.pendingRemoteProgress) {
+      if (!pendingWifiProgressEqual(ld.pendingRemoteProgress, progMerge.pendingRemoteProgress)) {
+        updated = {
+          ...updated,
+          pendingRemoteProgress: progMerge.pendingRemoteProgress,
+        };
+        changed = true;
+      }
+    } else if (progMerge.action === 'noop' && progMerge.nextBaseline) {
+      if (
+        ld.lastSyncedCharOffset !== progMerge.nextBaseline.charOffset ||
+        ld.lastSyncedProgress !== progMerge.nextBaseline.progress ||
+        Boolean(ld.pendingRemoteProgress)
+      ) {
+        updated = {
+          ...updated,
+          lastSyncedCharOffset: progMerge.nextBaseline.charOffset,
+          lastSyncedProgress: progMerge.nextBaseline.progress,
+          lastSyncedReadAt: progMerge.nextBaseline.readAt,
+          pendingRemoteProgress: null,
+        };
+        changed = true;
+      }
     }
 
     if (pd.updatedAt > ld.updatedAt) {
@@ -819,18 +856,45 @@ export function applyWifiReceivedDocToDocs(
     return prevDocs;
   }
   const excerpt = existing.encrypted ? '' : extractExcerpt(payload.content);
-  return prevDocs.map((d) =>
-    d.id === payload.id
-      ? {
-          ...d,
-          content: payload.content,
-          contentHash: payload.contentHash,
-          byteSize: payload.byteSize,
-          excerpt,
-          format: payload.format ?? d.format ?? 'txt',
-          updatedAt: Math.max(d.updatedAt, payload.updatedAt),
-          syncStatus: 'synced',
-        }
-      : d
-  );
+  return prevDocs.map((d) => {
+    if (d.id !== payload.id) return d;
+    const prevOffset = Math.max(0, Math.round(d.lastCharOffset ?? 0));
+    const anchor =
+      d.readAnchorText ||
+      (d.content && prevOffset > 0 ? extractReadAnchorText(d.content, prevOffset) : undefined);
+    const relocated =
+      anchor && prevOffset > 0 && payload.content
+        ? relocateCharOffsetByAnchor(payload.content, prevOffset, anchor)
+        : null;
+    const nextPending =
+      d.pendingRemoteProgress && payload.content
+        ? (() => {
+            const p = d.pendingRemoteProgress;
+            const rp = relocateCharOffsetByAnchor(payload.content, p.lastCharOffset, p.anchorText);
+            return rp.matched
+              ? { ...p, lastCharOffset: rp.offset, readProgress: rp.progress }
+              : p;
+          })()
+        : d.pendingRemoteProgress;
+
+    return {
+      ...d,
+      content: payload.content,
+      contentHash: payload.contentHash,
+      byteSize: payload.byteSize,
+      excerpt,
+      format: payload.format ?? d.format ?? 'txt',
+      updatedAt: Math.max(d.updatedAt, payload.updatedAt),
+      syncStatus: 'synced',
+      pendingRemoteProgress: nextPending,
+      ...(relocated?.matched
+        ? {
+            lastCharOffset: relocated.offset,
+            readProgress: relocated.progress,
+            lastScrollTop: 0,
+            readAnchorText: extractReadAnchorText(payload.content, relocated.offset) || anchor,
+          }
+        : {}),
+    };
+  });
 }

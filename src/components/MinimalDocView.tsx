@@ -49,6 +49,7 @@ export interface DocViewStateSnapshot {
 
 export interface DocReadMetrics {
   progress: number;
+  progressDecimals: number;
   currentPage: number;
   totalPages: number;
 }
@@ -820,17 +821,17 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     const computeReadMetrics = (): DocReadMetrics => {
       if (!contentRef.current.trim()) {
-        return { progress: 0, currentPage: 1, totalPages: 1 };
+        return { progress: 0, progressDecimals: 0, currentPage: 1, totalPages: 1 };
       }
       const el = scrollRef.current;
       const articleEl = articleRef.current;
       if (!el || !articleEl) {
-        return { progress: doc.readProgress ?? 0, currentPage: 1, totalPages: 1 };
+        return { progress: doc.readProgress ?? 0, progressDecimals: 0, currentPage: 1, totalPages: 1 };
       }
 
       const viewHeight = el.clientHeight;
       if (viewHeight <= 0) {
-        return { progress: doc.readProgress ?? 0, currentPage: 1, totalPages: 1 };
+        return { progress: doc.readProgress ?? 0, progressDecimals: 0, currentPage: 1, totalPages: 1 };
       }
 
       const containerRect = el.getBoundingClientRect();
@@ -840,28 +841,43 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const effectiveMax = Math.max(0, articleBottom - viewHeight);
 
       if (effectiveMax <= 4) {
-        return { progress: 100, currentPage: 1, totalPages: 1 };
+        return { progress: 100, progressDecimals: 0, currentPage: 1, totalPages: 1 };
       }
 
       // Effective height advanced per screen turn (accounting for edge-line alignment)
       const effectivePageStep = Math.max(100, viewHeight - Math.round(fontSize * 1.0));
       const totalPages = Math.max(2, 1 + Math.ceil(effectiveMax / effectivePageStep));
 
+      // Minimum decimal places (0..3) such that 2 consecutive page turns ALWAYS change the displayed value
+      const conservativePageStep = Math.max(80, viewHeight - Math.round(fontSize * 2.5));
+      const twoPageDeltaPct = ((2 * conservativePageStep) / effectiveMax) * 100;
+      let progressDecimals = 0;
+      if (twoPageDeltaPct < 1) {
+        if (twoPageDeltaPct >= 0.1) {
+          progressDecimals = 1;
+        } else if (twoPageDeltaPct >= 0.01) {
+          progressDecimals = 2;
+        } else {
+          progressDecimals = 3;
+        }
+      }
+
       if (el.scrollTop <= 2) {
-        return { progress: 0, currentPage: 1, totalPages };
+        return { progress: 0, progressDecimals, currentPage: 1, totalPages };
       }
 
       if (el.scrollTop >= effectiveMax - 4) {
-        return { progress: 100, currentPage: totalPages, totalPages };
+        return { progress: 100, progressDecimals, currentPage: totalPages, totalPages };
       }
 
-      const progress = Math.min(100, Math.max(0, Math.round((el.scrollTop / effectiveMax) * 100)));
+      const rawPct = Math.min(100, Math.max(0, (el.scrollTop / effectiveMax) * 100));
+      const progress = Math.round(rawPct * 1000) / 1000;
       const currentPage = Math.min(
         totalPages,
         Math.max(1, 1 + Math.round(el.scrollTop / effectivePageStep))
       );
 
-      return { progress, currentPage, totalPages };
+      return { progress, progressDecimals, currentPage, totalPages };
     };
 
     const computeReadProgress = (): number => computeReadMetrics().progress;
@@ -872,7 +888,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         lastReportedProgressRef.current = metrics.progress;
         onReadProgressChangeRef.current?.(metrics.progress);
       }
-      const pageKey = `${metrics.progress}|${metrics.currentPage}/${metrics.totalPages}`;
+      const pageKey = `${metrics.progress}|${metrics.progressDecimals}|${metrics.currentPage}/${metrics.totalPages}`;
       if (pageKey !== lastReportedPageKeyRef.current) {
         lastReportedPageKeyRef.current = pageKey;
         onReadMetricsChangeRef.current?.(metrics);
@@ -983,6 +999,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (doc.content !== contentRef.current) {
         setContent(doc.content);
         contentRef.current = doc.content;
+        restoredDocIdRef.current = null;
       }
     }, [doc.content]);
 

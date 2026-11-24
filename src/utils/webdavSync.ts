@@ -19,6 +19,12 @@ import {
 } from './inbox';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
 import { isTrashExpired, purgeExpiredTrash } from './trash';
+import {
+  extractReadAnchorText,
+  isProgressMeaningfullyDifferent,
+  reconcileReadingProgress,
+  relocateCharOffsetByAnchor,
+} from './progressSync';
 
 interface ProxyResponse {
   ok: boolean;
@@ -437,6 +443,11 @@ function toManifestDocEntry(doc: ArticleDoc, cloudBodySynced?: boolean): Manifes
     lastMode: doc.lastMode ?? 'read',
     lastScrollTop: doc.lastScrollTop ?? 0,
     lastCharOffset: doc.lastCharOffset ?? 0,
+    readAnchorText: doc.encrypted
+      ? undefined
+      : doc.readAnchorText ||
+        (doc.content ? extractReadAnchorText(doc.content, doc.lastCharOffset ?? 0) : undefined) ||
+        undefined,
     encrypted: Boolean(doc.encrypted),
     format: doc.format ?? 'txt',
     cloudBodySynced: Boolean(cloudBodySynced ?? doc.cloudBodySynced),
@@ -468,19 +479,19 @@ export interface AutoSyncOutcome {
   wasRateLimited?: boolean;
 }
 
-function getEffectiveProgressTs(
-  lastReadAt: number | null | undefined,
-  readProgress: number | undefined,
-  lastCharOffset: number | undefined,
-  fallbackUpdatedAt: number
-): number {
-  if (typeof lastReadAt === 'number' && Number.isFinite(lastReadAt) && lastReadAt > 0) {
-    return lastReadAt;
-  }
-  if ((lastCharOffset ?? 0) > 0 || (readProgress ?? 0) > 0) {
-    return fallbackUpdatedAt;
-  }
-  return 0;
+function pendingRemoteProgressEqual(
+  a?: ArticleDoc['pendingRemoteProgress'],
+  b?: ArticleDoc['pendingRemoteProgress']
+): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return (
+    Math.round(a.lastCharOffset) === Math.round(b.lastCharOffset) &&
+    Math.round(a.readProgress * 1000) === Math.round(b.readProgress * 1000) &&
+    a.lastReadAt === b.lastReadAt &&
+    (a.anchorText || '') === (b.anchorText || '') &&
+    a.source === b.source
+  );
 }
 
 function tagsEqual(a?: string[], b?: string[]): boolean {
@@ -504,15 +515,6 @@ function catalogFieldsDiffer(localDoc: ArticleDoc, remoteEntry: ManifestDocEntry
     (localDoc.deletedByFolderId ?? undefined) !== (remoteEntry.deletedByFolderId ?? undefined) ||
     Boolean(localDoc.encrypted) !== Boolean(remoteEntry.encrypted) ||
     !tagsEqual(localDoc.tags, remoteEntry.tags)
-  );
-}
-
-function progressFieldsDiffer(localDoc: ArticleDoc, remoteEntry: ManifestDocEntry): boolean {
-  return (
-    Math.round(localDoc.readProgress ?? 0) !== Math.round(remoteEntry.readProgress ?? 0) ||
-    Math.round(localDoc.lastCharOffset ?? 0) !== Math.round(remoteEntry.lastCharOffset ?? 0) ||
-    Math.round(localDoc.lastScrollTop ?? 0) !== Math.round(remoteEntry.lastScrollTop ?? 0) ||
-    (localDoc.lastMode ?? 'read') !== (remoteEntry.lastMode ?? 'read')
   );
 }
 
@@ -617,11 +619,25 @@ export async function runAutoMetadataProgressSync(
       )
   );
 
+  const hasUnpushedLocalProgress = localDocs.some(
+    (d) =>
+      !d.deleted &&
+      !d.pendingRemoteProgress &&
+      typeof d.lastSyncedCharOffset === 'number' &&
+      isProgressMeaningfullyDifferent(
+        d.lastCharOffset ?? 0,
+        d.readProgress ?? 0,
+        d.lastSyncedCharOffset,
+        d.lastSyncedProgress ?? 0
+      )
+  );
+
   const shouldBypass304 =
     hasLocalChanges ||
     hasPendingPurges ||
     hasEligibleUnbackedShortDoc ||
-    hasRemoteShortDocToAutoPull;
+    hasRemoteShortDocToAutoPull ||
+    hasUnpushedLocalProgress;
 
   // Step 1: Conditional fetch _manifest.json (304 = 0 bytes when unchanged)
   requestCount++;
@@ -967,10 +983,15 @@ export async function runAutoMetadataProgressSync(
           cloudSynced = true;
         }
       }
+      const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
       const nextLocal: ArticleDoc = {
         ...localDoc,
         cloudBodySynced: cloudSynced,
         syncStatus: localMissingBody ? 'remote-only' : 'synced',
+        lastSyncedCharOffset: localOffset,
+        lastSyncedProgress: localDoc.readProgress ?? 0,
+        lastSyncedReadAt: localDoc.lastReadAt ?? 0,
+        pendingRemoteProgress: null,
       };
       mergedDocsMap.set(localDoc.id, nextLocal);
       nextRemoteDocs[localDoc.id] = toManifestDocEntry(nextLocal, cloudSynced);
@@ -989,39 +1010,87 @@ export async function runAutoMetadataProgressSync(
     const nextRemoteEntry: ManifestDocEntry = { ...remoteEntry };
     let cloudSynced = Boolean(remoteEntry.cloudBodySynced);
 
-    // Reading progress merge (independent per-book LWW by lastReadAt)
-    const localProgressTs = getEffectiveProgressTs(
-      localDoc.lastReadAt,
-      localDoc.readProgress,
-      localDoc.lastCharOffset,
-      localDoc.updatedAt
-    );
-    const remoteProgressTs = getEffectiveProgressTs(
-      remoteEntry.lastReadAt,
-      remoteEntry.readProgress,
-      remoteEntry.lastCharOffset,
-      remoteEntry.updatedAt
-    );
-
-    if (progressFieldsDiffer(localDoc, remoteEntry)) {
-      if (remoteProgressTs > localProgressTs) {
-        const pulledOffset = Math.max(0, Math.round(remoteEntry.lastCharOffset ?? 0));
+    // Reading progress merge (Plan B open-book confirmation + last-synced baseline + text anchor guard)
+    const progMerge = reconcileReadingProgress(localDoc, remoteEntry, 'cloud');
+    if (progMerge.action === 'pull') {
+      const pulledOffset = progMerge.resolvedRemoteOffset;
+      nextLocal = {
+        ...nextLocal,
+        readProgress: progMerge.resolvedRemoteProgress,
+        lastCharOffset: pulledOffset,
+        lastScrollTop: Math.max(0, Math.round(remoteEntry.lastScrollTop ?? 0)),
+        lastMode: remoteEntry.lastMode ?? nextLocal.lastMode ?? 'read',
+        lastReadAt: remoteEntry.lastReadAt ?? progMerge.resolvedRemoteReadAt,
+        readAnchorText:
+          progMerge.resolvedRemoteAnchor ||
+          (nextLocal.content ? extractReadAnchorText(nextLocal.content, pulledOffset) : nextLocal.readAnchorText),
+        lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? pulledOffset,
+        lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
+        lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
+        pendingRemoteProgress: null,
+      };
+      pulledProgressDocIds[localDoc.id] = pulledOffset;
+      didPull = true;
+    } else if (progMerge.action === 'push') {
+      const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
+      const localAnchor = localDoc.encrypted
+        ? undefined
+        : localDoc.readAnchorText ||
+          (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : undefined) ||
+          undefined;
+      nextRemoteEntry.readProgress = localDoc.readProgress;
+      nextRemoteEntry.lastCharOffset = localOffset;
+      nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
+      nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
+      nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? Date.now();
+      nextRemoteEntry.readAnchorText = localAnchor;
+      nextLocal = {
+        ...nextLocal,
+        readAnchorText: localDoc.readAnchorText || localAnchor,
+        lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? localOffset,
+        lastSyncedProgress: progMerge.nextBaseline?.progress ?? localDoc.readProgress,
+        lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? (localDoc.lastReadAt ?? 0),
+        pendingRemoteProgress: null,
+      };
+      needManifestPush = true;
+    } else if (progMerge.action === 'prompt' && progMerge.pendingRemoteProgress) {
+      // Protect both local and cloud — stash remote progress for explicit user choice on book open
+      if (!pendingRemoteProgressEqual(localDoc.pendingRemoteProgress, progMerge.pendingRemoteProgress)) {
         nextLocal = {
           ...nextLocal,
-          readProgress: remoteEntry.readProgress,
-          lastCharOffset: pulledOffset,
-          lastScrollTop: Math.max(0, Math.round(remoteEntry.lastScrollTop ?? 0)),
-          lastMode: remoteEntry.lastMode ?? nextLocal.lastMode ?? 'read',
-          lastReadAt: remoteEntry.lastReadAt ?? remoteProgressTs,
+          pendingRemoteProgress: progMerge.pendingRemoteProgress,
         };
-        pulledProgressDocIds[localDoc.id] = pulledOffset;
         didPull = true;
-      } else if (localProgressTs > remoteProgressTs) {
+      }
+    } else {
+      // action === 'noop': progress within tolerance; align baseline & clear stale pending prompt
+      const baselineChanged =
+        progMerge.nextBaseline &&
+        (localDoc.lastSyncedCharOffset !== progMerge.nextBaseline.charOffset ||
+          localDoc.lastSyncedProgress !== progMerge.nextBaseline.progress ||
+          Boolean(localDoc.pendingRemoteProgress));
+      if (baselineChanged && progMerge.nextBaseline) {
+        nextLocal = {
+          ...nextLocal,
+          lastSyncedCharOffset: progMerge.nextBaseline.charOffset,
+          lastSyncedProgress: progMerge.nextBaseline.progress,
+          lastSyncedReadAt: progMerge.nextBaseline.readAt,
+          pendingRemoteProgress: null,
+        };
+        didPull = true;
+      }
+      if (progMerge.silentMinorAlign === 'local-to-remote') {
+        const localOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
         nextRemoteEntry.readProgress = localDoc.readProgress;
-        nextRemoteEntry.lastCharOffset = Math.max(0, Math.round(localDoc.lastCharOffset ?? 0));
+        nextRemoteEntry.lastCharOffset = localOffset;
         nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
         nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
-        nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? localProgressTs;
+        nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? nextRemoteEntry.lastReadAt;
+        if (!localDoc.encrypted) {
+          nextRemoteEntry.readAnchorText =
+            localDoc.readAnchorText ||
+            (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : nextRemoteEntry.readAnchorText);
+        }
         needManifestPush = true;
       }
     }
@@ -1094,6 +1163,11 @@ export async function runAutoMetadataProgressSync(
       ) {
         const downloaded = await downloadShortDocBody(remoteEntry);
         if (downloaded) {
+          const anchor = nextLocal.readAnchorText || remoteEntry.readAnchorText;
+          const relocated =
+            anchor && (nextLocal.lastCharOffset ?? 0) > 0
+              ? relocateCharOffsetByAnchor(downloaded.content, nextLocal.lastCharOffset ?? 0, anchor)
+              : null;
           nextLocal = {
             ...nextLocal,
             content: downloaded.content,
@@ -1103,6 +1177,14 @@ export async function runAutoMetadataProgressSync(
             updatedAt: remoteEntry.updatedAt,
             syncStatus: 'synced',
             cloudBodySynced: true,
+            ...(relocated?.matched
+              ? {
+                  lastCharOffset: relocated.offset,
+                  readProgress: relocated.progress,
+                  lastScrollTop: 0,
+                  readAnchorText: extractReadAnchorText(downloaded.content, relocated.offset) || anchor,
+                }
+              : {}),
           };
           cloudSynced = true;
           didPull = true;
@@ -1123,6 +1205,11 @@ export async function runAutoMetadataProgressSync(
       ) {
         const downloaded = await downloadShortDocBody(remoteEntry);
         if (downloaded) {
+          const anchor = nextLocal.readAnchorText || remoteEntry.readAnchorText;
+          const relocated =
+            anchor && (nextLocal.lastCharOffset ?? 0) > 0
+              ? relocateCharOffsetByAnchor(downloaded.content, nextLocal.lastCharOffset ?? 0, anchor)
+              : null;
           nextLocal = {
             ...nextLocal,
             content: downloaded.content,
@@ -1132,6 +1219,14 @@ export async function runAutoMetadataProgressSync(
             updatedAt: Math.max(nextLocal.updatedAt, remoteEntry.updatedAt),
             syncStatus: 'synced',
             cloudBodySynced: true,
+            ...(relocated?.matched
+              ? {
+                  lastCharOffset: relocated.offset,
+                  readProgress: relocated.progress,
+                  lastScrollTop: 0,
+                  readAnchorText: extractReadAnchorText(downloaded.content, relocated.offset) || anchor,
+                }
+              : {}),
           };
           cloudSynced = true;
           didPull = true;
@@ -1193,6 +1288,13 @@ export async function runAutoMetadataProgressSync(
       ) {
         const downloaded = await downloadShortDocBody(rEntry);
         if (downloaded) {
+          const initialOffset = Math.max(0, Math.round(rEntry.lastCharOffset ?? 0));
+          const relocated =
+            rEntry.readAnchorText && initialOffset > 0
+              ? relocateCharOffsetByAnchor(downloaded.content, initialOffset, rEntry.readAnchorText)
+              : null;
+          const finalOffset = relocated?.matched ? relocated.offset : initialOffset;
+          const finalProgress = relocated?.matched ? relocated.progress : (rEntry.readProgress ?? 0);
           const pulledDoc: ArticleDoc = {
             id: rEntry.id,
             title: rEntry.title,
@@ -1203,11 +1305,18 @@ export async function runAutoMetadataProgressSync(
             excerpt: rEntry.encrypted ? '' : extractExcerpt(downloaded.content),
             tags: rEntry.tags || [],
             starred: Boolean(rEntry.starred),
-            readProgress: rEntry.readProgress ?? 0,
+            readProgress: finalProgress,
             lastReadAt: rEntry.lastReadAt ?? null,
             lastMode: rEntry.lastMode ?? 'read',
-            lastScrollTop: rEntry.lastScrollTop ?? 0,
-            lastCharOffset: rEntry.lastCharOffset ?? 0,
+            lastScrollTop: relocated?.matched ? 0 : (rEntry.lastScrollTop ?? 0),
+            lastCharOffset: finalOffset,
+            readAnchorText:
+              rEntry.readAnchorText ||
+              (rEntry.encrypted ? undefined : extractReadAnchorText(downloaded.content, finalOffset) || undefined),
+            lastSyncedCharOffset: finalOffset,
+            lastSyncedProgress: finalProgress,
+            lastSyncedReadAt: rEntry.lastReadAt ?? 0,
+            pendingRemoteProgress: null,
             encrypted: Boolean(rEntry.encrypted),
             format: rEntry.format ?? 'txt',
             cloudBodySynced: true,
@@ -1246,6 +1355,11 @@ export async function runAutoMetadataProgressSync(
         lastMode: rEntry.lastMode ?? 'read',
         lastScrollTop: rEntry.lastScrollTop ?? 0,
         lastCharOffset: rEntry.lastCharOffset ?? 0,
+        readAnchorText: rEntry.encrypted ? undefined : rEntry.readAnchorText,
+        lastSyncedCharOffset: Math.max(0, Math.round(rEntry.lastCharOffset ?? 0)),
+        lastSyncedProgress: rEntry.readProgress ?? 0,
+        lastSyncedReadAt: rEntry.lastReadAt ?? 0,
+        pendingRemoteProgress: null,
         encrypted: Boolean(rEntry.encrypted),
         format: rEntry.format ?? 'txt',
         cloudBodySynced: Boolean(rEntry.cloudBodySynced),

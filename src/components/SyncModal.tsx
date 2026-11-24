@@ -8,9 +8,9 @@ import {
   EyeOff,
   FileCode2,
   Folder,
-  Mic,
-  MicOff,
   Moon,
+  Music2,
+  Square,
   Sun,
   Trash2,
   Upload,
@@ -397,9 +397,9 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                   }`}
                 >
                   {whistleTesting ? (
-                    <MicOff className="w-3.5 h-3.5 shrink-0" strokeWidth={1.75} />
+                    <Square className="w-3 h-3 shrink-0 fill-current" strokeWidth={1.75} />
                   ) : (
-                    <Mic className="w-3.5 h-3.5 shrink-0" strokeWidth={1.75} />
+                    <Music2 className="w-3.5 h-3.5 shrink-0" strokeWidth={1.8} />
                   )}
                   <span>{whistleTestBusy ? '启动中…' : whistleTesting ? '停止测试' : '试吹测试'}</span>
                 </button>

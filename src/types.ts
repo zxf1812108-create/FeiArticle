@@ -20,6 +20,17 @@ export interface FolderNode {
   deletedAt?: number;
 }
 
+export interface PendingRemoteProgress {
+  readProgress: number;
+  lastCharOffset: number;
+  lastScrollTop: number;
+  lastMode?: 'read' | 'edit';
+  lastReadAt: number;
+  anchorText?: string;
+  source: 'cloud' | 'wifi';
+  detectedAt: number;
+}
+
 export interface ArticleDoc {
   id: string;
   title: string;
@@ -35,6 +46,11 @@ export interface ArticleDoc {
   lastMode?: 'read' | 'edit';
   lastScrollTop?: number;
   lastCharOffset?: number;
+  readAnchorText?: string;
+  lastSyncedCharOffset?: number;
+  lastSyncedProgress?: number;
+  lastSyncedReadAt?: number;
+  pendingRemoteProgress?: PendingRemoteProgress | null;
   encrypted?: boolean;
   format?: 'txt' | 'md';
   createdAt: number;
@@ -62,6 +78,7 @@ export interface ManifestDocEntry {
   lastMode?: 'read' | 'edit';
   lastScrollTop?: number;
   lastCharOffset?: number;
+  readAnchorText?: string;
   encrypted?: boolean;
   format?: 'txt' | 'md';
   cloudBodySynced?: boolean;

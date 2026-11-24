@@ -5,8 +5,8 @@ import {
   Download,
   Lock,
   LockOpen,
-  Mic,
   Minus,
+  Music2,
   Pencil,
   Plus,
   Scissors,
@@ -142,6 +142,11 @@ import {
   subscribeLanDirectActions,
 } from './utils/lanDirect';
 import { formatMicErrorMessage, WhistleDetector } from './utils/whistleDetector';
+import {
+  extractReadAnchorText,
+  relocateCharOffsetByAnchor,
+} from './utils/progressSync';
+import { ProgressConflictModal } from './components/ProgressConflictModal';
 
 type MainView = 'tree' | 'doc';
 
@@ -171,6 +176,18 @@ const InsertBelowIcon: React.FC<{ className?: string; strokeWidth?: number }> = 
     <rect x="5" y="16.5" width="14" height="3.8" rx="1.2" />
   </svg>
 );
+
+function formatAdaptiveProgressPercent(progress: number, decimals: number): string {
+  const clamped = Math.min(100, Math.max(0, Number.isFinite(progress) ? progress : 0));
+  if (clamped <= 0) return '0%';
+  if (clamped >= 100) return '100%';
+  const safeDecimals = Math.min(3, Math.max(0, Math.round(decimals)));
+  const factor = 10 ** safeDecimals;
+  const rounded = Math.round(clamped * factor) / factor;
+  if (rounded <= 0) return '0%';
+  if (rounded >= 100) return '100%';
+  return `${rounded.toFixed(safeDecimals)}%`;
+}
 
 export default function App() {
   const [folders, setFolders] = useState<FolderNode[]>(() => loadFolders());
@@ -226,9 +243,6 @@ export default function App() {
   const [autoHyphenate, setAutoHyphenate] = useState<boolean>(
     () => loadReaderSettings().autoHyphenate ?? true
   );
-  const [progressDisplayMode, setProgressDisplayMode] = useState<'percent' | 'pages'>(() =>
-    loadReaderSettings().progressDisplayMode === 'pages' ? 'pages' : 'percent'
-  );
   const [whistleSensitivity, setWhistleSensitivity] = useState<WhistleSensitivity>(() => {
     const raw = loadReaderSettings().whistleSensitivity;
     return raw === 'low' || raw === 'high' ? raw : 'medium';
@@ -237,10 +251,7 @@ export default function App() {
   const [whistleStarting, setWhistleStarting] = useState(false);
   const whistleDetectorRef = useRef<WhistleDetector | null>(null);
   const whistleIdleTimerRef = useRef<number | null>(null);
-  const [livePageInfo, setLivePageInfo] = useState<{ currentPage: number; totalPages: number }>({
-    currentPage: 1,
-    totalPages: 1,
-  });
+  const [liveProgressDecimals, setLiveProgressDecimals] = useState<number>(0);
   const [mdictDicts, setMdictDicts] = useState<MdictDictionarySummary[]>([]);
   const [activeMdictId, setActiveMdictId] = useState<string | null>(() => loadActiveMdictId());
   const [mdictLookup, setMdictLookup] = useState<{
@@ -287,6 +298,7 @@ export default function App() {
   const [toast, setToast] = useState<{ msg: string } | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const [windowDragging, setWindowDragging] = useState(false);
+  const [dismissedConflictKeys, setDismissedConflictKeys] = useState<Record<string, string>>({});
 
   const docViewRef = useRef<MinimalDocViewHandle>(null);
   const treeViewRef = useRef<MinimalTreeViewHandle>(null);
@@ -1421,10 +1433,10 @@ export default function App() {
     if (!current) return;
     const nextScroll = Math.max(0, Math.round(state.scrollTop));
     const nextCharOffset = Math.max(0, Math.round(state.charOffset));
-    const nextProgress = Math.min(100, Math.max(0, Math.round(state.readProgress)));
+    const nextProgress = Math.min(100, Math.max(0, Math.round(state.readProgress * 1000) / 1000));
     const prevScroll = Math.round(current.lastScrollTop ?? 0);
     const prevCharOffset = Math.round(current.lastCharOffset ?? 0);
-    const prevProgress = Math.round(current.readProgress ?? 0);
+    const prevProgress = Math.round((current.readProgress ?? 0) * 1000) / 1000;
     const prevMode = current.lastMode ?? 'read';
     if (
       prevMode === state.mode &&
@@ -1435,6 +1447,9 @@ export default function App() {
       return;
     }
     const now = Date.now();
+    const nextAnchor = current.content
+      ? extractReadAnchorText(current.content, nextCharOffset) || current.readAnchorText
+      : current.readAnchorText;
     const nextDocs = docsRef.current.map((d) =>
       d.id === docId
         ? {
@@ -1443,6 +1458,7 @@ export default function App() {
             lastScrollTop: nextScroll,
             lastCharOffset: nextCharOffset,
             readProgress: nextProgress,
+            readAnchorText: nextAnchor,
             lastReadAt: now,
             updatedAt: now,
           }
@@ -1462,9 +1478,135 @@ export default function App() {
     setActiveTarget(nextTarget);
     setSelectedDocId(docId);
     setLiveReadProgress(target?.readProgress ?? 0);
+    setLiveProgressDecimals(0);
+    // Plan B: clear session dismissal on book open so any unresolved pending progress prompts cleanly
+    setDismissedConflictKeys((prev) => {
+      if (!prev[docId]) return prev;
+      const next = { ...prev };
+      delete next[docId];
+      return next;
+    });
     setMainView('doc');
     // Pull any newer reading progress / directory changes silently (304 = 0 bytes if unchanged)
     void runSilentAutoSyncRef.current({ forcePullCheck: true });
+  };
+
+  const getConflictSnapshotKey = (doc: ArticleDoc): string => {
+    const p = doc.pendingRemoteProgress;
+    if (!p) return '';
+    return `${Math.round(p.lastCharOffset)}:${Math.round(p.readProgress * 1000)}:${p.lastReadAt}:${p.source}`;
+  };
+
+  const handleAcceptRemoteProgress = (docId: string) => {
+    const target = docsRef.current.find((d) => d.id === docId);
+    const pending = target?.pendingRemoteProgress;
+    if (!target || !pending) return;
+
+    const relocated = target.content
+      ? relocateCharOffsetByAnchor(target.content, pending.lastCharOffset, pending.anchorText)
+      : null;
+    const finalOffset = relocated?.matched
+      ? relocated.offset
+      : Math.max(0, Math.round(pending.lastCharOffset));
+    const finalProgress =
+      relocated?.matched && Math.abs(relocated.offset - pending.lastCharOffset) >= 60
+        ? relocated.progress
+        : pending.readProgress;
+    const finalAnchor =
+      (target.content ? extractReadAnchorText(target.content, finalOffset) : '') ||
+      pending.anchorText ||
+      target.readAnchorText;
+
+    const nextDocs = docsRef.current.map((d) =>
+      d.id === docId
+        ? {
+            ...d,
+            readProgress: finalProgress,
+            lastCharOffset: finalOffset,
+            lastScrollTop: relocated?.matched ? 0 : Math.max(0, Math.round(pending.lastScrollTop)),
+            lastMode: pending.lastMode ?? d.lastMode ?? 'read',
+            lastReadAt: pending.lastReadAt || Date.now(),
+            readAnchorText: finalAnchor || undefined,
+            lastSyncedCharOffset: Math.max(0, Math.round(pending.lastCharOffset)),
+            lastSyncedProgress: pending.readProgress,
+            lastSyncedReadAt: pending.lastReadAt,
+            pendingRemoteProgress: null,
+          }
+        : d
+    );
+    docsRef.current = nextDocs;
+    setDocs(nextDocs);
+    setDismissedConflictKeys((prev) => {
+      if (!prev[docId]) return prev;
+      const next = { ...prev };
+      delete next[docId];
+      return next;
+    });
+    setLiveReadProgress(finalProgress);
+    if (mainViewRef.current === 'doc' && selectedDocIdRef.current === docId) {
+      docViewRef.current?.jumpToCharOffset(finalOffset);
+    }
+    showToast(pending.source === 'wifi' ? '已同步至对端阅读进度' : '已同步至云端阅读进度');
+  };
+
+  const handleKeepLocalProgress = (docId: string) => {
+    const target = docsRef.current.find((d) => d.id === docId);
+    const pending = target?.pendingRemoteProgress;
+    if (!target || !pending) return;
+
+    // Flush the very latest viewport position so recent page turns aren't lost
+    let localOffset = Math.max(0, Math.round(target.lastCharOffset ?? 0));
+    let localProgress = target.readProgress ?? 0;
+    let localScrollTop = Math.max(0, Math.round(target.lastScrollTop ?? 0));
+    if (mainViewRef.current === 'doc' && selectedDocIdRef.current === docId && docViewRef.current) {
+      const live = docViewRef.current.flushAndCaptureViewState();
+      localOffset = Math.max(0, Math.round(live.charOffset));
+      localProgress = Math.min(100, Math.max(0, Math.round(live.readProgress * 1000) / 1000));
+      localScrollTop = Math.max(0, Math.round(live.scrollTop));
+    }
+
+    const overrideTs = Math.max(Date.now(), (pending.lastReadAt || 0) + 1000);
+    const localAnchor = target.content
+      ? extractReadAnchorText(target.content, localOffset) || target.readAnchorText
+      : target.readAnchorText;
+
+    const nextDocs = docsRef.current.map((d) =>
+      d.id === docId
+        ? {
+            ...d,
+            readProgress: localProgress,
+            lastCharOffset: localOffset,
+            lastScrollTop: localScrollTop,
+            readAnchorText: localAnchor,
+            lastReadAt: overrideTs,
+            updatedAt: Math.max(d.updatedAt, overrideTs),
+            // Acknowledge rejected remote snapshot as baseline so next sync pushes local cleanly even if offline right now
+            lastSyncedCharOffset: Math.max(0, Math.round(pending.lastCharOffset)),
+            lastSyncedProgress: pending.readProgress,
+            lastSyncedReadAt: pending.lastReadAt,
+            pendingRemoteProgress: null,
+          }
+        : d
+    );
+    docsRef.current = nextDocs;
+    setDocs(nextDocs);
+    setDismissedConflictKeys((prev) => {
+      if (!prev[docId]) return prev;
+      const next = { ...prev };
+      delete next[docId];
+      return next;
+    });
+    setFoldersDirty(true);
+    autoProgressDirtyRef.current = true;
+    autoMutationSeqRef.current++;
+    void runSilentAutoSyncRef.current({ bypassThrottle: true });
+    showToast(pending.source === 'wifi' ? '已保留本机进度' : '已保留本机进度并覆盖云端');
+  };
+
+  const handleDismissProgressConflict = (doc: ArticleDoc) => {
+    const key = getConflictSnapshotKey(doc);
+    if (!key) return;
+    setDismissedConflictKeys((prev) => ({ ...prev, [doc.id]: key }));
   };
 
   const handleExitDocToTree = () => {
@@ -1497,15 +1639,6 @@ export default function App() {
       const next = !prev;
       const current = loadReaderSettings();
       saveReaderSettings({ ...current, autoHyphenate: next });
-      return next;
-    });
-  };
-
-  const handleToggleProgressDisplayMode = () => {
-    setProgressDisplayMode((prev) => {
-      const next: 'percent' | 'pages' = prev === 'percent' ? 'pages' : 'percent';
-      const current = loadReaderSettings();
-      saveReaderSettings({ ...current, progressDisplayMode: next });
       return next;
     });
   };
@@ -2063,12 +2196,37 @@ export default function App() {
                 const downloadedBody =
                   curr.syncStatus === 'remote-only' && !curr.content && Boolean(next.content);
                 const cloudFlagChanged = Boolean(next.cloudBodySynced) !== Boolean(curr.cloudBodySynced);
-                if (!useNextProgress && !useNextCatalog && !downloadedBody && !cloudFlagChanged) {
+                const pendingChanged =
+                  (next.pendingRemoteProgress?.lastCharOffset ?? -1) !==
+                    (curr.pendingRemoteProgress?.lastCharOffset ?? -1) ||
+                  (next.pendingRemoteProgress?.lastReadAt ?? -1) !==
+                    (curr.pendingRemoteProgress?.lastReadAt ?? -1);
+                const baselineChanged =
+                  next.lastSyncedCharOffset !== curr.lastSyncedCharOffset ||
+                  next.lastSyncedProgress !== curr.lastSyncedProgress;
+                if (
+                  !useNextProgress &&
+                  !useNextCatalog &&
+                  !downloadedBody &&
+                  !cloudFlagChanged &&
+                  !pendingChanged &&
+                  !baselineChanged
+                ) {
                   return curr;
                 }
                 return {
                   ...curr,
                   cloudBodySynced: Boolean(next.cloudBodySynced),
+                  ...(pendingChanged
+                    ? { pendingRemoteProgress: next.pendingRemoteProgress ?? null }
+                    : {}),
+                  ...(baselineChanged
+                    ? {
+                        lastSyncedCharOffset: next.lastSyncedCharOffset,
+                        lastSyncedProgress: next.lastSyncedProgress,
+                        lastSyncedReadAt: next.lastSyncedReadAt,
+                      }
+                    : {}),
                   ...(downloadedBody
                     ? {
                         content: next.content,
@@ -2099,6 +2257,7 @@ export default function App() {
                         lastScrollTop: next.lastScrollTop,
                         lastMode: next.lastMode,
                         lastReadAt: next.lastReadAt,
+                        readAnchorText: next.readAnchorText ?? curr.readAnchorText,
                       }
                     : {}),
                 };
@@ -2212,11 +2371,22 @@ export default function App() {
       }
     };
 
+    const onOnline = () => {
+      if (mainViewRef.current === 'doc' && selectedDocIdRef.current && docViewRef.current) {
+        const captured = docViewRef.current.flushAndCaptureViewState();
+        handleUpdateDocViewState(selectedDocIdRef.current, captured);
+      }
+      autoSyncBackoffUntilRef.current = 0;
+      void runSilentAutoSyncRef.current({ forcePullCheck: true, bypassThrottle: true });
+    };
+
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('pagehide', flushAndPushIfDirty);
+    window.addEventListener('online', onOnline);
     return () => {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('pagehide', flushAndPushIfDirty);
+      window.removeEventListener('online', onOnline);
     };
   }, [webDavConfigured]);
 
@@ -2881,10 +3051,8 @@ export default function App() {
             onReadProgressChange={setLiveReadProgress}
             onReadMetricsChange={(metrics: DocReadMetrics) => {
               setLiveReadProgress(metrics.progress);
-              setLivePageInfo((prev) =>
-                prev.currentPage === metrics.currentPage && prev.totalPages === metrics.totalPages
-                  ? prev
-                  : { currentPage: metrics.currentPage, totalPages: metrics.totalPages }
+              setLiveProgressDecimals((prev) =>
+                prev === metrics.progressDecimals ? prev : metrics.progressDecimals
               );
             }}
             onFetchRemoteBody={() => handleFetchRemoteBody(selectedDoc.id)}
@@ -3200,12 +3368,12 @@ export default function App() {
                         if (suppressToolbarClickRef.current) return;
                         void handleToggleWhistlePageTurn();
                       }}
-                      aria-label={whistleEnabled ? '关闭声控翻页' : '开启声控翻页（吹口哨翻下一页）'}
+                      aria-label={whistleEnabled ? '关闭口哨翻页' : '开启口哨翻页'}
                       aria-pressed={whistleEnabled}
                       title={
                         whistleEnabled
-                          ? '声控翻页已开启，吹口哨翻下一页（点击关闭，可拖动调整位置）'
-                          : '开启声控翻页：吹口哨翻下一页（可拖动调整图标位置）'
+                          ? '口哨翻页已开启（点击关闭，可拖动调整图标位置）'
+                          : '开启口哨翻页（吹一声口哨翻下一页，可拖动调整图标位置）'
                       }
                       className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none disabled:opacity-50 ${
                         isDraggingThis
@@ -3215,7 +3383,7 @@ export default function App() {
                             : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
                       }`}
                     >
-                      <Mic className="w-[21px] h-[21px]" strokeWidth={1.8} />
+                      <Music2 className="w-[20px] h-[20px]" strokeWidth={1.8} />
                     </button>
                   );
                 }
@@ -3245,26 +3413,13 @@ export default function App() {
                 );
               })}
 
-              {/* 最右侧固定：阅读进度（点击在百分比与当前页数/总页数之间切换，不参与拖动排序） */}
-              <button
-                type="button"
-                onClick={handleToggleProgressDisplayMode}
-                aria-label={
-                  progressDisplayMode === 'pages'
-                    ? `当前第 ${livePageInfo.currentPage} 页，共 ${livePageInfo.totalPages} 页，点击切换为百分比进度`
-                    : `当前阅读进度 ${liveReadProgress}%，点击切换为页数显示`
-                }
-                title={
-                  progressDisplayMode === 'pages'
-                    ? '点击切换为百分比进度'
-                    : '点击切换为 当前页数/总页数'
-                }
-                className="ml-auto h-[40px] px-1.5 -mr-0.5 inline-flex items-center justify-center rounded-lg text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors select-none whitespace-nowrap shrink-0 cursor-pointer"
+              {/* 最右侧固定：自适应精度百分比阅读进度（不参与拖动排序，不可点击切换） */}
+              <span
+                aria-label={`当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}`}
+                className="ml-auto h-[40px] px-1.5 -mr-0.5 inline-flex items-center justify-end text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] select-none whitespace-nowrap shrink-0"
               >
-                {progressDisplayMode === 'pages'
-                  ? `${livePageInfo.currentPage}/${livePageInfo.totalPages}`
-                  : `${liveReadProgress}%`}
-              </button>
+                {formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}
+              </span>
             </>
           )}
         </div>
@@ -3385,6 +3540,21 @@ export default function App() {
           onClose={() => setShowTrashModal(false)}
         />
       )}
+
+      {/* Plan-B Reading Progress Confirmation Modal (on book open or immediately if already open) */}
+      {mainView === 'doc' &&
+        selectedDoc &&
+        selectedDoc.pendingRemoteProgress &&
+        Boolean(selectedDoc.content) &&
+        dismissedConflictKeys[selectedDoc.id] !== getConflictSnapshotKey(selectedDoc) && (
+          <ProgressConflictModal
+            doc={selectedDoc}
+            pending={selectedDoc.pendingRemoteProgress}
+            onAcceptRemote={() => handleAcceptRemoteProgress(selectedDoc.id)}
+            onKeepLocal={() => handleKeepLocalProgress(selectedDoc.id)}
+            onDismiss={() => handleDismissProgressConflict(selectedDoc)}
+          />
+        )}
 
       {/* Font Size & Hyphenation Adjuster Popover in Browse Mode */}
       {mainView === 'doc' && showFontSizeBar && (

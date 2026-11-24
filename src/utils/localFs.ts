@@ -2,6 +2,7 @@ import { Capacitor, PluginListenerHandle, registerPlugin } from '@capacitor/core
 import { ArticleDoc, FolderNode } from '../types';
 import { LocalStorageBackendMode, StorageDirectoryConfig } from './storage';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
+import { extractReadAnchorText, relocateCharOffsetByAnchor } from './progressSync';
 
 export interface FsBatchOp {
   op: 'mkdir' | 'write' | 'delete' | 'rmdirIfEmpty';
@@ -123,6 +124,10 @@ interface LocalFsIndexDocMeta {
   lastCharOffset: number;
   lastScrollTop: number;
   lastReadAt: number | null;
+  readAnchorText?: string;
+  lastSyncedCharOffset?: number;
+  lastSyncedProgress?: number;
+  lastSyncedReadAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -853,6 +858,10 @@ function buildDesiredWorkspaceLayout(
       lastCharOffset: d.lastCharOffset ?? 0,
       lastScrollTop: d.lastScrollTop ?? 0,
       lastReadAt: d.lastReadAt ?? null,
+      readAnchorText: d.readAnchorText,
+      lastSyncedCharOffset: d.lastSyncedCharOffset,
+      lastSyncedProgress: d.lastSyncedProgress,
+      lastSyncedReadAt: d.lastSyncedReadAt,
       createdAt: d.createdAt,
       updatedAt: d.updatedAt,
     };
@@ -1166,6 +1175,10 @@ export async function scanAndMergeFromLocalFs(
       lastMode: 'read',
       lastScrollTop: indexed?.meta.lastScrollTop ?? 0,
       lastCharOffset: indexed?.meta.lastCharOffset ?? 0,
+      readAnchorText: indexed?.meta.readAnchorText,
+      lastSyncedCharOffset: indexed?.meta.lastSyncedCharOffset,
+      lastSyncedProgress: indexed?.meta.lastSyncedProgress,
+      lastSyncedReadAt: indexed?.meta.lastSyncedReadAt,
       format: file.format,
       createdAt: indexed?.meta.createdAt ?? (file.lastModified || now),
       updatedAt: indexed?.meta.updatedAt ?? (file.lastModified || now),
@@ -1392,6 +1405,13 @@ export function checkAndPullExternalLocalFsChanges(
         if (existingDoc.id === protectedDocId) {
           continue;
         }
+        const prevContent = existingDoc.content || '';
+        const prevOffset = Math.max(0, Math.round(existingDoc.lastCharOffset ?? 0));
+        const hasProgress = prevOffset > 0 || (existingDoc.readProgress ?? 0) > 0;
+        const anchorBeforeEdit =
+          existingDoc.readAnchorText ||
+          (prevContent && hasProgress ? extractReadAnchorText(prevContent, prevOffset) : '');
+
         const hash = diskHashes.get(relKey) || (await sha256Hex(diskContent));
         existingDoc.content = diskContent;
         existingDoc.contentHash = hash;
@@ -1399,6 +1419,31 @@ export function checkAndPullExternalLocalFsChanges(
         existingDoc.excerpt = extractExcerpt(diskContent);
         existingDoc.updatedAt = Math.max(file.lastModified || now, existingDoc.updatedAt + 1);
         existingDoc.syncStatus = 'dirty';
+
+        if (hasProgress && diskContent.length > 0) {
+          const relocated = relocateCharOffsetByAnchor(diskContent, prevOffset, anchorBeforeEdit);
+          existingDoc.lastCharOffset = relocated.offset;
+          existingDoc.readProgress = relocated.progress;
+          existingDoc.lastScrollTop = 0;
+          existingDoc.readAnchorText =
+            extractReadAnchorText(diskContent, relocated.offset) || anchorBeforeEdit || undefined;
+        }
+        if (existingDoc.pendingRemoteProgress && diskContent.length > 0) {
+          const p = existingDoc.pendingRemoteProgress;
+          const relocatedPending = relocateCharOffsetByAnchor(
+            diskContent,
+            p.lastCharOffset,
+            p.anchorText
+          );
+          if (relocatedPending.matched) {
+            existingDoc.pendingRemoteProgress = {
+              ...p,
+              lastCharOffset: relocatedPending.offset,
+              readProgress: relocatedPending.progress,
+            };
+          }
+        }
+
         updatedCount += 1;
         changed = true;
       }
@@ -1470,6 +1515,10 @@ export function checkAndPullExternalLocalFsChanges(
         lastMode: 'read',
         lastScrollTop: indexed?.meta.lastScrollTop ?? 0,
         lastCharOffset: indexed?.meta.lastCharOffset ?? 0,
+        readAnchorText: indexed?.meta.readAnchorText,
+        lastSyncedCharOffset: indexed?.meta.lastSyncedCharOffset,
+        lastSyncedProgress: indexed?.meta.lastSyncedProgress,
+        lastSyncedReadAt: indexed?.meta.lastSyncedReadAt,
         format: file.format,
         createdAt: indexed?.meta.createdAt ?? (file.lastModified || now),
         updatedAt: indexed?.meta.updatedAt ?? (file.lastModified || now),
