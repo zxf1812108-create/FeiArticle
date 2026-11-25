@@ -2483,6 +2483,7 @@ public class LocalStoragePlugin extends Plugin {
 import android.Manifest;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -2502,6 +2503,7 @@ import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebChromeClient;
+import java.util.Arrays;
 
 public class MainActivity extends BridgeActivity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -2775,15 +2777,45 @@ public class MainActivity extends BridgeActivity {
         applySystemBarAppearance(newConfig);
     }
 
+    private void updateBottomToolbarGestureExclusion(View content) {
+        if (content == null) return;
+        int w = content.getWidth();
+        int h = content.getHeight();
+        if (w <= 0 || h <= 0) return;
+        float density = getResources().getDisplayMetrics().density;
+        if (density <= 0f) density = 1f;
+        int toolbarHeightPx = Math.round(72f * density);
+        int cornerWidthPx = Math.round(72f * density);
+        int bottom = Math.max(0, h - content.getPaddingBottom());
+        int top = Math.max(0, bottom - toolbarHeightPx);
+        int leftStart = Math.max(0, content.getPaddingLeft());
+        int leftEnd = Math.min(w, leftStart + cornerWidthPx);
+        int rightEnd = Math.max(0, w - content.getPaddingRight());
+        int rightStart = Math.max(0, rightEnd - cornerWidthPx);
+        if (bottom > top && leftEnd > leftStart && rightEnd > rightStart) {
+            ViewCompat.setSystemGestureExclusionRects(
+                content,
+                Arrays.asList(
+                    new Rect(leftStart, top, leftEnd, bottom),
+                    new Rect(rightStart, top, rightEnd, bottom)
+                )
+            );
+        }
+    }
+
     private void applySystemBarAndCutoutInsets() {
         View content = findViewById(android.R.id.content);
         if (content == null) return;
         applySystemBarAppearance(getResources().getConfiguration());
+        content.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) ->
+            updateBottomToolbarGestureExclusion(v)
+        );
         ViewCompat.setOnApplyWindowInsetsListener(content, (v, windowInsets) -> {
             Insets bars = windowInsets.getInsets(
                 WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
             );
             v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            v.post(() -> updateBottomToolbarGestureExclusion(v));
             return WindowInsetsCompat.CONSUMED;
         });
         ViewCompat.requestApplyInsets(content);

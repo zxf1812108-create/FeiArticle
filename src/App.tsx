@@ -3884,7 +3884,82 @@ export default function App() {
     };
   }, []);
 
+  const computeEffectiveLongPressDelay = (eventTimeStamp: number): number => {
+    const nowPerf = typeof performance !== 'undefined' ? performance.now() : 0;
+    const rawLag =
+      nowPerf > 0 && eventTimeStamp > 0 && eventTimeStamp <= nowPerf
+        ? nowPerf - eventTimeStamp
+        : 0;
+    // Compensate Android system edge-gesture delivery buffering while keeping >= 160ms hold guard
+    const deliveryLag = rawLag >= 0 && rawLag <= 250 ? Math.min(160, rawLag) : 0;
+    return Math.max(160, TOOLBAR_LONG_PRESS_MS - deliveryLag);
+  };
+
+  const triggerProgressLongPress = () => {
+    progressLongPressTimerRef.current = null;
+    try {
+      navigator.vibrate?.(10);
+    } catch {
+      // ignore
+    }
+    handleToggleFocusToolbar();
+  };
+
+  const handleProgressLabelTouchStart = (e: React.TouchEvent<HTMLButtonElement>) => {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const touchId = touch.identifier;
+    const startX = touch.clientX;
+    const startY = touch.clientY;
+
+    const clearTimer = () => {
+      if (progressLongPressTimerRef.current !== null) {
+        window.clearTimeout(progressLongPressTimerRef.current);
+        progressLongPressTimerRef.current = null;
+      }
+    };
+
+    clearTimer();
+    progressLongPressTimerRef.current = window.setTimeout(
+      triggerProgressLongPress,
+      computeEffectiveLongPressDelay(e.timeStamp)
+    );
+
+    const onTouchMove = (moveEvent: TouchEvent) => {
+      for (let i = 0; i < moveEvent.touches.length; i++) {
+        const t = moveEvent.touches[i];
+        if (t.identifier === touchId) {
+          if (Math.hypot(t.clientX - startX, t.clientY - startY) >= 12) {
+            clearTimer();
+          }
+          break;
+        }
+      }
+    };
+
+    const cleanup = (endEvent: TouchEvent) => {
+      let matched = false;
+      for (let i = 0; i < endEvent.changedTouches.length; i++) {
+        if (endEvent.changedTouches[i].identifier === touchId) {
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) return;
+      clearTimer();
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', cleanup);
+      window.removeEventListener('touchcancel', cleanup);
+    };
+
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('touchend', cleanup, { passive: true });
+    window.addEventListener('touchcancel', cleanup, { passive: true });
+  };
+
   const handleProgressLabelPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    // Touch devices are handled directly via onTouchStart for zero pointer-translation lag
+    if (e.pointerType === 'touch') return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
 
     const pointerId = e.pointerId;
@@ -3899,15 +3974,10 @@ export default function App() {
     };
 
     clearTimer();
-    progressLongPressTimerRef.current = window.setTimeout(() => {
-      progressLongPressTimerRef.current = null;
-      try {
-        navigator.vibrate?.(10);
-      } catch {
-        // ignore
-      }
-      handleToggleFocusToolbar();
-    }, TOOLBAR_LONG_PRESS_MS);
+    progressLongPressTimerRef.current = window.setTimeout(
+      triggerProgressLongPress,
+      computeEffectiveLongPressDelay(e.timeStamp)
+    );
 
     const onPointerMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
@@ -4669,6 +4739,7 @@ export default function App() {
               {/* 最右侧固定：自适应精度百分比阅读进度（长按切换专注模式：隐藏/恢复其他工具栏图标） */}
               <button
                 type="button"
+                onTouchStart={handleProgressLabelTouchStart}
                 onPointerDown={handleProgressLabelPointerDown}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -4681,7 +4752,7 @@ export default function App() {
                     : `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，长按隐藏工具栏其他图标进入专注阅读`
                 }
                 title={focusToolbarHidden ? '长按恢复工具栏图标' : '长按隐藏其他图标进入专注阅读'}
-                className="ml-auto min-w-[56px] h-[46px] px-2 -mr-1 inline-flex items-center justify-end rounded-lg text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors touch-none select-none whitespace-nowrap shrink-0 cursor-pointer"
+                className="ml-auto min-w-[64px] h-[46px] px-2.5 inline-flex items-center justify-end rounded-lg text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors touch-none select-none whitespace-nowrap shrink-0 cursor-pointer"
               >
                 {formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}
               </button>
