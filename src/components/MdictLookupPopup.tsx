@@ -12,6 +12,7 @@ import { ArrowLeft, BookA, Maximize2, Minimize2, X } from 'lucide-react';
 import { MdictDictionarySummary, MdictLookupResult } from '../types';
 import { sanitizeMdictCss } from '../utils/mdict';
 import { stripDictExt } from '../utils/mdictStorage';
+import { hasCurlyQuotes, splitLatinQuoteSegments } from '../utils/quoteTypography';
 
 export interface MdictLookupPopupHandle {
   pageUp: () => void;
@@ -440,9 +441,50 @@ function sanitizeMdictEntryHtml(rawHtml: string): string {
   });
 
   decodeResidualEntitiesInBody(doc.body);
+  applyLatinQuoteTypographyInBody(doc.body);
   removeBackToTopElements(doc.body);
 
   return doc.body.innerHTML;
+}
+
+function applyLatinQuoteTypographyInBody(body: HTMLElement): void {
+  if (!hasCurlyQuotes(body.textContent || '')) return;
+  const textNodes: Text[] = [];
+  const walker = body.ownerDocument.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const parentTag = (node.parentElement?.tagName || '').toUpperCase();
+    if (
+      parentTag !== 'STYLE' &&
+      parentTag !== 'SCRIPT' &&
+      parentTag !== 'CODE' &&
+      parentTag !== 'PRE'
+    ) {
+      const raw = node.nodeValue || '';
+      if (hasCurlyQuotes(raw)) {
+        textNodes.push(node as Text);
+      }
+    }
+    node = walker.nextNode();
+  }
+
+  for (const textNode of textNodes) {
+    const raw = textNode.nodeValue || '';
+    const segments = splitLatinQuoteSegments(raw);
+    if (!segments) continue;
+    const frag = body.ownerDocument.createDocumentFragment();
+    for (const seg of segments) {
+      if (seg.latin) {
+        const span = body.ownerDocument.createElement('span');
+        span.className = 'fei-latin-punct';
+        span.textContent = seg.text;
+        frag.appendChild(span);
+      } else {
+        frag.appendChild(body.ownerDocument.createTextNode(seg.text));
+      }
+    }
+    textNode.parentNode?.replaceChild(frag, textNode);
+  }
 }
 
 interface PopupVisualLine {
@@ -653,11 +695,14 @@ const MdictShadowDefinition: React.FC<{
       :host {
         display: block;
         color: var(--fei-text-primary, #000000);
-        font-family: var(--font-doc-body, "FeiLatinPunct", "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN", sans-serif);
+        font-family: var(--font-doc-body, "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN", sans-serif);
         font-size: ${fontSize}px;
         line-height: 1.56;
         word-break: break-word;
         -webkit-touch-callout: none;
+      }
+      .fei-latin-punct {
+        font-family: "FeiLatinPunct", var(--font-doc-body, "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN", sans-serif);
       }
       *, *::before, *::after {
         box-sizing: border-box;

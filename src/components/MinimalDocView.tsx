@@ -13,6 +13,7 @@ import { CloudDownload, Copy, Wifi, X } from 'lucide-react';
 import { ArticleDoc, ReadingNote } from '../types';
 import { extractLookupWord } from '../utils/mdict';
 import { extractNoteAnchorExcerpt, getActiveNotes } from '../utils/notes';
+import { isPureLatinQuotedBlock, splitLatinQuoteSegments } from '../utils/quoteTypography';
 import { DocImageBlock, DocImagePreviewPayload } from './DocImageBlock';
 import { DocOutlineModal } from './DocOutlineModal';
 import { BlockNode, formatBytes, parseDocumentBlocks, TocItem } from '../utils/textParser';
@@ -332,11 +333,39 @@ function collectVisualLinesInBand(
   return merged;
 }
 
-function renderInline(raw: string, autoHyphenate = false) {
-  const maybeHyphenate = (s: string) => (autoHyphenate ? hyphenateEnglishWords(s) : s);
+function renderTextWithQuoteTypography(
+  text: string,
+  autoHyphenate = false,
+  blockIsPureLatin = false
+): React.ReactNode {
+  const processed = autoHyphenate ? hyphenateEnglishWords(text) : text;
+  if (blockIsPureLatin) return processed;
+  const segments = splitLatinQuoteSegments(processed);
+  if (!segments) return processed;
+  if (segments.length === 1) {
+    return segments[0].latin ? (
+      <span className="font-latin-punct">{segments[0].text}</span>
+    ) : (
+      segments[0].text
+    );
+  }
+  return segments.map((seg, i) =>
+    seg.latin ? (
+      <span key={i} className="font-latin-punct">
+        {seg.text}
+      </span>
+    ) : (
+      <React.Fragment key={i}>{seg.text}</React.Fragment>
+    )
+  );
+}
+
+function renderInline(raw: string, autoHyphenate = false, blockIsPureLatin = false) {
+  const renderText = (s: string) =>
+    renderTextWithQuoteTypography(s, autoHyphenate, blockIsPureLatin);
   // Fast path: plain text without markdown inline markers skips regex loop entirely
   if (!raw.includes('`') && !raw.includes('*')) {
-    return maybeHyphenate(raw);
+    return renderText(raw);
   }
   const tokens: Array<{ type: 'text' | 'code' | 'bold' | 'italic'; value: string }> = [];
   const regex = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
@@ -370,14 +399,14 @@ function renderInline(raw: string, autoHyphenate = false) {
     if (token.type === 'bold') {
       return (
         <strong key={idx} className="font-semibold text-[var(--fei-text-primary)]">
-          {maybeHyphenate(token.value)}
+          {renderText(token.value)}
         </strong>
       );
     }
     if (token.type === 'italic') {
-      return <em key={idx}>{maybeHyphenate(token.value)}</em>;
+      return <em key={idx}>{renderText(token.value)}</em>;
     }
-    return <React.Fragment key={idx}>{maybeHyphenate(token.value)}</React.Fragment>;
+    return <React.Fragment key={idx}>{renderText(token.value)}</React.Fragment>;
   });
 }
 
@@ -448,23 +477,24 @@ function renderBlock(
   };
   const topZero = isFirstOverall ? 'mt-0' : '';
   const justifyCls = autoHyphenate ? 'text-justify' : '';
-  const maybeHyphenate = (s: string) => (autoHyphenate ? hyphenateEnglishWords(s) : s);
   const anchoredNotes = renderCtx?.notesByBlockIdx?.get(idx);
   const noteMarker = renderMarginNoteMarker(anchoredNotes, renderCtx?.onOpenNoteFromMargin);
   const relativeCls = noteMarker ? 'relative' : '';
 
   switch (block.type) {
     case 'heading': {
+      const pureLatin = isPureLatinQuotedBlock(block.text);
+      const latinCls = pureLatin ? 'font-latin-punct' : '';
       if (block.level === 1) {
         return (
           <h1
             key={idx}
             data-toc-id={block.id}
             {...offsetAttrs}
-            className={`${relativeCls} text-[1.15em] font-semibold leading-snug ${topZero || 'mt-5'} mb-2 text-[var(--fei-text-primary)] text-balance`}
+            className={`${relativeCls} ${latinCls} text-[1.15em] font-semibold leading-snug ${topZero || 'mt-5'} mb-2 text-[var(--fei-text-primary)] text-balance`}
           >
             {noteMarker}
-            {maybeHyphenate(block.text)}
+            {renderTextWithQuoteTypography(block.text, autoHyphenate, pureLatin)}
           </h1>
         );
       }
@@ -474,10 +504,10 @@ function renderBlock(
             key={idx}
             data-toc-id={block.id}
             {...offsetAttrs}
-            className={`${relativeCls} text-[1.03em] font-semibold leading-snug ${topZero || 'mt-4'} mb-1.5 text-[var(--fei-text-primary)]`}
+            className={`${relativeCls} ${latinCls} text-[1.03em] font-semibold leading-snug ${topZero || 'mt-4'} mb-1.5 text-[var(--fei-text-primary)]`}
           >
             {noteMarker}
-            {maybeHyphenate(block.text)}
+            {renderTextWithQuoteTypography(block.text, autoHyphenate, pureLatin)}
           </h2>
         );
       }
@@ -486,35 +516,43 @@ function renderBlock(
           key={idx}
           data-toc-id={block.id}
           {...offsetAttrs}
-          className={`${relativeCls} text-[1em] font-semibold leading-snug ${topZero || 'mt-3.5'} mb-1.5 text-[var(--fei-text-primary)]`}
+          className={`${relativeCls} ${latinCls} text-[1em] font-semibold leading-snug ${topZero || 'mt-3.5'} mb-1.5 text-[var(--fei-text-primary)]`}
         >
           {noteMarker}
-          {maybeHyphenate(block.text)}
+          {renderTextWithQuoteTypography(block.text, autoHyphenate, pureLatin)}
         </h3>
       );
     }
-    case 'paragraph':
+    case 'paragraph': {
+      const pureLatin = isPureLatinQuotedBlock(block.text);
+      const latinCls = pureLatin ? 'font-latin-punct' : '';
       return (
         <p
           key={idx}
           {...offsetAttrs}
-          className={`${relativeCls} ${topZero || 'mt-3'} mb-3 whitespace-pre-line ${justifyCls}`}
+          className={`${relativeCls} ${latinCls} ${topZero || 'mt-3'} mb-3 whitespace-pre-line ${justifyCls}`}
         >
           {noteMarker}
-          {renderInline(block.text, autoHyphenate)}
+          {renderInline(block.text, autoHyphenate, pureLatin)}
         </p>
       );
-    case 'blockquote':
+    }
+    case 'blockquote': {
+      const pureLatin = isPureLatinQuotedBlock(block.text);
+      const latinCls = pureLatin ? 'font-latin-punct' : '';
       return (
         <blockquote
           key={idx}
           {...offsetAttrs}
-          className={`${relativeCls} ${topZero || 'mt-4'} mb-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-transparent eink:border-[var(--fei-border)] text-[var(--fei-text-primary)] text-[0.94em] ${justifyCls}`}
+          className={`${relativeCls} ${latinCls} ${topZero || 'mt-4'} mb-4 px-4 py-3 rounded-lg bg-[var(--fei-bg-subtle)] border border-transparent eink:border-[var(--fei-border)] text-[var(--fei-text-primary)] text-[0.94em] ${justifyCls}`}
         >
           {noteMarker}
-          <span className="whitespace-pre-line">{renderInline(block.text, autoHyphenate)}</span>
+          <span className="whitespace-pre-line">
+            {renderInline(block.text, autoHyphenate, pureLatin)}
+          </span>
         </blockquote>
       );
+    }
     case 'code': {
       const preNode = (
         <pre
@@ -544,9 +582,14 @@ function renderBlock(
             className={`${relativeCls} ${topZero || 'mt-3'} mb-3 pl-5 list-decimal space-y-1.5 marker:text-[var(--fei-text-muted)] ${justifyCls}`}
           >
             {noteMarker}
-            {block.items.map((item, i) => (
-              <li key={i}>{renderInline(item, autoHyphenate)}</li>
-            ))}
+            {block.items.map((item, i) => {
+              const pureLatin = isPureLatinQuotedBlock(item);
+              return (
+                <li key={i} className={pureLatin ? 'font-latin-punct' : undefined}>
+                  {renderInline(item, autoHyphenate, pureLatin)}
+                </li>
+              );
+            })}
           </ol>
         );
       }
@@ -557,9 +600,14 @@ function renderBlock(
           className={`${relativeCls} ${topZero || 'mt-3'} mb-3 pl-5 list-disc space-y-1.5 marker:text-[var(--fei-text-muted)] ${justifyCls}`}
         >
           {noteMarker}
-          {block.items.map((item, i) => (
-            <li key={i}>{renderInline(item, autoHyphenate)}</li>
-          ))}
+          {block.items.map((item, i) => {
+            const pureLatin = isPureLatinQuotedBlock(item);
+            return (
+              <li key={i} className={pureLatin ? 'font-latin-punct' : undefined}>
+                {renderInline(item, autoHyphenate, pureLatin)}
+              </li>
+            );
+          })}
         </ul>
       );
     case 'table':
@@ -580,12 +628,13 @@ function renderBlock(
                       : align === 'right'
                         ? 'text-right'
                         : 'text-left';
+                  const pureLatin = isPureLatinQuotedBlock(header);
                   return (
                     <th
                       key={colIdx}
-                      className={`px-3 py-2 font-semibold border-r last:border-r-0 border-[var(--fei-border)] ${alignCls}`}
+                      className={`px-3 py-2 font-semibold border-r last:border-r-0 border-[var(--fei-border)] ${alignCls} ${pureLatin ? 'font-latin-punct' : ''}`}
                     >
-                      {renderInline(header, autoHyphenate)}
+                      {renderInline(header, autoHyphenate, pureLatin)}
                     </th>
                   );
                 })}
@@ -602,12 +651,13 @@ function renderBlock(
                         : align === 'right'
                           ? 'text-right'
                           : 'text-left';
+                    const pureLatin = isPureLatinQuotedBlock(cell);
                     return (
                       <td
                         key={colIdx}
-                        className={`px-3 py-2 border-r last:border-r-0 border-[var(--fei-border)] align-middle ${alignCls}`}
+                        className={`px-3 py-2 border-r last:border-r-0 border-[var(--fei-border)] align-middle ${alignCls} ${pureLatin ? 'font-latin-punct' : ''}`}
                       >
-                        {renderInline(cell, autoHyphenate)}
+                        {renderInline(cell, autoHyphenate, pureLatin)}
                       </td>
                     );
                   })}
