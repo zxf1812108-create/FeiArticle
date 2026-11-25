@@ -562,8 +562,10 @@ export async function runAutoMetadataProgressSync(
   localTreeState: SyncedTreeState,
   hasLocalChanges: boolean,
   purgedRecords?: PurgedSyncRecords,
-  retryOnPreconditionFailed = true
+  retryOnPreconditionFailed = true,
+  options?: { skipInboxCheck?: boolean }
 ): Promise<AutoSyncOutcome> {
+  const shouldCheckInbox = !options?.skipInboxCheck;
   const syncNow = Date.now();
   const config: WebDavConfig = {
     ...rawConfig,
@@ -726,7 +728,7 @@ export async function runAutoMetadataProgressSync(
 
   let precheckedInboxFiles: RemoteInboxFile[] | null = null;
   if (manifestRes.status === 304 && !shouldBypass304) {
-    if (config.syncShortDocsViaCloud) {
+    if (config.syncShortDocsViaCloud && shouldCheckInbox) {
       const inboxCheck = await listEligibleShortInboxFiles(config);
       if (inboxCheck.rateLimited) {
         return {
@@ -1756,7 +1758,7 @@ export async function runAutoMetadataProgressSync(
 
   // 5d. Jianguoyun inbox/ dropbox ingestion (ONLY when short-doc cloud fallback <= 200 KB is enabled)
   const inboxFilesToDelete: string[] = [];
-  if (shortDocFallback) {
+  if (shortDocFallback && shouldCheckInbox) {
     let inboxCandidates: RemoteInboxFile[] = [];
     if (precheckedInboxFiles !== null) {
       inboxCandidates = precheckedInboxFiles;
@@ -1931,7 +1933,8 @@ export async function runAutoMetadataProgressSync(
         localTreeState,
         true,
         purgedRecords,
-        false
+        false,
+        options
       );
     }
     // Graceful fallback if a custom WebDAV server rejects If-Match with 400/501

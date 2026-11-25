@@ -179,6 +179,8 @@ type MdictHistoryEntry = {
 };
 
 const AUTO_PROGRESS_SYNC_INTERVAL_MS = 60 * 1000;
+const AUTO_PROGRESS_DEBOUNCE_MS = 3 * 1000;
+const AUTO_PROGRESS_MIN_INTERVAL_MS = 30 * 1000;
 const AUTO_TREE_POLL_INTERVAL_MS = 45 * 1000;
 const AUTO_CATALOG_DEBOUNCE_MS = 2000;
 const AUTO_PULL_COOLDOWN_MS = 15_000;
@@ -413,6 +415,8 @@ export default function App() {
   const autoCatalogDirtyRef = useRef(false);
   const autoMutationSeqRef = useRef(0);
   const autoCatalogDebounceTimerRef = useRef<number | null>(null);
+  const autoProgressDebounceTimerRef = useRef<number | null>(null);
+  const lastAutoProgressPushAtRef = useRef(0);
   const lastAutoPullAtRef = useRef(0);
   const autoSyncFailCountRef = useRef(0);
   const autoSyncBackoffUntilRef = useRef(0);
@@ -1538,7 +1542,11 @@ export default function App() {
     setMainView('doc');
   };
 
-  const handleUpdateDocViewState = (docId: string, state: DocViewStateSnapshot) => {
+  const handleUpdateDocViewState = (
+    docId: string,
+    state: DocViewStateSnapshot,
+    scheduleAutoSync = true
+  ) => {
     const current = docsRef.current.find((d) => d.id === docId);
     if (!current) return;
     const nextScroll = Math.max(0, Math.round(state.scrollTop));
@@ -1579,6 +1587,9 @@ export default function App() {
     setFoldersDirty(true);
     autoProgressDirtyRef.current = true;
     autoMutationSeqRef.current++;
+    if (scheduleAutoSync && mainViewRef.current === 'doc') {
+      scheduleAutoProgressSyncRef.current();
+    }
   };
 
   const handleOpenDoc = (docId: string) => {
@@ -1863,9 +1874,13 @@ export default function App() {
   };
 
   const handleExitDocToTree = () => {
+    if (autoProgressDebounceTimerRef.current !== null) {
+      window.clearTimeout(autoProgressDebounceTimerRef.current);
+      autoProgressDebounceTimerRef.current = null;
+    }
     if (mainView === 'doc' && selectedDoc && docViewRef.current) {
       const captured = docViewRef.current.flushAndCaptureViewState();
-      handleUpdateDocViewState(selectedDoc.id, captured);
+      handleUpdateDocViewState(selectedDoc.id, captured, false);
     }
     mdictLookupReqRef.current++;
     setMdictLookupPending(false);
@@ -2718,6 +2733,7 @@ export default function App() {
     forcePullCheck?: boolean;
     bypassThrottle?: boolean;
     isManual?: boolean;
+    skipInboxCheck?: boolean;
   }): Promise<SilentAutoSyncResult> => {
     const cfg = webDavConfigRef.current;
     if (!cfg.username.trim() || !cfg.password.trim()) return { status: 'skipped' };
@@ -2770,7 +2786,9 @@ export default function App() {
           docsRef.current,
           localTreeState,
           hasLocalChanges,
-          purgedRecordsRef.current
+          purgedRecordsRef.current,
+          true,
+          { skipInboxCheck: options?.skipInboxCheck }
         );
         applyQuotaDelta(outcome.quotaDelta);
 
@@ -3031,10 +3049,17 @@ export default function App() {
           }
         }
 
+        if (outcome.didPush) {
+          lastAutoProgressPushAtRef.current = Date.now();
+        }
         if (noConcurrentMutation) {
           autoProgressDirtyRef.current = false;
           autoCatalogDirtyRef.current = false;
           setFoldersDirty(false);
+          if (autoProgressDebounceTimerRef.current !== null) {
+            window.clearTimeout(autoProgressDebounceTimerRef.current);
+            autoProgressDebounceTimerRef.current = null;
+          }
           if (outcome.purgedSynced) {
             setPurgedRecords({ docs: {}, docFormats: {}, folders: {} });
           }
@@ -3080,6 +3105,52 @@ export default function App() {
   const runSilentAutoSyncRef = useRef(runSilentAutoSync);
   runSilentAutoSyncRef.current = runSilentAutoSync;
 
+  const clearAutoProgressDebounceTimer = () => {
+    if (autoProgressDebounceTimerRef.current !== null) {
+      window.clearTimeout(autoProgressDebounceTimerRef.current);
+      autoProgressDebounceTimerRef.current = null;
+    }
+  };
+
+  // Reading-mode progress push: 3s debounce after page turn + 30s minimum interval between automatic pushes
+  const scheduleAutoProgressSync = () => {
+    const cfg = webDavConfigRef.current;
+    if (!cfg.username.trim() || !cfg.password.trim()) return;
+    if (mainViewRef.current !== 'doc') return;
+    clearAutoProgressDebounceTimer();
+    const now = Date.now();
+    const remainingCooldown = Math.max(
+      0,
+      AUTO_PROGRESS_MIN_INTERVAL_MS - (now - lastAutoProgressPushAtRef.current)
+    );
+    const delayMs = Math.max(AUTO_PROGRESS_DEBOUNCE_MS, remainingCooldown);
+    autoProgressDebounceTimerRef.current = window.setTimeout(() => {
+      autoProgressDebounceTimerRef.current = null;
+      if (!appMountedRef.current || mainViewRef.current !== 'doc') return;
+      if (document.visibilityState === 'hidden') return;
+      if (!autoProgressDirtyRef.current && !autoCatalogDirtyRef.current) return;
+      if (activeAutoSyncPromiseRef.current) {
+        void activeAutoSyncPromiseRef.current.finally(() => {
+          if (
+            appMountedRef.current &&
+            mainViewRef.current === 'doc' &&
+            autoProgressDirtyRef.current
+          ) {
+            scheduleAutoProgressSyncRef.current();
+          }
+        });
+        return;
+      }
+      void runSilentAutoSyncRef.current({
+        bypassThrottle: true,
+        skipInboxCheck: !autoCatalogDirtyRef.current,
+      });
+    }, delayMs);
+  };
+
+  const scheduleAutoProgressSyncRef = useRef(scheduleAutoProgressSync);
+  scheduleAutoProgressSyncRef.current = scheduleAutoProgressSync;
+
   const markAutoCatalogDirty = (triggerDebounce = true) => {
     autoCatalogDirtyRef.current = true;
     autoMutationSeqRef.current++;
@@ -3092,32 +3163,41 @@ export default function App() {
     autoCatalogDebounceTimerRef.current = window.setTimeout(() => {
       autoCatalogDebounceTimerRef.current = null;
       if (autoCatalogDirtyRef.current || autoProgressDirtyRef.current) {
+        clearAutoProgressDebounceTimer();
         void runSilentAutoSyncRef.current({ bypassThrottle: true });
       }
     }, AUTO_CATALOG_DEBOUNCE_MS);
   };
 
-  // Auto-sync Trigger 1: Every 60 seconds while reading (pushes dirty progress/notes, or light 304 pull check for remote notes)
+  // Auto-sync Trigger 1: Every 60 seconds while reading (fallback progress push & light 304 pull check for remote notes)
   const webDavConfigured = Boolean(webDavConfig.username.trim() && webDavConfig.password.trim());
   useEffect(() => {
-    if (!webDavConfigured || mainView !== 'doc') return;
+    if (!webDavConfigured || mainView !== 'doc') {
+      clearAutoProgressDebounceTimer();
+      return;
+    }
     const timer = window.setInterval(() => {
       const openDocId = selectedDocIdRef.current;
       if (openDocId && docViewRef.current) {
         const captured = docViewRef.current.flushAndCaptureViewState();
-        handleUpdateDocViewState(openDocId, captured);
+        handleUpdateDocViewState(openDocId, captured, false);
       }
       if (autoProgressDirtyRef.current || autoCatalogDirtyRef.current) {
-        void runSilentAutoSyncRef.current({ bypassThrottle: true });
+        clearAutoProgressDebounceTimer();
+        void runSilentAutoSyncRef.current({
+          bypassThrottle: true,
+          skipInboxCheck: !autoCatalogDirtyRef.current,
+        });
       } else if (
         document.visibilityState === 'visible' &&
         (typeof navigator === 'undefined' || navigator.onLine !== false)
       ) {
-        void runSilentAutoSyncRef.current({ forcePullCheck: true });
+        void runSilentAutoSyncRef.current({ forcePullCheck: true, skipInboxCheck: true });
       }
     }, AUTO_PROGRESS_SYNC_INTERVAL_MS);
     return () => {
       window.clearInterval(timer);
+      clearAutoProgressDebounceTimer();
     };
   }, [webDavConfigured, mainView]);
 
@@ -3209,9 +3289,10 @@ export default function App() {
     void runSilentAutoSyncRef.current({ forcePullCheck: true });
 
     const flushAndPushIfDirty = () => {
+      clearAutoProgressDebounceTimer();
       if (mainViewRef.current === 'doc' && selectedDocIdRef.current && docViewRef.current) {
         const captured = docViewRef.current.flushAndCaptureViewState();
-        handleUpdateDocViewState(selectedDocIdRef.current, captured);
+        handleUpdateDocViewState(selectedDocIdRef.current, captured, false);
       }
       if (autoProgressDirtyRef.current || autoCatalogDirtyRef.current) {
         void runSilentAutoSyncRef.current({ bypassThrottle: true });
@@ -3227,9 +3308,10 @@ export default function App() {
     };
 
     const onOnline = () => {
+      clearAutoProgressDebounceTimer();
       if (mainViewRef.current === 'doc' && selectedDocIdRef.current && docViewRef.current) {
         const captured = docViewRef.current.flushAndCaptureViewState();
-        handleUpdateDocViewState(selectedDocIdRef.current, captured);
+        handleUpdateDocViewState(selectedDocIdRef.current, captured, false);
       }
       autoSyncBackoffUntilRef.current = 0;
       void runSilentAutoSyncRef.current({ forcePullCheck: true, bypassThrottle: true });
@@ -3251,6 +3333,7 @@ export default function App() {
         window.clearTimeout(autoCatalogDebounceTimerRef.current);
         autoCatalogDebounceTimerRef.current = null;
       }
+      clearAutoProgressDebounceTimer();
     };
   }, []);
 
@@ -3307,6 +3390,7 @@ export default function App() {
       window.clearTimeout(autoCatalogDebounceTimerRef.current);
       autoCatalogDebounceTimerRef.current = null;
     }
+    clearAutoProgressDebounceTimer();
     if (!hasUnresolvedWifiConflict) {
       wifiCloudSyncNeededRef.current = true;
     }
