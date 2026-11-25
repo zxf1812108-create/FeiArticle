@@ -186,6 +186,7 @@ const AUTO_CATALOG_DEBOUNCE_MS = 2000;
 const AUTO_PULL_COOLDOWN_MS = 15_000;
 const AUTO_SYNC_BACKOFF_STEPS_MS = [30_000, 60_000, 180_000, 300_000];
 const TOOLBAR_TOAST_DURATION_MS = 1200;
+const TOOLBAR_LONG_PRESS_MS = 320;
 
 // Insert-below icon depicting placing the cut folder/article beneath the currently selected row
 const InsertBelowIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
@@ -3900,8 +3901,13 @@ export default function App() {
     clearTimer();
     progressLongPressTimerRef.current = window.setTimeout(() => {
       progressLongPressTimerRef.current = null;
+      try {
+        navigator.vibrate?.(10);
+      } catch {
+        // ignore
+      }
       handleToggleFocusToolbar();
-    }, 450);
+    }, TOOLBAR_LONG_PRESS_MS);
 
     const onPointerMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
@@ -3952,11 +3958,16 @@ export default function App() {
         if (dragging) return;
         longPressTriggered = true;
         suppressToolbarClickRef.current = true;
+        try {
+          navigator.vibrate?.(10);
+        } catch {
+          // ignore
+        }
         onLongPress();
         window.setTimeout(() => {
           suppressToolbarClickRef.current = false;
         }, 260);
-      }, 450);
+      }, TOOLBAR_LONG_PRESS_MS);
     }
 
     const onPointerMove = (moveEvent: PointerEvent) => {
