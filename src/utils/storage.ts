@@ -58,6 +58,7 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   autoHyphenate: true,
   progressDisplayMode: 'percent',
   whistleSensitivity: 'medium',
+  focusToolbarHidden: false,
 };
 
 export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {

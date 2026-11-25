@@ -8,7 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { BookA, Maximize2, Minimize2, X } from 'lucide-react';
+import { ArrowLeft, BookA, Maximize2, Minimize2, X } from 'lucide-react';
 import { MdictDictionarySummary, MdictLookupResult } from '../types';
 import { sanitizeMdictCss } from '../utils/mdict';
 import { stripDictExt } from '../utils/mdictStorage';
@@ -17,6 +17,7 @@ export interface MdictLookupPopupHandle {
   pageUp: () => void;
   pageDown: () => void;
   autoExpandIfOverflowing: () => void;
+  getScrollTop: () => number;
 }
 
 interface MdictLookupPopupProps {
@@ -27,10 +28,17 @@ interface MdictLookupPopupProps {
   result: MdictLookupResult | null;
   matchCount: number;
   error: string | null;
+  suggestions: string[];
+  canGoBack: boolean;
+  restoreScrollTop?: number | null;
   dictionaries: MdictDictionarySummary[];
   activeDictId: string | null;
   onCycleDict: () => void;
   onLookupWord: (word: string) => void;
+  onLiveQueryChange: (raw: string) => void;
+  onSelectSuggestion: (word: string) => void;
+  onGoBack: () => void;
+  onRestoreScrollTopDone?: () => void;
   onClose: () => void;
 }
 
@@ -645,7 +653,7 @@ const MdictShadowDefinition: React.FC<{
       :host {
         display: block;
         color: var(--fei-text-primary, #000000);
-        font-family: var(--font-doc-body, "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN", sans-serif);
+        font-family: var(--font-doc-body, "FeiLatinPunct", "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN", sans-serif);
         font-size: ${fontSize}px;
         line-height: 1.56;
         word-break: break-word;
@@ -761,10 +769,17 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       result,
       matchCount,
       error,
+      suggestions,
+      canGoBack,
+      restoreScrollTop = null,
       dictionaries,
       activeDictId,
       onCycleDict,
       onLookupWord,
+      onLiveQueryChange,
+      onSelectSuggestion,
+      onGoBack,
+      onRestoreScrollTopDone,
       onClose,
     },
     ref
@@ -774,11 +789,19 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const shadowRootRef = useRef<ShadowRoot | null>(null);
     const headerRef = useRef<HTMLDivElement>(null);
     const dictNameRef = useRef<HTMLElement | null>(null);
+    const searchInputRef = useRef<HTMLInputElement>(null);
     const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
     const clipRafRef = useRef<number | null>(null);
     const autoExpandRafRef = useRef<number | null>(null);
+    const liveSearchTimerRef = useRef<number | null>(null);
     const pendingAnchorRef = useRef<string | null>(null);
+    const isInputFocusedRef = useRef(false);
+    const stableViewportHeightRef = useRef<number>(
+      typeof window !== 'undefined' ? window.innerHeight : 800
+    );
 
+    const [inputText, setInputText] = useState(queryWord);
+    const [keyboardInsetPx, setKeyboardInsetPx] = useState(0);
     const [isExpanded, setIsExpanded] = useState(false);
     const isExpandedRef = useRef(false);
     isExpandedRef.current = isExpanded;
@@ -794,6 +817,56 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const bottomClipPxRef = useRef(0);
     const bottomSpacerRef = useRef<HTMLDivElement>(null);
     const bottomSpacerHeightRef = useRef(0);
+
+    // Sync editable input when queryWord changes externally (selection, cross-ref click, back, suggestion tap)
+    useEffect(() => {
+      if (!isInputFocusedRef.current) {
+        setInputText(queryWord);
+      } else if (searchInputRef.current && searchInputRef.current.value.trim() !== queryWord.trim()) {
+        // External navigation (e.g. clicking suggestion/back while input still focused)
+        setInputText(queryWord);
+      }
+    }, [queryWord]);
+
+    // Lift bottom-docked/expanded popup cleanly above mobile soft keyboard via visualViewport
+    useEffect(() => {
+      if (typeof window === 'undefined') return;
+      const updateViewport = () => {
+        const vv = window.visualViewport;
+        const innerH = window.innerHeight;
+        if (!vv) {
+          if (!isInputFocusedRef.current) {
+            stableViewportHeightRef.current = innerH;
+          }
+          setKeyboardInsetPx(0);
+          return;
+        }
+        const inset = Math.max(0, Math.round(innerH - (vv.height + vv.offsetTop)));
+        const nextInset = inset >= 80 ? inset : 0;
+        if (nextInset === 0) {
+          stableViewportHeightRef.current = Math.max(innerH, Math.round(vv.height));
+        }
+        setKeyboardInsetPx((prev) => (prev === nextInset ? prev : nextInset));
+      };
+      updateViewport();
+      const vv = window.visualViewport;
+      vv?.addEventListener('resize', updateViewport);
+      vv?.addEventListener('scroll', updateViewport);
+      window.addEventListener('resize', updateViewport);
+      return () => {
+        vv?.removeEventListener('resize', updateViewport);
+        vv?.removeEventListener('scroll', updateViewport);
+        window.removeEventListener('resize', updateViewport);
+      };
+    }, []);
+
+    useEffect(() => {
+      return () => {
+        if (liveSearchTimerRef.current !== null) {
+          window.clearTimeout(liveSearchTimerRef.current);
+        }
+      };
+    }, []);
 
     const setSpacerHeightSync = useCallback((px: number) => {
       const clamped = Math.max(0, Math.round(px));
@@ -977,6 +1050,13 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       const viewHeight = el.clientHeight;
       if (viewHeight <= 0) return;
 
+      // Measure against standard compact body height so mobile soft-keyboard shrinkage
+      // never falsely triggers auto-expand for a short definition.
+      const standardCompactOuter = Math.min(stableViewportHeightRef.current * 0.4, 340);
+      const headerH = headerRef.current?.offsetHeight || 44;
+      const standardCompactBodyHeight = Math.max(80, standardCompactOuter - headerH - 12);
+      const effectiveCompactHeight = Math.max(viewHeight, standardCompactBodyHeight);
+
       const lines = collectPopupVisualLines(el, contentEl, shadowRootRef.current);
       const style = window.getComputedStyle(el);
       const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
@@ -988,8 +1068,9 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       }
 
       pendingAutoExpandCheckRef.current = false;
-      const overflowsByLines = lines.length > 0 && lines[lines.length - 1].bottom > viewHeight - 1;
-      const overflowsByHeight = contentNaturalHeight > viewHeight + 2;
+      const overflowsByLines =
+        lines.length > 0 && lines[lines.length - 1].bottom > effectiveCompactHeight + 2;
+      const overflowsByHeight = contentNaturalHeight > effectiveCompactHeight + 6;
       if (overflowsByLines || overflowsByHeight) {
         setHasToggledExpand(true);
         setIsExpanded(true);
@@ -1109,6 +1190,27 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       };
     }, []);
 
+    // Whenever displayed content changes (live search, suggestion list, cross-ref click, back, dict switch)
+    // while in compact mode, automatically switch to expanded mode if the new content overflows.
+    const contentSignature = useMemo(
+      () =>
+        `${result?.dictId ?? ''}|${result?.matchedHeadword ?? ''}|${result?.htmlDefinitions.length ?? 0}|${suggestions.join('\u001f')}|${error ?? ''}`,
+      [result?.dictId, result?.matchedHeadword, result?.htmlDefinitions.length, suggestions, error]
+    );
+    const prevContentSigRef = useRef<string | null>(null);
+    useEffect(() => {
+      if (loading) return;
+      const prev = prevContentSigRef.current;
+      prevContentSigRef.current = contentSignature;
+      if (prev !== null && prev !== contentSignature) {
+        manualExpandToggledRef.current = false;
+        if (!isExpandedRef.current) {
+          pendingAutoExpandCheckRef.current = true;
+          scheduleAutoExpandCheck();
+        }
+      }
+    }, [contentSignature, loading, scheduleAutoExpandCheck]);
+
     useEffect(() => {
       const pendingAnchor = pendingAnchorRef.current;
       if (pendingAnchor && result && result.htmlDefinitions.length > 0) {
@@ -1124,16 +1226,38 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         });
         return () => window.cancelAnimationFrame(raf);
       }
+      if (typeof restoreScrollTop === 'number' && !loading) {
+        const targetTop = Math.max(0, restoreScrollTop);
+        const raf = window.requestAnimationFrame(() => {
+          setSpacerHeightSync(0);
+          if (bodyScrollRef.current) {
+            bodyScrollRef.current.scrollTop = targetTop;
+          }
+          scheduleEdgeClipUpdate();
+          onRestoreScrollTopDone?.();
+        });
+        return () => window.cancelAnimationFrame(raf);
+      }
       setSpacerHeightSync(0);
       if (bodyScrollRef.current) {
         bodyScrollRef.current.scrollTop = 0;
       }
       scheduleEdgeClipUpdate();
-    }, [queryWord, result, scheduleEdgeClipUpdate, scrollToAnchor, setSpacerHeightSync]);
+    }, [
+      queryWord,
+      result,
+      suggestions,
+      restoreScrollTop,
+      loading,
+      onRestoreScrollTopDone,
+      scheduleEdgeClipUpdate,
+      scrollToAnchor,
+      setSpacerHeightSync,
+    ]);
 
     useLayoutEffect(() => {
       updatePopupEdgeClips();
-    }, [isExpanded, popupFontSize, loading, error, updatePopupEdgeClips]);
+    }, [isExpanded, popupFontSize, loading, error, suggestions, updatePopupEdgeClips]);
 
     useEffect(() => {
       const el = bodyScrollRef.current;
@@ -1238,6 +1362,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         pageUp: performPopupPageUp,
         pageDown: performPopupPageDown,
         autoExpandIfOverflowing,
+        getScrollTop: () => bodyScrollRef.current?.scrollTop ?? 0,
       }),
       [performPopupPageUp, performPopupPageDown, autoExpandIfOverflowing]
     );
@@ -1323,6 +1448,55 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       </button>
     );
 
+    const handleInputChange = (nextVal: string) => {
+      setInputText(nextVal);
+      if (liveSearchTimerRef.current !== null) {
+        window.clearTimeout(liveSearchTimerRef.current);
+      }
+      liveSearchTimerRef.current = window.setTimeout(() => {
+        liveSearchTimerRef.current = null;
+        onLiveQueryChange(nextVal);
+      }, 150);
+    };
+
+    const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (liveSearchTimerRef.current !== null) {
+          window.clearTimeout(liveSearchTimerRef.current);
+          liveSearchTimerRef.current = null;
+        }
+        const trimmed = inputText.trim();
+        if (!result && suggestions.length > 0) {
+          onSelectSuggestion(suggestions[0]);
+          searchInputRef.current?.blur();
+        } else if (trimmed) {
+          onLiveQueryChange(trimmed);
+          searchInputRef.current?.blur();
+        }
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        searchInputRef.current?.blur();
+      }
+    };
+
+    const extraRelatedSuggestions = useMemo(() => {
+      if (!result || suggestions.length === 0) return [];
+      const currentLow = queryWord.trim().toLowerCase();
+      const matchedLow = (result.matchedHeadword || '').trim().toLowerCase();
+      return suggestions.filter((w) => {
+        const low = w.trim().toLowerCase();
+        return low !== currentLow && low !== matchedLow;
+      });
+    }, [result, suggestions, queryWord]);
+
+    const popupContainerStyle: React.CSSProperties | undefined =
+      keyboardInsetPx > 0 && (isExpanded || placement === 'bottom')
+        ? { bottom: `${keyboardInsetPx + 8}px` }
+        : undefined;
+
+    const lowerTrimmedInput = inputText.trim().toLowerCase();
+
     return (
       <div
         data-mdict-popup="true"
@@ -1330,6 +1504,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         onTouchStart={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
         onContextMenu={(e) => e.preventDefault()}
+        style={popupContainerStyle}
         className={`fixed left-3 right-3 z-40 flex justify-center pointer-events-none ${
           isExpanded
             ? 'top-[max(0.75rem,env(safe-area-inset-top))] bottom-[64px]'
@@ -1353,19 +1528,53 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
           {/* Top Title Bar */}
           <div
             ref={headerRef}
-            className="relative px-3.5 py-2 bg-[var(--fei-popup-header-bg)] border-b border-[var(--fei-popup-divider)] flex items-center justify-between gap-2 shrink-0 select-none"
+            className="relative px-3.5 py-1.5 bg-[var(--fei-popup-header-bg)] border-b border-[var(--fei-popup-divider)] flex items-center justify-between gap-2 shrink-0 select-none"
           >
             <div
               style={!shiftExpandLeft ? { maxWidth: 'calc(50% - 22px)' } : undefined}
-              className="flex items-baseline gap-1.5 min-w-0 flex-1"
+              className="flex items-center gap-1.5 min-w-0 flex-1"
             >
-              <BookA
-                className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0 self-center"
-                strokeWidth={1.75}
+              {canGoBack ? (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    searchInputRef.current?.blur();
+                    onGoBack();
+                  }}
+                  aria-label="返回上一个词条"
+                  title="返回上一个词条"
+                  className="w-7 h-7 -ml-1.5 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0"
+                >
+                  <ArrowLeft className="w-4 h-4" strokeWidth={1.9} />
+                </button>
+              ) : (
+                <BookA
+                  className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0"
+                  strokeWidth={1.75}
+                />
+              )}
+
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={inputText}
+                onFocus={() => {
+                  isInputFocusedRef.current = true;
+                }}
+                onBlur={() => {
+                  isInputFocusedRef.current = false;
+                }}
+                onChange={(e) => handleInputChange(e.target.value)}
+                onKeyDown={handleInputKeyDown}
+                enterKeyHint="search"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="输入查词…"
+                aria-label="编辑查询单词"
+                className="font-doc-body text-[15px] font-semibold text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)]/60 bg-transparent border-b border-transparent focus:border-[var(--fei-border-strong)] outline-none min-w-0 flex-1 w-full py-0.5 select-text"
               />
-              <span className="font-doc-body text-[15px] font-semibold text-[var(--fei-text-primary)] truncate">
-                {queryWord}
-              </span>
             </div>
 
             {!shiftExpandLeft && expandButton}
@@ -1412,11 +1621,13 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
             </div>
           </div>
 
-          {/* Scrollable Definition Body (Left half click => Page Up, Right half click => Page Down; partial lines masked) */}
+          {/* Scrollable Definition / Suggestion Body (Left half click => Page Up, Right half click => Page Down; partial lines masked) */}
           <div className="relative flex-1 min-h-0 flex flex-col">
             <div
               ref={bodyScrollRef}
               onMouseDown={(e) => {
+                const target = e.target as HTMLElement | null;
+                if (target?.closest('button, a, input')) return;
                 const el = e.currentTarget;
                 const scrollbarWidth = el.offsetWidth - el.clientWidth;
                 const rect = el.getBoundingClientRect();
@@ -1437,6 +1648,80 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                   >
                     正在查词…
                   </div>
+                ) : result && result.htmlDefinitions.length > 0 ? (
+                  <>
+                    {extraRelatedSuggestions.length > 0 && (
+                      <div
+                        className="mb-2 pb-1.5 border-b border-[var(--fei-border)]/70 flex items-center gap-2.5 overflow-x-auto whitespace-nowrap select-none"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {extraRelatedSuggestions.slice(0, 12).map((word) => (
+                          <button
+                            key={word}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              searchInputRef.current?.blur();
+                              onSelectSuggestion(word);
+                            }}
+                            className="font-doc-body text-[12.5px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] underline decoration-transparent hover:decoration-[var(--fei-border-strong)] underline-offset-[3px] transition-colors shrink-0 cursor-pointer"
+                          >
+                            {word}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <MdictShadowDefinition
+                      htmlDefinitions={result.htmlDefinitions}
+                      dictCssText={result.dictCssText}
+                      fontSize={popupFontSize}
+                      currentWords={currentWords}
+                      onLookupWord={handleLookupWordWithAnchor}
+                      onJumpToAnchor={scrollToAnchor}
+                      onShadowReady={(shadow) => {
+                        shadowRootRef.current = shadow;
+                      }}
+                      onContentRendered={handleShadowContentRendered}
+                    />
+                  </>
+                ) : suggestions.length > 0 ? (
+                  <div
+                    className="divide-y divide-[var(--fei-border)]/70 select-none"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {suggestions.map((word) => {
+                      const matchesPrefix =
+                        lowerTrimmedInput.length > 0 &&
+                        word.toLowerCase().startsWith(lowerTrimmedInput);
+                      const prefixLen = matchesPrefix ? lowerTrimmedInput.length : 0;
+                      return (
+                        <button
+                          key={word}
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            searchInputRef.current?.blur();
+                            onSelectSuggestion(word);
+                          }}
+                          style={{ fontSize: `${popupFontSize}px` }}
+                          className="w-full text-left py-2 px-1 font-doc-body text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] rounded-md transition-colors cursor-pointer flex items-center justify-between gap-2"
+                        >
+                          <span className="truncate">
+                            {prefixLen > 0 ? (
+                              <>
+                                <strong className="font-semibold">{word.slice(0, prefixLen)}</strong>
+                                <span className="text-[var(--fei-text-muted)]">
+                                  {word.slice(prefixLen)}
+                                </span>
+                              </>
+                            ) : (
+                              word
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 ) : error ? (
                   <div
                     style={{ fontSize: `${popupFontSize}px` }}
@@ -1444,20 +1729,14 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                   >
                     {error}
                   </div>
-                ) : result && result.htmlDefinitions.length > 0 ? (
-                  <MdictShadowDefinition
-                    htmlDefinitions={result.htmlDefinitions}
-                    dictCssText={result.dictCssText}
-                    fontSize={popupFontSize}
-                    currentWords={currentWords}
-                    onLookupWord={handleLookupWordWithAnchor}
-                    onJumpToAnchor={scrollToAnchor}
-                    onShadowReady={(shadow) => {
-                      shadowRootRef.current = shadow;
-                    }}
-                    onContentRendered={handleShadowContentRendered}
-                  />
-                ) : null}
+                ) : (
+                  <div
+                    style={{ fontSize: `${popupFontSize}px` }}
+                    className="py-3 text-[var(--fei-text-muted)]"
+                  >
+                    {inputText.trim() ? '未找到匹配词条' : '输入单词即可查词'}
+                  </div>
+                )}
               </div>
 
               <div ref={bottomSpacerRef} aria-hidden="true" style={{ height: '0px' }} />

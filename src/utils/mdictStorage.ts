@@ -4,6 +4,7 @@ import {
   lookupInMdictBlob,
   parseMdictIndexFromBlob,
   sanitizeMdictCss,
+  searchMdictHeadwordsInBlob,
 } from './mdict';
 
 export function stripDictExt(fileName: string): string {
@@ -276,4 +277,61 @@ export async function lookupMdictWordAcrossAll(
     })
   );
   return results.filter((r): r is MdictLookupResult => r !== null && r.htmlDefinitions.length > 0);
+}
+
+export async function searchMdictHeadwords(
+  dictId: string,
+  prefix: string,
+  limit = 25
+): Promise<string[]> {
+  const loaded = await loadMdictRecordAndBlob(dictId);
+  if (!loaded) return [];
+  return searchMdictHeadwordsInBlob(loaded.blob, loaded.record, prefix, limit);
+}
+
+export async function searchMdictHeadwordsAcrossAll(
+  dictIds: string[],
+  prefix: string,
+  limit = 25
+): Promise<string[]> {
+  const cleaned = prefix.trim();
+  if (!cleaned || dictIds.length === 0) return [];
+  const lists = await Promise.all(
+    dictIds.map(async (id) => {
+      try {
+        return await searchMdictHeadwords(id, cleaned, limit);
+      } catch {
+        return [];
+      }
+    })
+  );
+
+  const merged: string[] = [];
+  const seenLower = new Set<string>();
+  const lowerPrefix = cleaned.toLowerCase();
+
+  for (const list of lists) {
+    for (const word of list) {
+      const low = word.toLowerCase();
+      if (seenLower.has(low)) continue;
+      seenLower.add(low);
+      merged.push(word);
+    }
+  }
+
+  // Sort: exact match first, then shorter / alphabetical prefix matches
+  merged.sort((a, b) => {
+    const al = a.toLowerCase();
+    const bl = b.toLowerCase();
+    const aExact = al === lowerPrefix ? 0 : 1;
+    const bExact = bl === lowerPrefix ? 0 : 1;
+    if (aExact !== bExact) return aExact - bExact;
+    const aStarts = al.startsWith(lowerPrefix) ? 0 : 1;
+    const bStarts = bl.startsWith(lowerPrefix) ? 0 : 1;
+    if (aStarts !== bStarts) return aStarts - bStarts;
+    if (a.length !== b.length) return a.length - b.length;
+    return al.localeCompare(bl);
+  });
+
+  return merged.slice(0, limit);
 }

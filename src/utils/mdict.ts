@@ -1453,3 +1453,108 @@ export async function lookupInMdictBlob(
   }
   return null;
 }
+
+export async function searchMdictHeadwordsInBlob(
+  blob: Blob,
+  meta: MdictDictionaryRecord,
+  rawPrefix: string,
+  limit = 25
+): Promise<string[]> {
+  const prefix = rawPrefix.trim();
+  if (!prefix || meta.keyBlocks.length === 0 || limit <= 0) return [];
+
+  const lowerPrefix = prefix.toLowerCase();
+  const normPrefix = normalizeFallbackKey(prefix);
+  const strippedPrefix = stripKeyForSort(prefix);
+  const useStripMatch = meta.isStripKey && strippedPrefix.length >= 2;
+
+  const matches: string[] = [];
+  const seenLower = new Set<string>();
+
+  const pushCandidate = (rawKey: string) => {
+    const cleaned = rawKey.trim();
+    if (!cleaned) return false;
+    const low = cleaned.toLowerCase();
+    if (seenLower.has(low)) return false;
+    seenLower.add(low);
+    matches.push(cleaned);
+    return matches.length >= limit;
+  };
+
+  const isPrefixMatch = (rawKey: string): boolean => {
+    const cleaned = rawKey.trim();
+    if (!cleaned) return false;
+    const low = cleaned.toLowerCase();
+    if (low.startsWith(lowerPrefix)) return true;
+    if (useStripMatch && stripKeyForSort(cleaned).startsWith(strippedPrefix)) return true;
+    return false;
+  };
+
+  const hasNonBmp = prefix.length > Array.from(prefix).length;
+  const canUseBinaryScan =
+    meta.encoding !== 'gb18030' &&
+    meta.encoding !== 'big5' &&
+    !hasNonBmp &&
+    hasMonotonicUnicodeOrder(meta);
+
+  if (canUseBinaryScan) {
+    const useCodePointOrder = meta.encoding === 'utf-8';
+    const candidateBlocks = selectCandidateKeyBlockIndices(
+      meta.keyBlocks,
+      prefix,
+      meta.isStripKey,
+      meta.isCaseSensitive,
+      useCodePointOrder
+    );
+    const startIdx = candidateBlocks.length > 0 ? candidateBlocks[0] : 0;
+    const maxBlocksToScan = Math.min(meta.keyBlocks.length, startIdx + 8);
+    let foundAny = false;
+
+    for (let blockIdx = startIdx; blockIdx < maxBlocksToScan; blockIdx++) {
+      const entries = await readKeyBlockEntries(blob, meta, blockIdx);
+      let blockMatched = false;
+      for (let i = 0; i < entries.length; i++) {
+        if (isPrefixMatch(entries[i].key)) {
+          blockMatched = true;
+          foundAny = true;
+          if (pushCandidate(entries[i].key)) {
+            return matches;
+          }
+        }
+      }
+      // Once we've moved past the matching blocks, stop scanning early
+      if (foundAny && !blockMatched && blockIdx > candidateBlocks[candidateBlocks.length - 1]) {
+        break;
+      }
+    }
+    return matches;
+  }
+
+  // Fallback for Chinese / GB18030 / Big5 / non-Unicode-sorted dictionaries
+  if (meta.numEntries <= MAX_FALLBACK_INDEX_ENTRIES) {
+    const index = await getOrBuildFallbackKeyIndex(blob, meta);
+    for (const [normKey, refs] of index.entries()) {
+      if (normKey.startsWith(normPrefix) && refs.length > 0) {
+        if (pushCandidate(refs[0].key)) {
+          return matches;
+        }
+      }
+    }
+    return matches;
+  }
+
+  const maxScanBlocks = Math.min(meta.keyBlocks.length, 40);
+  for (let blockIdx = 0; blockIdx < maxScanBlocks; blockIdx++) {
+    const entries = await readKeyBlockEntries(blob, meta, blockIdx);
+    for (let i = 0; i < entries.length; i++) {
+      if (isPrefixMatch(entries[i].key)) {
+        if (pushCandidate(entries[i].key)) {
+          return matches;
+        }
+      }
+    }
+  }
+
+  return matches;
+}
+

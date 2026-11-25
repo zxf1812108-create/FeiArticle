@@ -9,7 +9,13 @@ import {
   SyncedTreeState,
   WebDavConfig,
 } from '../types';
-import { decryptText, encryptText, isEncryptedPayload } from './crypto';
+import {
+  decodeManifestPayload,
+  decryptText,
+  encodeManifestPayload,
+  encryptText,
+  isEncryptedPayload,
+} from './crypto';
 import {
   INBOX_FOLDER_ID,
   INBOX_FOLDER_NAME,
@@ -19,7 +25,7 @@ import {
 } from './inbox';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
 import { isTrashExpired, purgeExpiredTrash } from './trash';
-import { mergeReadingNotes, notesEqual, sanitizeNotesList } from './notes';
+import { mergeReadingNotes, notesEqual, notesSignature, sanitizeNotesList } from './notes';
 import {
   extractReadAnchorText,
   isProgressMeaningfullyDifferent,
@@ -487,6 +493,7 @@ export interface AutoSyncOutcome {
   purgedSynced?: boolean;
   wasRateLimited?: boolean;
   authFailed?: boolean;
+  manifestDecryptError?: string;
   oversizedInboxCount?: number;
 }
 
@@ -653,6 +660,14 @@ export async function runAutoMetadataProgressSync(
       typeof d.progressOverrideAt === 'number' &&
       d.progressOverrideAt > (d.lastSyncedReadAt ?? 0)
   );
+  const hasUnpushedLocalNotes = localDocs.some((d) => {
+    if (d.deleted) return false;
+    const currSig = notesSignature(d.notes);
+    if (typeof d.lastSyncedNotesSig === 'string') {
+      return currSig !== d.lastSyncedNotesSig;
+    }
+    return currSig.length > 0;
+  });
 
   const shouldBypass304 =
     hasLocalChanges ||
@@ -660,7 +675,8 @@ export async function runAutoMetadataProgressSync(
     hasEligibleUnbackedShortDoc ||
     hasRemoteShortDocToAutoPull ||
     hasUnpushedLocalProgress ||
-    hasUnpushedProgressOverride;
+    hasUnpushedProgressOverride ||
+    hasUnpushedLocalNotes;
 
   // Step 1: Conditional fetch _manifest.json (304 = 0 bytes when unchanged)
   requestCount++;
@@ -805,6 +821,7 @@ export async function runAutoMetadataProgressSync(
   let remoteManifest: RemoteManifest | null = null;
   let nextAutoEtag = config.lastAutoManifestEtag;
   let fetchedManifestEtag: string | undefined;
+  let needManifestFormatUpgrade = false;
 
   if (manifestRes.status === 404 || manifestRes.status === 409) {
     const hasAnythingLocal =
@@ -862,17 +879,58 @@ export async function runAutoMetadataProgressSync(
     downloadBytes += manifestRes.bytesTransferred || getByteSize(manifestRes.body);
     nextAutoEtag = manifestRes.etag || nextAutoEtag;
     fetchedManifestEtag = manifestRes.etag || undefined;
+    const decoded = await decodeManifestPayload(manifestRes.body, config.encryptionPassword);
+    if (!decoded.ok) {
+      // Never overwrite remote _manifest.json when password is missing/wrong or payload cannot be decoded
+      return {
+        folders: localFolders,
+        docs: localDocs,
+        treeState: localTreeState,
+        config,
+        quotaDelta: {
+          uploadBytes: 0,
+          downloadBytes,
+          requestCount,
+          skippedByEtag304: 0,
+          skippedByHashMatch: 0,
+        },
+        pulledProgressDocIds: {},
+        didPush: false,
+        didPull: false,
+        manifestDecryptError: decoded.message,
+      };
+    }
+    const wantsEncryption = Boolean((config.encryptionPassword || '').trim());
+    if (!decoded.wasCompressed || decoded.wasEncrypted !== wantsEncryption) {
+      needManifestFormatUpgrade = true;
+    }
     try {
-      remoteManifest = JSON.parse(manifestRes.body) as RemoteManifest;
+      remoteManifest = JSON.parse(decoded.jsonText) as RemoteManifest;
     } catch {
-      remoteManifest = null;
+      return {
+        folders: localFolders,
+        docs: localDocs,
+        treeState: localTreeState,
+        config,
+        quotaDelta: {
+          uploadBytes: 0,
+          downloadBytes,
+          requestCount,
+          skippedByEtag304: 0,
+          skippedByHashMatch: 0,
+        },
+        pulledProgressDocIds: {},
+        didPush: false,
+        didPull: false,
+        manifestDecryptError: '云端目录索引格式异常，已中止同步以保护数据',
+      };
     }
   } else if (!manifestRes.ok) {
     throw new Error(formatSyncHttpError('拉取目录索引失败', manifestRes));
   }
 
   let mergedConfig: WebDavConfig = { ...config };
-  let needManifestPush = remoteManifest === null;
+  let needManifestPush = remoteManifest === null || needManifestFormatUpgrade;
   let didPull = false;
   let didPush = false;
   const pulledProgressDocIds: Record<string, number> = {};
@@ -923,7 +981,7 @@ export async function runAutoMetadataProgressSync(
       if (!effectiveEncPassword) {
         return false;
       }
-      uploadBody = await encryptText(doc.content, effectiveEncPassword);
+      uploadBody = await encryptText(doc.content, effectiveEncPassword, { reuseSalt: true });
     }
 
     const docExt = doc.format === 'md' ? 'md' : 'txt';
@@ -1854,10 +1912,14 @@ export async function runAutoMetadataProgressSync(
       },
     };
     const manifestJson = JSON.stringify(nextManifest);
+    const manifestPayload = await encodeManifestPayload(
+      manifestJson,
+      mergedConfig.encryptionPassword
+    );
     const useIfMatch = Boolean(remoteManifest !== null && fetchedManifestEtag);
     requestCount++;
     let putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, {
-      body: manifestJson,
+      body: manifestPayload,
       ifMatch: useIfMatch ? fetchedManifestEtag : undefined,
     });
     // Optimistic concurrency: another device updated _manifest.json concurrently -> re-fetch & merge once
@@ -1875,7 +1937,7 @@ export async function runAutoMetadataProgressSync(
     // Graceful fallback if a custom WebDAV server rejects If-Match with 400/501
     if (useIfMatch && !putManifest.ok && (putManifest.status === 400 || putManifest.status === 501)) {
       requestCount++;
-      putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, { body: manifestJson });
+      putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, { body: manifestPayload });
     }
     if (putManifest.status === 401 || putManifest.status === 403) {
       return {
@@ -1928,12 +1990,12 @@ export async function runAutoMetadataProgressSync(
         dirsEnsured = true;
       }
       requestCount++;
-      putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, { body: manifestJson });
+      putManifest = await callWebDav(mergedConfig, 'PUT', MANIFEST_PATH, { body: manifestPayload });
     }
     if (!putManifest.ok) {
       throw new Error(formatSyncHttpError('更新目录索引失败', putManifest));
     }
-    uploadBytes += getByteSize(manifestJson);
+    uploadBytes += getByteSize(manifestPayload);
     nextAutoEtag = putManifest.etag || nextAutoEtag;
     didPush = true;
     purgedSynced = hasPendingPurges;
@@ -1960,9 +2022,15 @@ export async function runAutoMetadataProgressSync(
     }
   }
 
+  // Stamp synced note baselines on every doc once manifest sync/push succeeded
+  const stampedDocs = mergedDocs.map((doc) => {
+    const sig = notesSignature(doc.notes);
+    return doc.lastSyncedNotesSig === sig ? doc : { ...doc, lastSyncedNotesSig: sig };
+  });
+
   return {
     folders: mergedFolders,
-    docs: mergedDocs,
+    docs: stampedDocs,
     treeState: mergedTreeState,
     config: {
       ...mergedConfig,

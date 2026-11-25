@@ -75,6 +75,7 @@ export interface ArticleDoc {
   deletedByFolderId?: string;
   highlights: HighlightItem[];
   notes?: ReadingNote[];
+  lastSyncedNotesSig?: string;
   byteSize: number;
 }
 
@@ -181,6 +182,7 @@ export interface ReaderSettings {
   autoHyphenate?: boolean;
   progressDisplayMode?: 'percent' | 'pages';
   whistleSensitivity?: WhistleSensitivity;
+  focusToolbarHidden?: boolean;
 }
 
 export type SmartView = 'all' | 'recent' | 'starred' | 'dirty' | 'highlights' | 'trash';

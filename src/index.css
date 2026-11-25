@@ -2,9 +2,24 @@
 @custom-variant dark (&:where(.dark, .dark *));
 @custom-variant eink (&:where(.eink, .eink *));
 
+@font-face {
+  font-family: "FeiLatinPunct";
+  src:
+    local("Roboto"),
+    local("SF Pro Text"),
+    local("SF Pro"),
+    local("Helvetica Neue"),
+    local("Segoe UI"),
+    local("Arial"),
+    local("Liberation Sans"),
+    local("DejaVu Sans");
+  unicode-range: U+2018-2019, U+201C-201D;
+  font-display: swap;
+}
+
 @layer base {
   :root {
-    --font-sans: "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN", sans-serif;
+    --font-sans: "FeiLatinPunct", "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN", sans-serif;
     --font-serif: var(--font-sans);
     --font-doc-body: var(--font-sans);
     --font-mono: var(--font-sans);

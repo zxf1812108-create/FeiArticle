@@ -427,9 +427,9 @@ function renderMarginNoteMarker(
         e.stopPropagation();
         onOpenNoteFromMargin?.(primaryNote.id);
       }}
-      className="absolute -left-3.5 top-[0.22em] bottom-[0.22em] w-3 flex items-stretch justify-start select-none cursor-pointer group/note"
+      className="absolute -left-3.5 top-[0.26em] h-[1.12em] w-4 pl-[5px] flex items-stretch justify-start select-none cursor-pointer group/note"
     >
-      <span className="w-[2.5px] rounded-full bg-[var(--fei-text-muted)]/60 group-hover/note:bg-[var(--fei-text-primary)] eink:bg-[var(--fei-text-primary)] transition-colors" />
+      <span className="w-[2.5px] h-full rounded-full bg-[var(--fei-text-muted)]/60 group-hover/note:bg-[var(--fei-text-primary)] eink:bg-[var(--fei-text-primary)] transition-colors" />
     </button>
   );
 }

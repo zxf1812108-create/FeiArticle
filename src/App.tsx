@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ALargeSmall,
   BookOpen,
   Download,
   FolderTree,
@@ -59,13 +58,14 @@ import {
   WebDavConfig,
   WhistleSensitivity,
 } from './types';
-import { getActiveNotes, sanitizeNotesList } from './utils/notes';
+import { getActiveNotes, notesSignature, sanitizeNotesList } from './utils/notes';
 import {
   attachMdictCss,
   deleteMdictDictionary,
   importMdictFile,
   listMdictDictionaries,
   lookupMdictWordAcrossAll,
+  searchMdictHeadwordsAcrossAll,
   stripDictExt,
 } from './utils/mdictStorage';
 import {
@@ -161,6 +161,7 @@ type SilentAutoSyncResult =
   | { status: 'skipped' }
   | { status: 'offline' }
   | { status: 'auth-error' }
+  | { status: 'decrypt-error'; message: string }
   | { status: 'rate-limited' }
   | { status: 'error' }
   | {
@@ -171,9 +172,15 @@ type SilentAutoSyncResult =
       oversizedInboxCount: number;
     };
 
+type MdictHistoryEntry = {
+  queryWord: string;
+  dictId: string | null;
+  scrollTop: number;
+};
+
 const AUTO_PROGRESS_SYNC_INTERVAL_MS = 60 * 1000;
 const AUTO_TREE_POLL_INTERVAL_MS = 45 * 1000;
-const AUTO_CATALOG_DEBOUNCE_MS = 5000;
+const AUTO_CATALOG_DEBOUNCE_MS = 2000;
 const AUTO_PULL_COOLDOWN_MS = 15_000;
 const AUTO_SYNC_BACKOFF_STEPS_MS = [30_000, 60_000, 180_000, 300_000];
 const TOOLBAR_TOAST_DURATION_MS = 1200;
@@ -197,6 +204,28 @@ const InsertBelowIcon: React.FC<{ className?: string; strokeWidth?: number }> = 
     <path d="M12 7.5V13" />
     <path d="m9.5 10.5 2.5 2.5 2.5-2.5" />
     <rect x="5" y="16.5" width="14" height="3.8" rx="1.2" />
+  </svg>
+);
+
+// Custom harmonized Aa font-size icon matching adjacent toolbar icons in optical volume & stroke weight
+const FontSizeIcon: React.FC<{ className?: string; strokeWidth?: number }> = ({
+  className = 'w-[22px] h-[22px]',
+  strokeWidth = 1.6,
+}) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={strokeWidth}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M2.6 19.2 7.8 4.8 13 19.2" />
+    <path d="M4.4 14.4h6.8" />
+    <path d="M15.6 11.5c.7-.8 1.7-1.2 2.8-1.2 1.7 0 2.8 1 2.8 2.6v6.3" />
+    <path d="M21.2 14.9h-3.1c-1.5 0-2.6.9-2.6 2.15s1.1 2.15 2.6 2.15c1.3 0 2.5-.6 3.1-1.6" />
   </svg>
 );
 
@@ -274,6 +303,9 @@ export default function App() {
   const [autoHyphenate, setAutoHyphenate] = useState<boolean>(
     () => loadReaderSettings().autoHyphenate ?? true
   );
+  const [focusToolbarHidden, setFocusToolbarHidden] = useState<boolean>(() =>
+    Boolean(loadReaderSettings().focusToolbarHidden)
+  );
   const [whistleSensitivity, setWhistleSensitivity] = useState<WhistleSensitivity>(() => {
     const raw = loadReaderSettings().whistleSensitivity;
     return raw === 'low' || raw === 'high' ? raw : 'medium';
@@ -291,8 +323,14 @@ export default function App() {
     loading: boolean;
     results: MdictLookupResult[];
     currentIndex: number;
+    suggestions: string[];
     error: string | null;
+    history: MdictHistoryEntry[];
+    restoreScrollTop: number | null;
   } | null>(null);
+  const mdictLookupRef = useRef(mdictLookup);
+  mdictLookupRef.current = mdictLookup;
+  const mdictPendingEditOriginRef = useRef<MdictHistoryEntry | null>(null);
   const [mdictLookupPending, setMdictLookupPending] = useState(false);
   const [activeDragPayload, setActiveDragPayload] = useState<DragPayload | null>(null);
   const [trashDragOver, setTrashDragOver] = useState(false);
@@ -1562,8 +1600,8 @@ export default function App() {
       return next;
     });
     setMainView('doc');
-    // Pull any newer reading progress / directory changes silently (304 = 0 bytes if unchanged)
-    void runSilentAutoSyncRef.current({ forcePullCheck: true });
+    // Pull any newer reading progress / notes / directory changes immediately (304 = 0 bytes if unchanged)
+    void runSilentAutoSyncRef.current({ forcePullCheck: true, bypassThrottle: true });
   };
 
   const getConflictSnapshotKey = (doc: ArticleDoc): string => {
@@ -2040,6 +2078,19 @@ export default function App() {
     });
   };
 
+  const handleToggleFocusToolbar = () => {
+    setFocusToolbarHidden((prev) => {
+      const next = !prev;
+      if (next) {
+        setShowFontSizeBar(false);
+        setNotePopoverState(null);
+      }
+      const current = loadReaderSettings();
+      saveReaderSettings({ ...current, focusToolbarHidden: next });
+      return next;
+    });
+  };
+
   const handleChangeWhistleSensitivity = (next: WhistleSensitivity) => {
     setWhistleSensitivity(next);
     const current = loadReaderSettings();
@@ -2157,14 +2208,94 @@ export default function App() {
     };
   }, []);
 
+  const closeMdictPopup = () => {
+    mdictLookupReqRef.current++;
+    pendingMdictAutoExpandRef.current = false;
+    mdictPendingEditOriginRef.current = null;
+    setMdictLookupPending(false);
+    setMdictLookup(null);
+  };
+
   const runMdictLookup = async (
     word: string,
     placement: 'top' | 'bottom',
     preferredDictId?: string | null,
-    dictListOverride?: MdictDictionarySummary[]
+    dictListOverride?: MdictDictionarySummary[],
+    options?: {
+      pushHistory?: boolean;
+      isLiveEdit?: boolean;
+      keepOpenOnMiss?: boolean;
+      historyOverride?: MdictHistoryEntry[];
+      restoreScrollTop?: number | null;
+    }
   ) => {
     const sourceDicts = dictListOverride || mdictDicts;
     if (sourceDicts.length === 0) return;
+
+    const cleanedWord = word.trim();
+    const prevLookup = mdictLookupRef.current;
+
+    // Build next history stack cleanly
+    let nextHistory: MdictHistoryEntry[] = [];
+    if (options?.historyOverride) {
+      nextHistory = options.historyOverride;
+    } else if (options?.pushHistory && prevLookup) {
+      const prevDictId = prevLookup.results[prevLookup.currentIndex]?.dictId ?? activeMdictId;
+      const prevScroll = mdictPopupRef.current?.getScrollTop() ?? 0;
+      const baseHistory = prevLookup.history;
+      const originToPush =
+        mdictPendingEditOriginRef.current ??
+        (prevLookup.results.length > 0 &&
+        prevLookup.queryWord.trim().toLowerCase() !== cleanedWord.toLowerCase()
+          ? {
+              queryWord: prevLookup.queryWord,
+              dictId: prevDictId,
+              scrollTop: prevScroll,
+            }
+          : null);
+      if (
+        originToPush &&
+        originToPush.queryWord.trim().toLowerCase() !== cleanedWord.toLowerCase()
+      ) {
+        const last = baseHistory[baseHistory.length - 1];
+        if (!last || last.queryWord.trim().toLowerCase() !== originToPush.queryWord.trim().toLowerCase()) {
+          nextHistory = [...baseHistory, originToPush];
+        } else {
+          nextHistory = baseHistory;
+        }
+      } else {
+        nextHistory = baseHistory;
+      }
+      mdictPendingEditOriginRef.current = null;
+    } else if (options?.isLiveEdit && prevLookup) {
+      nextHistory = prevLookup.history;
+    } else {
+      mdictPendingEditOriginRef.current = null;
+      nextHistory = [];
+    }
+
+    if (!cleanedWord) {
+      if (options?.keepOpenOnMiss || options?.isLiveEdit) {
+        mdictLookupReqRef.current++;
+        setMdictLookupPending(false);
+        setMdictLookup((prev) =>
+          prev
+            ? {
+                ...prev,
+                queryWord: '',
+                loading: false,
+                results: [],
+                currentIndex: 0,
+                suggestions: [],
+                error: null,
+                history: nextHistory,
+                restoreScrollTop: null,
+              }
+            : null
+        );
+      }
+      return;
+    }
 
     const firstId =
       preferredDictId && sourceDicts.some((d) => d.id === preferredDictId)
@@ -2181,29 +2312,116 @@ export default function App() {
     setMdictLookupPending(true);
 
     try {
-      const results = await lookupMdictWordAcrossAll(orderedIds, word);
+      const shouldFetchSuggestions = Boolean(options?.isLiveEdit || options?.keepOpenOnMiss);
+      const [results, suggestions] = await Promise.all([
+        lookupMdictWordAcrossAll(orderedIds, cleanedWord),
+        shouldFetchSuggestions
+          ? searchMdictHeadwordsAcrossAll(orderedIds, cleanedWord, 25)
+          : Promise.resolve<string[]>([]),
+      ]);
       if (mdictLookupReqRef.current !== reqId) return;
-      if (results.length === 0) {
+
+      if (results.length === 0 && !options?.keepOpenOnMiss && !options?.isLiveEdit) {
         // Close dictionary popup when selected text has no match so floating Copy popover can appear
         setMdictLookup(null);
         return;
       }
+
+      // If live editing resolved cleanly to a different word's definition, commit the saved pre-edit word to history
+      let resolvedHistory = nextHistory;
+      if (options?.isLiveEdit && results.length > 0 && mdictPendingEditOriginRef.current) {
+        const origin = mdictPendingEditOriginRef.current;
+        if (origin.queryWord.trim().toLowerCase() !== cleanedWord.toLowerCase()) {
+          const last = resolvedHistory[resolvedHistory.length - 1];
+          if (!last || last.queryWord.trim().toLowerCase() !== origin.queryWord.trim().toLowerCase()) {
+            resolvedHistory = [...resolvedHistory, origin];
+          }
+          mdictPendingEditOriginRef.current = null;
+        }
+      }
+
       setMdictLookup({
-        queryWord: word,
+        queryWord: cleanedWord,
         placement,
         loading: false,
         results,
         currentIndex: 0,
+        suggestions: shouldFetchSuggestions ? suggestions : [],
         error: null,
+        history: resolvedHistory,
+        restoreScrollTop: options?.restoreScrollTop ?? null,
       });
     } catch {
       if (mdictLookupReqRef.current !== reqId) return;
-      setMdictLookup(null);
+      if (options?.keepOpenOnMiss || options?.isLiveEdit) {
+        setMdictLookup((prev) =>
+          prev
+            ? {
+                ...prev,
+                queryWord: cleanedWord,
+                loading: false,
+                results: [],
+                currentIndex: 0,
+                suggestions: [],
+                error: '查词失败，请重试',
+                restoreScrollTop: null,
+              }
+            : null
+        );
+      } else {
+        setMdictLookup(null);
+      }
     } finally {
       if (mdictLookupReqRef.current === reqId) {
         setMdictLookupPending(false);
       }
     }
+  };
+
+  const handleLiveMdictQuery = (rawQuery: string) => {
+    const cur = mdictLookupRef.current;
+    if (!cur) return;
+    const trimmed = rawQuery.trim();
+    // Remember the last viewed definition before the user edits away to another word
+    if (
+      !mdictPendingEditOriginRef.current &&
+      cur.results.length > 0 &&
+      cur.queryWord.trim().toLowerCase() !== trimmed.toLowerCase()
+    ) {
+      mdictPendingEditOriginRef.current = {
+        queryWord: cur.queryWord,
+        dictId: cur.results[cur.currentIndex]?.dictId ?? activeMdictId,
+        scrollTop: mdictPopupRef.current?.getScrollTop() ?? 0,
+      };
+    }
+    const currentDictId = cur.results[cur.currentIndex]?.dictId || activeMdictId;
+    void runMdictLookup(rawQuery, cur.placement, currentDictId, undefined, {
+      isLiveEdit: true,
+      keepOpenOnMiss: true,
+    });
+  };
+
+  const handleSelectMdictSuggestion = (word: string) => {
+    const cur = mdictLookupRef.current;
+    if (!cur) return;
+    const currentDictId = cur.results[cur.currentIndex]?.dictId || activeMdictId;
+    void runMdictLookup(word, cur.placement, currentDictId, undefined, {
+      pushHistory: true,
+      keepOpenOnMiss: true,
+    });
+  };
+
+  const handleMdictGoBack = () => {
+    const cur = mdictLookupRef.current;
+    if (!cur || cur.history.length === 0) return;
+    const nextHistory = cur.history.slice(0, -1);
+    const target = cur.history[cur.history.length - 1];
+    mdictPendingEditOriginRef.current = null;
+    void runMdictLookup(target.queryWord, cur.placement, target.dictId, undefined, {
+      historyOverride: nextHistory,
+      keepOpenOnMiss: true,
+      restoreScrollTop: target.scrollTop,
+    });
   };
 
   const handleCycleMdictResult = () => {
@@ -2212,6 +2430,7 @@ export default function App() {
       return {
         ...prev,
         currentIndex: (prev.currentIndex + 1) % prev.results.length,
+        restoreScrollTop: null,
       };
     });
   };
@@ -2570,6 +2789,21 @@ export default function App() {
           return { status: 'auth-error' };
         }
 
+        if (outcome.manifestDecryptError) {
+          const stepIdx = Math.min(
+            autoSyncFailCountRef.current,
+            AUTO_SYNC_BACKOFF_STEPS_MS.length - 1
+          );
+          autoSyncFailCountRef.current++;
+          autoSyncBackoffUntilRef.current = Date.now() + AUTO_SYNC_BACKOFF_STEPS_MS[stepIdx];
+          const encKey = `decrypt|${cfg.baseUrl}|${(cfg.encryptionPassword || '').trim()}|${outcome.manifestDecryptError}`;
+          if (!options?.isManual && lastAuthErrorKeyRef.current !== encKey) {
+            lastAuthErrorKeyRef.current = encKey;
+            showToast(outcome.manifestDecryptError);
+          }
+          return { status: 'decrypt-error', message: outcome.manifestDecryptError };
+        }
+
         if (outcome.wasRateLimited) {
           const stepIdx = Math.min(
             autoSyncFailCountRef.current,
@@ -2681,19 +2915,29 @@ export default function App() {
                   !keepWifiConflict &&
                   (next.lastSyncedCharOffset !== curr.lastSyncedCharOffset ||
                     next.lastSyncedProgress !== curr.lastSyncedProgress);
+                const notesChanged =
+                  notesSignature(next.notes) !== notesSignature(curr.notes) ||
+                  next.lastSyncedNotesSig !== curr.lastSyncedNotesSig;
                 if (
                   !useNextProgress &&
                   !useNextCatalog &&
                   !downloadedBody &&
                   !cloudFlagChanged &&
                   !pendingChanged &&
-                  !baselineChanged
+                  !baselineChanged &&
+                  !notesChanged
                 ) {
                   return curr;
                 }
                 return {
                   ...curr,
                   cloudBodySynced: Boolean(next.cloudBodySynced),
+                  ...(notesChanged
+                    ? {
+                        notes: next.notes,
+                        lastSyncedNotesSig: next.lastSyncedNotesSig,
+                      }
+                    : {}),
                   ...(pendingChanged
                     ? { pendingRemoteProgress: next.pendingRemoteProgress ?? null }
                     : {}),
@@ -2748,7 +2992,6 @@ export default function App() {
               return nextList;
             });
           }
-
           const openDocId = selectedDocIdRef.current;
           if (
             mainViewRef.current === 'doc' &&
@@ -2762,6 +3005,29 @@ export default function App() {
               setLiveReadProgress(pulledDoc.readProgress);
             }
             docViewRef.current?.jumpToCharOffset(pulledOffset);
+          }
+        } else {
+          // Persist freshly stamped lastSyncedNotesSig baselines even on no-op syncs
+          const outcomeNoteSigMap = new Map(
+            outcome.docs
+              .filter((d) => typeof d.lastSyncedNotesSig === 'string')
+              .map((d) => [d.id, d.lastSyncedNotesSig as string])
+          );
+          if (outcomeNoteSigMap.size > 0) {
+            setDocs((prev) => {
+              let changed = false;
+              const nextList = prev.map((d) => {
+                const sig = outcomeNoteSigMap.get(d.id);
+                if (sig !== undefined && d.lastSyncedNotesSig !== sig && notesSignature(d.notes) === sig) {
+                  changed = true;
+                  return { ...d, lastSyncedNotesSig: sig };
+                }
+                return d;
+              });
+              if (!changed) return prev;
+              docsRef.current = nextList;
+              return nextList;
+            });
           }
         }
 
@@ -2831,7 +3097,7 @@ export default function App() {
     }, AUTO_CATALOG_DEBOUNCE_MS);
   };
 
-  // Auto-sync Trigger 1: Every 60 seconds while reading (0 requests if no page turn/change occurred)
+  // Auto-sync Trigger 1: Every 60 seconds while reading (pushes dirty progress/notes, or light 304 pull check for remote notes)
   const webDavConfigured = Boolean(webDavConfig.username.trim() && webDavConfig.password.trim());
   useEffect(() => {
     if (!webDavConfigured || mainView !== 'doc') return;
@@ -2843,6 +3109,11 @@ export default function App() {
       }
       if (autoProgressDirtyRef.current || autoCatalogDirtyRef.current) {
         void runSilentAutoSyncRef.current({ bypassThrottle: true });
+      } else if (
+        document.visibilityState === 'visible' &&
+        (typeof navigator === 'undefined' || navigator.onLine !== false)
+      ) {
+        void runSilentAutoSyncRef.current({ forcePullCheck: true });
       }
     }, AUTO_PROGRESS_SYNC_INTERVAL_MS);
     return () => {
@@ -2917,6 +3188,8 @@ export default function App() {
         showToast('当前无网络连接');
       } else if (res.status === 'auth-error') {
         showToast('坚果云账号或应用密码错误，请检查设置');
+      } else if (res.status === 'decrypt-error') {
+        showToast(res.message);
       } else if (res.status === 'rate-limited') {
         showToast('云端请求频繁，请稍后再试');
       } else if (res.status === 'error') {
@@ -4057,9 +4330,9 @@ export default function App() {
               </button>
             </>
           ) : (
-            /* 文档浏览模式：默认依次为 返回、字体设置（均可拖动排序），最右侧固定显示阅读进度 */
+            /* 文档浏览模式：支持点击最右侧进度百分比切换专注模式（隐藏/恢复其他图标） */
             <>
-              {docToolbarOrder.map((iconId) => {
+              {!focusToolbarHidden && docToolbarOrder.map((iconId) => {
                 const key = `doc:${iconId}`;
                 const isDraggingThis = draggingToolbarIconId === key;
                 const dragCls = isDraggingThis
@@ -4191,18 +4464,26 @@ export default function App() {
                           : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
                     }`}
                   >
-                    <ALargeSmall className="w-[22px] h-[22px]" strokeWidth={1.8} />
+                    <FontSizeIcon className="w-[22px] h-[22px]" strokeWidth={1.6} />
                   </button>
                 );
               })}
 
-              {/* 最右侧固定：自适应精度百分比阅读进度（不参与拖动排序，不可点击切换） */}
-              <span
-                aria-label={`当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}`}
-                className="ml-auto h-[40px] px-1.5 -mr-0.5 inline-flex items-center justify-end text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] select-none whitespace-nowrap shrink-0"
+              {/* 最右侧固定：自适应精度百分比阅读进度（点击切换专注模式：隐藏/恢复其他工具栏图标） */}
+              <button
+                type="button"
+                onClick={handleToggleFocusToolbar}
+                aria-pressed={focusToolbarHidden}
+                aria-label={
+                  focusToolbarHidden
+                    ? `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，点击恢复工具栏图标`
+                    : `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，点击隐藏工具栏其他图标进入专注阅读`
+                }
+                title={focusToolbarHidden ? '点击恢复工具栏图标' : '点击隐藏其他图标进入专注阅读'}
+                className="ml-auto min-w-[56px] h-[46px] px-2 -mr-1 inline-flex items-center justify-end rounded-lg text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors select-none whitespace-nowrap shrink-0 cursor-pointer"
               >
                 {formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}
-              </span>
+              </button>
             </>
           )}
         </div>
@@ -4464,15 +4745,27 @@ export default function App() {
           result={mdictLookup.results[mdictLookup.currentIndex] ?? null}
           matchCount={mdictLookup.results.length}
           error={mdictLookup.error}
+          suggestions={mdictLookup.suggestions}
+          canGoBack={mdictLookup.history.length > 0}
+          restoreScrollTop={mdictLookup.restoreScrollTop}
           dictionaries={mdictDicts}
           activeDictId={activeMdictId}
           onCycleDict={handleCycleMdictResult}
           onLookupWord={(nextWord) => {
             const currentDictId =
               mdictLookup.results[mdictLookup.currentIndex]?.dictId || activeMdictId;
-            void runMdictLookup(nextWord, mdictLookup.placement, currentDictId);
+            void runMdictLookup(nextWord, mdictLookup.placement, currentDictId, undefined, {
+              pushHistory: true,
+              keepOpenOnMiss: true,
+            });
           }}
-          onClose={() => setMdictLookup(null)}
+          onLiveQueryChange={handleLiveMdictQuery}
+          onSelectSuggestion={handleSelectMdictSuggestion}
+          onGoBack={handleMdictGoBack}
+          onRestoreScrollTopDone={() => {
+            setMdictLookup((prev) => (prev ? { ...prev, restoreScrollTop: null } : null));
+          }}
+          onClose={closeMdictPopup}
         />
       )}
 
