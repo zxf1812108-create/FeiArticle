@@ -8,7 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { ArrowLeft, BookA, Maximize2, Minimize2, X } from 'lucide-react';
+import { ArrowLeft, BookA, X } from 'lucide-react';
 import { MdictDictionarySummary, MdictLookupResult } from '../types';
 import { sanitizeMdictCss } from '../utils/mdict';
 import { stripDictExt } from '../utils/mdictStorage';
@@ -833,7 +833,6 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const bodyContentRef = useRef<HTMLDivElement>(null);
     const shadowRootRef = useRef<ShadowRoot | null>(null);
     const headerRef = useRef<HTMLDivElement>(null);
-    const dictNameRef = useRef<HTMLElement | null>(null);
     const searchInputRef = useRef<HTMLInputElement>(null);
     const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
     const clipRafRef = useRef<number | null>(null);
@@ -855,7 +854,6 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const manualExpandToggledRef = useRef(false);
     const pendingAutoExpandCheckRef = useRef(false);
     const [hasToggledExpand, setHasToggledExpand] = useState(false);
-    const [shiftExpandLeft, setShiftExpandLeft] = useState(false);
     const [topClipPx, setTopClipPx] = useState(0);
     const [bottomClipPx, setBottomClipPx] = useState(0);
     const topClipPxRef = useRef(0);
@@ -939,38 +937,6 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const displayedDictName = displayedDict
       ? stripDictExt(displayedDict.fileName) || displayedDict.title
       : result?.dictTitle || '';
-
-    // Measure whether the dictionary name occupies the horizontal center of the header bar;
-    // if so, shift the expand/restore button left so it sits immediately to the left of the dictionary name.
-    const measureExpandButtonPlacement = useCallback(() => {
-      const headerEl = headerRef.current;
-      const dictEl = dictNameRef.current;
-      if (!headerEl || !dictEl) {
-        setShiftExpandLeft(false);
-        return;
-      }
-      const headerRect = headerEl.getBoundingClientRect();
-      const dictRect = dictEl.getBoundingClientRect();
-      if (headerRect.width <= 0) return;
-
-      const dictLeftInHeader = dictRect.left - headerRect.left;
-      // Centered button is 28px wide (half = 14px) + 6px clearance on right = 20px from center
-      const centerRightBound = headerRect.width / 2 + 20;
-      const occupied = dictLeftInHeader < centerRightBound;
-      setShiftExpandLeft((prev) => (prev === occupied ? prev : occupied));
-    }, []);
-
-    useLayoutEffect(() => {
-      measureExpandButtonPlacement();
-    }, [displayedDictName, matchCount, queryWord, isExpanded, measureExpandButtonPlacement]);
-
-    useEffect(() => {
-      const headerEl = headerRef.current;
-      if (!headerEl || typeof ResizeObserver === 'undefined') return;
-      const ro = new ResizeObserver(() => measureExpandButtonPlacement());
-      ro.observe(headerEl);
-      return () => ro.disconnect();
-    }, [measureExpandButtonPlacement]);
 
     const updatePopupEdgeClips = useCallback(() => {
       const el = bodyScrollRef.current;
@@ -1467,32 +1433,6 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       }
     };
 
-    const expandButton = (
-      <button
-        type="button"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => {
-          manualExpandToggledRef.current = true;
-          pendingAutoExpandCheckRef.current = false;
-          setHasToggledExpand(true);
-          setIsExpanded((prev) => !prev);
-        }}
-        aria-label={isExpanded ? '恢复词典窗口大小' : '拉长词典窗口'}
-        title={isExpanded ? '恢复' : '拉长'}
-        className={`w-7 h-7 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0 ${
-          shiftExpandLeft
-            ? ''
-            : 'absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10'
-        }`}
-      >
-        {isExpanded ? (
-          <Minimize2 className="w-3.5 h-3.5" strokeWidth={1.9} />
-        ) : (
-          <Maximize2 className="w-3.5 h-3.5" strokeWidth={1.9} />
-        )}
-      </button>
-    );
-
     const handleInputChange = (nextVal: string) => {
       setInputText(nextVal);
       if (liveSearchTimerRef.current !== null) {
@@ -1575,10 +1515,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
             ref={headerRef}
             className="relative px-3.5 py-1.5 bg-[var(--fei-popup-header-bg)] border-b border-[var(--fei-popup-divider)] flex items-center justify-between gap-2 shrink-0 select-none"
           >
-            <div
-              style={!shiftExpandLeft ? { maxWidth: 'calc(50% - 22px)' } : undefined}
-              className="flex items-center gap-1.5 min-w-0 flex-1"
-            >
+            <div className="flex items-center gap-1.5 min-w-0 flex-1">
               {canGoBack ? (
                 <button
                   type="button"
@@ -1622,17 +1559,10 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
               />
             </div>
 
-            {!shiftExpandLeft && expandButton}
-
             <div className="flex items-center gap-1.5 shrink-0">
-              {shiftExpandLeft && expandButton}
-
               {displayedDictName ? (
                 matchCount > 1 ? (
                   <button
-                    ref={(el) => {
-                      dictNameRef.current = el;
-                    }}
                     type="button"
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={onCycleDict}
@@ -1643,12 +1573,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                     {displayedDictName}
                   </button>
                 ) : (
-                  <span
-                    ref={(el) => {
-                      dictNameRef.current = el;
-                    }}
-                    className="text-[12px] text-[var(--fei-text-muted)] truncate max-w-[min(220px,52vw)]"
-                  >
+                  <span className="text-[12px] text-[var(--fei-text-muted)] truncate max-w-[min(220px,52vw)]">
                     {displayedDictName}
                   </span>
                 )
