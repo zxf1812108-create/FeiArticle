@@ -8,6 +8,7 @@ import {
   EyeOff,
   FileCode2,
   Folder,
+  GripVertical,
   Moon,
   Music2,
   Square,
@@ -40,6 +41,7 @@ interface SyncModalProps {
   onImportDictFiles: (files: FileList) => Promise<void>;
   onAttachDictCss: (dictId: string, file: File) => Promise<void>;
   onSelectDict: (id: string) => void;
+  onReorderDicts: (orderedIds: string[], commit?: boolean) => void;
   onDeleteDict: (id: string) => Promise<void>;
   onSaveConfig: (next: WebDavConfig) => void;
   onClose: () => void;
@@ -63,6 +65,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   onImportDictFiles,
   onAttachDictCss,
   onSelectDict,
+  onReorderDicts,
   onDeleteDict,
   onSaveConfig,
   onClose,
@@ -88,6 +91,175 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const [dictImporting, setDictImporting] = useState(false);
   const [busyDictId, setBusyDictId] = useState<string | null>(null);
   const [dictErrorMsg, setDictErrorMsg] = useState<string | null>(null);
+  const [draggingDictId, setDraggingDictId] = useState<string | null>(null);
+  const dictListRef = useRef<HTMLDivElement>(null);
+  const dictRowRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const dictionariesRef = useRef<MdictDictionarySummary[]>(dictionaries);
+  dictionariesRef.current = dictionaries;
+  const suppressDictClickRef = useRef(false);
+  const dictDragCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      dictDragCleanupRef.current?.();
+      dictDragCleanupRef.current = null;
+    };
+  }, []);
+
+  const handleDictRowPointerDown = (
+    e: React.PointerEvent<HTMLElement>,
+    dictId: string,
+    immediateTouchDrag: boolean
+  ) => {
+    if (dictionariesRef.current.length <= 1) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (
+      !immediateTouchDrag &&
+      e.target instanceof Element &&
+      e.target.closest('button')
+    ) {
+      return;
+    }
+
+    dictDragCleanupRef.current?.();
+
+    const pointerId = e.pointerId;
+    const isTouch = e.pointerType === 'touch';
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = immediateTouchDrag && isTouch;
+    let orderChanged = false;
+    let latestIds = dictionariesRef.current.map((d) => d.id);
+    let longPressTimer: number | null = null;
+
+    if (dragging) {
+      suppressDictClickRef.current = true;
+      setDraggingDictId(dictId);
+    }
+
+    const clearLongPressTimer = () => {
+      if (longPressTimer !== null) {
+        window.clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+    };
+
+    // On touch devices, pressing the row body (outside the drag handle) uses a 320ms long-press
+    // so normal vertical scrolling still works naturally.
+    if (isTouch && !immediateTouchDrag) {
+      longPressTimer = window.setTimeout(() => {
+        longPressTimer = null;
+        dragging = true;
+        suppressDictClickRef.current = true;
+        setDraggingDictId(dictId);
+        try {
+          navigator.vibrate?.(10);
+        } catch {
+          // ignore
+        }
+      }, 320);
+    }
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+
+      if (!dragging) {
+        if (isTouch) {
+          if (Math.hypot(dx, dy) >= 8) {
+            clearLongPressTimer();
+          }
+          return;
+        }
+        if (Math.abs(dy) >= 5 || Math.hypot(dx, dy) >= 8) {
+          dragging = true;
+          suppressDictClickRef.current = true;
+          setDraggingDictId(dictId);
+        } else {
+          return;
+        }
+      }
+
+      if (moveEvent.cancelable) {
+        moveEvent.preventDefault();
+      }
+
+      // Gently auto-scroll dictionary list when dragging near its top/bottom edge
+      const listEl = dictListRef.current;
+      if (listEl) {
+        const listRect = listEl.getBoundingClientRect();
+        if (moveEvent.clientY < listRect.top + 28) {
+          listEl.scrollTop -= 6;
+        } else if (moveEvent.clientY > listRect.bottom - 28) {
+          listEl.scrollTop += 6;
+        }
+      }
+
+      const currentOrder = dictionariesRef.current.map((d) => d.id);
+      const fromIdx = currentOrder.indexOf(dictId);
+      if (fromIdx === -1) return;
+
+      let toIdx = 0;
+      for (let i = 0; i < currentOrder.length; i++) {
+        const otherId = currentOrder[i];
+        if (otherId === dictId) continue;
+        const rowEl = dictRowRefs.current.get(otherId);
+        if (!rowEl) continue;
+        const rect = rowEl.getBoundingClientRect();
+        const midY = rect.top + rect.height / 2;
+        if (moveEvent.clientY > midY) {
+          toIdx++;
+        }
+      }
+
+      if (toIdx !== fromIdx) {
+        const nextOrder = [...currentOrder];
+        nextOrder.splice(fromIdx, 1);
+        nextOrder.splice(toIdx, 0, dictId);
+        latestIds = nextOrder;
+        orderChanged = true;
+        onReorderDicts(nextOrder, false);
+      }
+    };
+
+    const onTouchMoveGuard = (touchEvent: TouchEvent) => {
+      if (dragging && touchEvent.cancelable) {
+        touchEvent.preventDefault();
+      }
+    };
+
+    const detach = () => {
+      clearLongPressTimer();
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerEnd);
+      window.removeEventListener('pointercancel', onPointerEnd);
+      window.removeEventListener('touchmove', onTouchMoveGuard);
+      if (dictDragCleanupRef.current === detach) {
+        dictDragCleanupRef.current = null;
+      }
+    };
+
+    const onPointerEnd = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== pointerId) return;
+      detach();
+      if (dragging) {
+        setDraggingDictId(null);
+        if (orderChanged) {
+          onReorderDicts(latestIds, true);
+        }
+        window.setTimeout(() => {
+          suppressDictClickRef.current = false;
+        }, 120);
+      }
+    };
+
+    dictDragCleanupRef.current = detach;
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onPointerEnd);
+    window.addEventListener('pointercancel', onPointerEnd);
+    window.addEventListener('touchmove', onTouchMoveGuard, { passive: false });
+  };
 
   const testDetectorRef = useRef<WhistleDetector | null>(null);
   const [whistleTesting, setWhistleTesting] = useState(false);
@@ -717,21 +889,52 @@ export const SyncModal: React.FC<SyncModalProps> = ({
                   暂未导入词典，支持导入 .mdx 词库及配套 .css 样式文件
                 </div>
               ) : (
-                <div className="max-h-[200px] overflow-y-auto divide-y divide-[var(--fei-border)]">
+                <div
+                  ref={dictListRef}
+                  className="max-h-[200px] overflow-y-auto divide-y divide-[var(--fei-border)]"
+                >
                   {dictionaries.map((dict) => {
                     const isActive = dict.id === activeDictId;
                     const isBusy = busyDictId === dict.id;
+                    const isDraggingThis = draggingDictId === dict.id;
+                    const canReorder = dictionaries.length > 1;
                     const displayName = stripDictExt(dict.fileName) || dict.title;
                     return (
                       <div
                         key={dict.id}
-                        onClick={() => onSelectDict(dict.id)}
-                        className={`flex items-center gap-2 px-3 py-2 min-h-[42px] cursor-pointer transition-colors ${
-                          isActive
-                            ? 'bg-[var(--fei-bg-selected)]'
-                            : 'hover:bg-[var(--fei-bg-hover)]'
+                        ref={(el) => {
+                          dictRowRefs.current.set(dict.id, el);
+                        }}
+                        onPointerDown={(e) => handleDictRowPointerDown(e, dict.id, false)}
+                        onClick={() => {
+                          if (suppressDictClickRef.current) return;
+                          onSelectDict(dict.id);
+                        }}
+                        title={canReorder ? '点击设为优先词典，拖动可调整词典顺序' : undefined}
+                        className={`flex items-center gap-2 px-3 py-2 min-h-[42px] cursor-pointer select-none transition-colors ${
+                          isDraggingThis
+                            ? 'bg-[var(--fei-bg-selected)] ring-1 ring-inset ring-[var(--fei-border-strong)] opacity-90 relative z-10'
+                            : isActive
+                              ? 'bg-[var(--fei-bg-selected)]'
+                              : 'hover:bg-[var(--fei-bg-hover)]'
                         }`}
                       >
+                        {canReorder && (
+                          <div
+                            role="presentation"
+                            onPointerDown={(e) => {
+                              e.stopPropagation();
+                              handleDictRowPointerDown(e, dict.id, true);
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            title="拖动调整词典顺序"
+                            aria-hidden="true"
+                            className="w-5 h-7 -ml-1.5 inline-flex items-center justify-center text-[var(--fei-text-muted)]/75 hover:text-[var(--fei-text-primary)] cursor-grab active:cursor-grabbing touch-none shrink-0"
+                          >
+                            <GripVertical className="w-3.5 h-3.5" strokeWidth={1.8} />
+                          </div>
+                        )}
+
                         <div className="w-4 h-4 flex items-center justify-center shrink-0 text-[var(--fei-text-primary)]">
                           {isActive ? (
                             <Check className="w-3.5 h-3.5" strokeWidth={2} />

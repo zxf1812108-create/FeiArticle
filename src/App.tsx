@@ -65,6 +65,7 @@ import {
   importMdictFile,
   listMdictDictionaries,
   lookupMdictWordAcrossAll,
+  reorderMdictDictionaries,
   searchMdictHeadwordsAcrossAll,
   stripDictExt,
 } from './utils/mdictStorage';
@@ -2567,6 +2568,29 @@ export default function App() {
     }
   };
 
+  const handleReorderMdictDicts = (orderedIds: string[], commit = true) => {
+    setMdictDicts((prev) => {
+      const byId = new Map(prev.map((d) => [d.id, d]));
+      const next: MdictDictionarySummary[] = [];
+      for (const id of orderedIds) {
+        const found = byId.get(id);
+        if (found) {
+          next.push({ ...found, sortOrder: next.length });
+          byId.delete(id);
+        }
+      }
+      for (const leftover of byId.values()) {
+        next.push({ ...leftover, sortOrder: next.length });
+      }
+      return next;
+    });
+    if (commit) {
+      void reorderMdictDictionaries(orderedIds).catch(() => {
+        // ignore storage errors
+      });
+    }
+  };
+
   // Batch Import .txt / .md / ebook / pasted text (defaults to .txt storage format, silently deduplicates)
   const handleImportDocs = async (
     items: Array<{
@@ -4295,6 +4319,13 @@ export default function App() {
             onExpandFolder={handleExpandFolder}
             onScrollTopChange={handleTreeScrollTopChange}
             onSelectTarget={handleSelectTreeTarget}
+            onClearSelection={() => {
+              if (activeTarget !== null) {
+                setActiveTarget(null);
+                setTreeStateUpdatedAt(Date.now());
+                setFoldersDirty(true);
+              }
+            }}
             onOpenDoc={handleOpenDoc}
             onCancelCut={() => {
               setCutItem(null);
@@ -4848,6 +4879,7 @@ export default function App() {
               void runMdictLookup(mdictLookup.queryWord, mdictLookup.placement, id);
             }
           }}
+          onReorderDicts={handleReorderMdictDicts}
           onDeleteDict={handleDeleteMdictDict}
           onSaveConfig={handleSaveSyncConfig}
           onClose={() => setShowSyncModal(false)}

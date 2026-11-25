@@ -48,6 +48,7 @@ function toSummary(rec: MdictDictionaryRecord): MdictDictionarySummary {
     numEntries: rec.numEntries,
     fileSize: rec.fileSize,
     addedAt: rec.addedAt,
+    sortOrder: rec.sortOrder,
     cssFileName: rec.cssFileName,
   };
 }
@@ -63,7 +64,12 @@ export async function listMdictDictionaries(): Promise<MdictDictionarySummary[]>
       for (const r of records) {
         recordCache.set(r.id, r);
       }
-      records.sort((a, b) => a.addedAt - b.addedAt);
+      records.sort((a, b) => {
+        const oa = typeof a.sortOrder === 'number' ? a.sortOrder : Number.MAX_SAFE_INTEGER;
+        const ob = typeof b.sortOrder === 'number' ? b.sortOrder : Number.MAX_SAFE_INTEGER;
+        if (oa !== ob) return oa - ob;
+        return a.addedAt - b.addedAt;
+      });
       resolve(records.map(toSummary));
     };
     req.onerror = () => reject(req.error || new Error('读取词典列表失败'));
@@ -127,6 +133,43 @@ export async function deleteMdictDictionary(id: string): Promise<void> {
     tx.onerror = () => {
       db.close();
       reject(tx.error || new Error('删除词典失败'));
+    };
+  });
+}
+
+export async function reorderMdictDictionaries(orderedIds: string[]): Promise<void> {
+  if (orderedIds.length === 0) return;
+  const orderMap = new Map<string, number>();
+  orderedIds.forEach((id, idx) => orderMap.set(id, idx));
+
+  const db = await openMdictDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_DICTS, 'readwrite');
+    const store = tx.objectStore(STORE_DICTS);
+    const getAllReq = store.getAll();
+    getAllReq.onsuccess = () => {
+      const records = (getAllReq.result || []) as MdictDictionaryRecord[];
+      let fallbackOrder = orderedIds.length;
+      for (const rec of records) {
+        const nextOrder = orderMap.has(rec.id) ? (orderMap.get(rec.id) as number) : fallbackOrder++;
+        if (rec.sortOrder !== nextOrder) {
+          const updated: MdictDictionaryRecord = { ...rec, sortOrder: nextOrder };
+          store.put(updated);
+          recordCache.set(rec.id, updated);
+        }
+      }
+    };
+    getAllReq.onerror = () => {
+      db.close();
+      reject(getAllReq.error || new Error('读取词典排序失败'));
+    };
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error('保存词典排序失败'));
     };
   });
 }

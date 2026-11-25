@@ -222,6 +222,7 @@ export interface MdictDictionaryRecord {
   numEntries: number;
   fileSize: number;
   addedAt: number;
+  sortOrder?: number;
   totalRecordDecompressedSize: number;
   keyBlocks: MdictKeyBlockMeta[];
   recordBlocks: MdictRecordBlockMeta[];
@@ -235,6 +236,7 @@ export interface MdictDictionarySummary {
   numEntries: number;
   fileSize: number;
   addedAt: number;
+  sortOrder?: number;
   cssFileName?: string;
 }
 
