@@ -416,6 +416,8 @@ export default function App() {
   const autoMutationSeqRef = useRef(0);
   const autoCatalogDebounceTimerRef = useRef<number | null>(null);
   const autoProgressDebounceTimerRef = useRef<number | null>(null);
+  const progressLongPressTimerRef = useRef<number | null>(null);
+  const toolbarBlankTapRef = useRef<{ pointerId: number; startX: number; startY: number } | null>(null);
   const lastAutoProgressPushAtRef = useRef(0);
   const lastAutoPullAtRef = useRef(0);
   const autoSyncFailCountRef = useRef(0);
@@ -2231,6 +2233,25 @@ export default function App() {
     setMdictLookup(null);
   };
 
+  const dismissReadingOverlaysAndSelection = () => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    closeMdictPopup();
+    setShowFontSizeBar(false);
+    setNotePopoverState(null);
+    setShowNotesListModal(false);
+    if (docViewRef.current) {
+      docViewRef.current.clearPopupsAndSelection();
+    } else {
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        // ignore
+      }
+    }
+  };
+
   const runMdictLookup = async (
     word: string,
     placement: 'top' | 'bottom',
@@ -3334,6 +3355,10 @@ export default function App() {
         autoCatalogDebounceTimerRef.current = null;
       }
       clearAutoProgressDebounceTimer();
+      if (progressLongPressTimerRef.current !== null) {
+        window.clearTimeout(progressLongPressTimerRef.current);
+        progressLongPressTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -3858,6 +3883,46 @@ export default function App() {
     };
   }, []);
 
+  const handleProgressLabelPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+    const pointerId = e.pointerId;
+    const startX = e.clientX;
+    const startY = e.clientY;
+
+    const clearTimer = () => {
+      if (progressLongPressTimerRef.current !== null) {
+        window.clearTimeout(progressLongPressTimerRef.current);
+        progressLongPressTimerRef.current = null;
+      }
+    };
+
+    clearTimer();
+    progressLongPressTimerRef.current = window.setTimeout(() => {
+      progressLongPressTimerRef.current = null;
+      handleToggleFocusToolbar();
+    }, 450);
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) >= 12) {
+        clearTimer();
+      }
+    };
+
+    const cleanup = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== pointerId) return;
+      clearTimer();
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', cleanup);
+      window.removeEventListener('pointercancel', cleanup);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', cleanup);
+    window.addEventListener('pointercancel', cleanup);
+  };
+
   // Drag-to-reorder handler (plus optional non-conflicting long-press) for movable bottom toolbar icons
   const handleToolbarIconPointerDown = (
     e: React.PointerEvent<HTMLButtonElement>,
@@ -4174,14 +4239,51 @@ export default function App() {
       <footer
         aria-label="底部工具栏"
         onPointerDownCapture={() => {
-          if (mdictLookup) {
-            setMdictLookup(null);
+          if (mdictLookup || mdictLookupPending) {
+            closeMdictPopup();
           }
         }}
         onClickCapture={() => {
-          if (mdictLookup) {
-            setMdictLookup(null);
+          if (mdictLookup || mdictLookupPending) {
+            closeMdictPopup();
           }
+        }}
+        onPointerDown={(e) => {
+          if (mainViewRef.current !== 'doc') {
+            toolbarBlankTapRef.current = null;
+            return;
+          }
+          if (e.pointerType === 'mouse' && e.button !== 0) return;
+          if (
+            e.target instanceof Element &&
+            e.target.closest('button, a, input, textarea, [role="button"]')
+          ) {
+            toolbarBlankTapRef.current = null;
+            return;
+          }
+          toolbarBlankTapRef.current = {
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startY: e.clientY,
+          };
+        }}
+        onPointerUp={(e) => {
+          const start = toolbarBlankTapRef.current;
+          toolbarBlankTapRef.current = null;
+          if (!start || start.pointerId !== e.pointerId) return;
+          if (mainViewRef.current !== 'doc') return;
+          if (suppressToolbarClickRef.current || draggingToolbarIconId !== null) return;
+          if (Math.hypot(e.clientX - start.startX, e.clientY - start.startY) >= 10) return;
+          if (
+            e.target instanceof Element &&
+            e.target.closest('button, a, input, textarea, [role="button"]')
+          ) {
+            return;
+          }
+          dismissReadingOverlaysAndSelection();
+        }}
+        onPointerCancel={() => {
+          toolbarBlankTapRef.current = null;
         }}
         onContextMenu={(e) => e.preventDefault()}
         className="relative shrink-0 bg-[var(--fei-bg-bar)] border-t border-[var(--fei-border)] pb-[env(safe-area-inset-bottom,0px)] select-none"
@@ -4221,7 +4323,7 @@ export default function App() {
             )}
           </div>
         )}
-        <div className="h-[54px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-start gap-0.5 sm:gap-1">
+        <div className="h-[54px] max-w-[760px] mx-auto px-3 sm:px-6 flex items-center justify-start gap-0">
           {mainView === 'tree' ? (
             <>
               {treeToolbarOrder.map((iconId) => {
@@ -4252,7 +4354,7 @@ export default function App() {
                           ? '打开当前选中文档进入阅读（可拖动调整图标位置）'
                           : '请先选中一个文档（可拖动调整图标位置）'
                       }
-                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
+                      className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
                         isDraggingThis
                           ? dragCls
                           : canReadSelectedDoc
@@ -4278,7 +4380,7 @@ export default function App() {
                       }}
                       aria-label="导入文本文档"
                       title="导入 .txt / .md / .epub / .mobi 等文档或粘贴文本（可拖动调整图标位置）"
-                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                      className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
                     >
                       <Download className="w-[22px] h-[22px]" strokeWidth={1.8} />
                     </button>
@@ -4304,7 +4406,7 @@ export default function App() {
                             ? '取消选择剪切项'
                             : '剪切选定的目录或文章（可拖动调整图标位置）'
                       }
-                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] transition-all shrink-0 touch-none select-none ${
+                      className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] transition-all shrink-0 touch-none select-none ${
                         isDraggingThis
                           ? dragCls
                           : cutItem || pickCutMode
@@ -4340,7 +4442,7 @@ export default function App() {
                           ? '当前已加密，点击解密（可拖动调整图标位置）'
                           : '当前未加密，点击加密（可拖动调整图标位置）'
                       }
-                      className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                      className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
                     >
                       {isSelectedEncrypted ? (
                         <Lock className="w-[21px] h-[21px]" strokeWidth={1.8} />
@@ -4363,7 +4465,7 @@ export default function App() {
                     }}
                     aria-label="设置（同步、存储与词典）"
                     title="设置（同步、存储与词典，可拖动调整图标位置）"
-                    className={`w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                    className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
                   >
                     <Settings className="w-[21px] h-[21px]" strokeWidth={1.8} />
                   </button>
@@ -4404,7 +4506,7 @@ export default function App() {
                 }}
                 aria-label="回收站（拖入目录或文档可删除，点击查看回收站）"
                 title="回收站（拖入文档或目录可删除，内容保留 30 天）"
-                className={`ml-auto w-[42px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all duration-150 shrink-0 ${
+                className={`ml-auto w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all duration-150 shrink-0 ${
                   trashDragOver
                     ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)] scale-105'
                     : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
@@ -4439,7 +4541,7 @@ export default function App() {
                       }}
                       aria-label="进入目录模式"
                       title="目录（可拖动调整图标位置）"
-                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
+                      className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)] transition-all shrink-0 touch-none select-none ${dragCls}`}
                     >
                       <FolderTree className="w-[21px] h-[21px]" strokeWidth={1.8} />
                     </button>
@@ -4465,7 +4567,7 @@ export default function App() {
                           ? '口哨翻页已开启（点击关闭，可拖动调整图标位置）'
                           : '开启口哨翻页（吹一声口哨翻下一页，可拖动调整图标位置）'
                       }
-                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none disabled:opacity-50 ${
+                      className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none disabled:opacity-50 ${
                         isDraggingThis
                           ? dragCls
                           : whistleEnabled
@@ -4509,7 +4611,7 @@ export default function App() {
                           ? `当前页有 ${visibleNoteIds.length} 条笔记（点击查看/编辑，长按或右键打开全部笔记列表）`
                           : '读书笔记（点击记录，长按或右键查看全部笔记，可拖动调整位置）'
                       }
-                      className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
+                      className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
                         isDraggingThis
                           ? dragCls
                           : noteActive
@@ -4540,7 +4642,7 @@ export default function App() {
                     }}
                     aria-label="字号与断字设置"
                     title="字号与断字设置（可拖动调整图标位置）"
-                    className={`w-[44px] sm:w-[46px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
+                    className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
                       isDraggingThis
                         ? dragCls
                         : showFontSizeBar
@@ -4553,18 +4655,22 @@ export default function App() {
                 );
               })}
 
-              {/* 最右侧固定：自适应精度百分比阅读进度（点击切换专注模式：隐藏/恢复其他工具栏图标） */}
+              {/* 最右侧固定：自适应精度百分比阅读进度（长按切换专注模式：隐藏/恢复其他工具栏图标） */}
               <button
                 type="button"
-                onClick={handleToggleFocusToolbar}
+                onPointerDown={handleProgressLabelPointerDown}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
                 aria-pressed={focusToolbarHidden}
                 aria-label={
                   focusToolbarHidden
-                    ? `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，点击恢复工具栏图标`
-                    : `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，点击隐藏工具栏其他图标进入专注阅读`
+                    ? `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，长按恢复工具栏图标`
+                    : `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，长按隐藏工具栏其他图标进入专注阅读`
                 }
-                title={focusToolbarHidden ? '点击恢复工具栏图标' : '点击隐藏其他图标进入专注阅读'}
-                className="ml-auto min-w-[56px] h-[46px] px-2 -mr-1 inline-flex items-center justify-end rounded-lg text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors select-none whitespace-nowrap shrink-0 cursor-pointer"
+                title={focusToolbarHidden ? '长按恢复工具栏图标' : '长按隐藏其他图标进入专注阅读'}
+                className="ml-auto min-w-[56px] h-[46px] px-2 -mr-1 inline-flex items-center justify-end rounded-lg text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors touch-none select-none whitespace-nowrap shrink-0 cursor-pointer"
               >
                 {formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}
               </button>
@@ -4740,7 +4846,7 @@ export default function App() {
         <>
           <div
             className="fixed inset-0 z-30"
-            onClick={() => setShowFontSizeBar(false)}
+            onClick={dismissReadingOverlaysAndSelection}
           />
           <div
             role="dialog"
@@ -4864,7 +4970,10 @@ export default function App() {
             docViewRef.current?.jumpToCharOffset(charOffset);
           }}
           onSaveNote={handleSaveReadingNote}
-          onClose={() => setNotePopoverState(null)}
+          onClose={() => {
+            setNotePopoverState(null);
+            docViewRef.current?.clearPopupsAndSelection();
+          }}
         />
       )}
 
@@ -4877,7 +4986,10 @@ export default function App() {
           onJumpToNote={handleJumpToNoteFromList}
           onDeleteNote={handleDeleteReadingNote}
           onCopySuccess={showToast}
-          onClose={() => setShowNotesListModal(false)}
+          onClose={() => {
+            setShowNotesListModal(false);
+            docViewRef.current?.clearPopupsAndSelection();
+          }}
         />
       )}
 

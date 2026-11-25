@@ -71,6 +71,7 @@ export interface MinimalDocViewHandle {
   turnPageDown: () => void;
   jumpToCharOffset: (charOffset: number) => void;
   captureNoteAnchorContext: () => ScreenNoteAnchorContext | null;
+  clearPopupsAndSelection: () => void;
 }
 
 interface MinimalDocViewProps {
@@ -1929,6 +1930,33 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           return;
         }
         performPageDownRef.current();
+      },
+      clearPopupsAndSelection() {
+        if (selectionCheckTimerRef.current) {
+          window.clearTimeout(selectionCheckTimerRef.current);
+          selectionCheckTimerRef.current = null;
+        }
+        cancelPendingSelectionClear();
+        setCopyPopover(null);
+        setShowOutline(false);
+        setPreviewImage(null);
+        try {
+          window.getSelection()?.removeAllRanges();
+          lastSelectionClearedOnReleaseAtRef.current = performance.now();
+        } catch {
+          // ignore
+        }
+        // Follow-up pass in case mobile WebView restores selection handles while dismissing soft keyboard
+        clearSelectionTimerRef.current = window.setTimeout(() => {
+          clearSelectionTimerRef.current = null;
+          const activeTag = document.activeElement?.tagName;
+          if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
+          try {
+            window.getSelection()?.removeAllRanges();
+          } catch {
+            // ignore
+          }
+        }, 50);
       },
       jumpToCharOffset(charOffset: number) {
         const clamped = Math.max(0, Math.min(contentRef.current.length, Math.round(charOffset)));

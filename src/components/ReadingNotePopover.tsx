@@ -217,6 +217,7 @@ export const ReadingNotePopover: React.FC<ReadingNotePopoverProps> = ({
   const handleSaveAndClose = useCallback(() => {
     commitCurrentDraft();
     skipNextCommitRef.current = true;
+    textareaRef.current?.blur();
     onClose();
   }, [commitCurrentDraft, onClose]);
 
