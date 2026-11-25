@@ -215,14 +215,8 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
     docId: string | null;
     position: InsertPosition;
   } | null>(null);
-  const [dragGhost, setDragGhost] = useState<{
-    payload: DragPayload;
-    label: string;
-    x: number;
-    y: number;
-  } | null>(null);
   const dragActiveRef = useRef(false);
-  dragActiveRef.current = Boolean(dragging || dragGhost);
+  dragActiveRef.current = Boolean(dragging);
 
   // Pull-to-refresh at the top of Directory Mode (touch gesture, E-Ink friendly low-repaint steps)
   React.useEffect(() => {
@@ -384,7 +378,6 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
 
   const clearDragState = () => {
     setDragging(null);
-    setDragGhost(null);
     setFolderDrop(null);
     setDocDrop(null);
     onDragPayloadChange?.(null);
@@ -473,7 +466,6 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
   const handleDragHandlePointerDown = (
     e: React.PointerEvent<HTMLButtonElement>,
     payload: DragPayload,
-    label: string,
     onShortTap?: () => void
   ) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
@@ -633,7 +625,6 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
         isDragging = true;
         suppressClickRef.current = true;
         setDragging(payload);
-        setDragGhost({ payload, label, x: moveEvent.clientX, y: moveEvent.clientY });
         onDragPayloadChange?.(payload);
         try {
           navigator.vibrate?.(10);
@@ -645,7 +636,6 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
       if (moveEvent.cancelable) {
         moveEvent.preventDefault();
       }
-      setDragGhost({ payload, label, x: moveEvent.clientX, y: moveEvent.clientY });
       resolveDropTargets(moveEvent.clientX, moveEvent.clientY);
     };
 
@@ -758,11 +748,7 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
             type="button"
             data-tree-drag-handle="true"
             onPointerDown={(e) =>
-              handleDragHandlePointerDown(
-                e,
-                { kind: 'doc', id: doc.id },
-                doc.title || '无标题文档'
-              )
+              handleDragHandlePointerDown(e, { kind: 'doc', id: doc.id })
             }
             onClick={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
@@ -1032,7 +1018,6 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
                       handleDragHandlePointerDown(
                         e,
                         { kind: 'folder', id: folder.id },
-                        folder.name,
                         () => toggleExpand(folder.id)
                       )
                     }
@@ -1237,15 +1222,6 @@ export const MinimalTreeView = forwardRef<MinimalTreeViewHandle, MinimalTreeView
           )}
         </div>
       </div>
-
-      {dragGhost && (
-        <div
-          style={{ left: dragGhost.x, top: dragGhost.y }}
-          className="fixed -translate-x-1/2 -translate-y-full -mt-4 pointer-events-none z-50 max-w-[220px] px-3 py-1.5 rounded-lg bg-[var(--fei-btn-primary-bg)] text-[var(--fei-btn-primary-text)] text-[13px] shadow-lg eink:shadow-none truncate"
-        >
-          {dragGhost.payload.kind === 'folder' ? `目录：${dragGhost.label}` : dragGhost.label}
-        </div>
-      )}
     </div>
   );
 });
