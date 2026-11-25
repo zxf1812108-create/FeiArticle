@@ -1515,7 +1515,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
             ref={headerRef}
             className="relative px-3.5 py-1.5 bg-[var(--fei-popup-header-bg)] border-b border-[var(--fei-popup-divider)] flex items-center justify-between gap-2 shrink-0 select-none"
           >
-            <div className="flex items-center gap-1.5 min-w-0 flex-1">
+            <div className="w-[min(50%,240px)] shrink-0 flex items-center gap-1.5 min-w-0">
               {canGoBack ? (
                 <button
                   type="button"
@@ -1559,7 +1559,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
               />
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex-1 min-w-0 flex items-center justify-end gap-1.5">
               {displayedDictName ? (
                 matchCount > 1 ? (
                   <button
@@ -1568,12 +1568,12 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                     onClick={onCycleDict}
                     title="点击切换下一个包含该词的词典"
                     aria-label={`当前词典 ${displayedDictName}，点击切换词典`}
-                    className="text-[12px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate max-w-[min(220px,52vw)] hover:opacity-75 transition-opacity cursor-pointer"
+                    className="text-[12px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate min-w-0 hover:opacity-75 transition-opacity cursor-pointer"
                   >
                     {displayedDictName}
                   </button>
                 ) : (
-                  <span className="text-[12px] text-[var(--fei-text-muted)] truncate max-w-[min(220px,52vw)]">
+                  <span className="text-[12px] text-[var(--fei-text-muted)] truncate min-w-0">
                     {displayedDictName}
                   </span>
                 )
@@ -1584,7 +1584,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={onClose}
                 aria-label="关闭释义"
-                className="w-7 h-7 -mr-1 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
+                className="w-7 h-7 -mr-1 shrink-0 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
