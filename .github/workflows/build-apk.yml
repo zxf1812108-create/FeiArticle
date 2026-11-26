@@ -171,7 +171,7 @@ jobs:
             fi
             if [ "${SIGNING_MODE}" = "ephemeral" ]; then
               echo ""
-              echo "> 提示：本次使用自动生成的临时密钥签名；若希望后续版本直接覆盖升级，可先运行一次「Generate Android Signing Keystore」工作流生成密钥，再在 Settings → Secrets → Repository secrets 中添加 \`ANDROID_KEYSTORE_BASE64\` 和 \`KEYSTORE_PASSWORD\`。"
+              echo "> 提示：本次使用自动生成的临时密钥签名；若希望后续版本直接覆盖升级，请在 Settings → Secrets → Repository secrets 中添加 \`ANDROID_KEYSTORE_BASE64\` 和 \`KEYSTORE_PASSWORD\`。"
             fi
           } > release-output/release-notes.md
 
