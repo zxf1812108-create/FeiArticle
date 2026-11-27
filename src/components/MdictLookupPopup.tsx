@@ -836,30 +836,82 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const searchInputRef = useRef<HTMLInputElement>(null);
     const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
     const clipRafRef = useRef<number | null>(null);
-    const autoExpandRafRef = useRef<number | null>(null);
     const liveSearchTimerRef = useRef<number | null>(null);
+    const blurExpandTimerRef = useRef<number | null>(null);
+    const bodyPointerClearTimerRef = useRef<number | null>(null);
     const pendingAnchorRef = useRef<string | null>(null);
     const isInputFocusedRef = useRef(false);
-    const stableViewportHeightRef = useRef<number>(
-      typeof window !== 'undefined' ? window.innerHeight : 800
+    const [isInputFocused, setIsInputFocused] = useState(false);
+    const wasEditingOnBodyDownRef = useRef(false);
+    const bodyPointerActiveRef = useRef(false);
+    const prevKeyboardInsetRef = useRef(0);
+    const pinnedScrollAfterExpandRef = useRef<{ scrollTop: number; expiresAt: number } | null>(
+      null
     );
+
+    const hasResult = Boolean(result && result.htmlDefinitions.length > 0);
+    const hasResultRef = useRef(hasResult);
+    hasResultRef.current = hasResult;
 
     const [inputText, setInputText] = useState(queryWord);
     const [keyboardInsetPx, setKeyboardInsetPx] = useState(0);
-    const [isExpanded, setIsExpanded] = useState(false);
-    const isExpandedRef = useRef(false);
+    const [isExpanded, setIsExpanded] = useState(() => !loading && hasResult);
+    const isExpandedRef = useRef(isExpanded);
     isExpandedRef.current = isExpanded;
     const loadingRef = useRef(loading);
     loadingRef.current = loading;
-    const manualExpandToggledRef = useRef(false);
-    const pendingAutoExpandCheckRef = useRef(false);
-    const [hasToggledExpand, setHasToggledExpand] = useState(false);
+    const pendingExpandOnResultRef = useRef(false);
+    const [hasToggledExpand, setHasToggledExpand] = useState(() => !loading && hasResult);
     const [topClipPx, setTopClipPx] = useState(0);
     const [bottomClipPx, setBottomClipPx] = useState(0);
     const topClipPxRef = useRef(0);
     const bottomClipPxRef = useRef(0);
     const bottomSpacerRef = useRef<HTMLDivElement>(null);
     const bottomSpacerHeightRef = useRef(0);
+
+    const cancelBlurExpandTimer = useCallback(() => {
+      if (blurExpandTimerRef.current !== null) {
+        window.clearTimeout(blurExpandTimerRef.current);
+        blurExpandTimerRef.current = null;
+      }
+    }, []);
+
+    const expandPopupDirectly = useCallback(() => {
+      cancelBlurExpandTimer();
+      pendingExpandOnResultRef.current = false;
+      setHasToggledExpand(true);
+      setIsExpanded(true);
+    }, [cancelBlurExpandTimer]);
+
+    const exitEditModeAndExpand = useCallback(
+      (options?: { preserveScrollTop?: number | null; waitForResult?: boolean }) => {
+        cancelBlurExpandTimer();
+        isInputFocusedRef.current = false;
+        setIsInputFocused(false);
+        searchInputRef.current?.blur();
+
+        if (typeof options?.preserveScrollTop === 'number' && options.preserveScrollTop > 0) {
+          pinnedScrollAfterExpandRef.current = {
+            scrollTop: options.preserveScrollTop,
+            expiresAt: performance.now() + 900,
+          };
+        } else if (options?.preserveScrollTop === 0) {
+          pinnedScrollAfterExpandRef.current = null;
+        }
+
+        if (options?.waitForResult) {
+          pendingExpandOnResultRef.current = true;
+          return;
+        }
+
+        if (hasResultRef.current && !loadingRef.current) {
+          expandPopupDirectly();
+        } else {
+          pendingExpandOnResultRef.current = true;
+        }
+      },
+      [cancelBlurExpandTimer, expandPopupDirectly]
+    );
 
     // Sync editable input when queryWord changes externally (selection, cross-ref click, back, suggestion tap)
     useEffect(() => {
@@ -871,24 +923,36 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       }
     }, [queryWord]);
 
-    // Lift bottom-docked/expanded popup cleanly above mobile soft keyboard via visualViewport
+    // Lift bottom-docked/expanded popup cleanly above mobile soft keyboard via visualViewport,
+    // and auto-exit edit mode + expand if the user dismisses the soft keyboard manually.
     useEffect(() => {
       if (typeof window === 'undefined') return;
       const updateViewport = () => {
         const vv = window.visualViewport;
         const innerH = window.innerHeight;
         if (!vv) {
-          if (!isInputFocusedRef.current) {
-            stableViewportHeightRef.current = innerH;
-          }
+          prevKeyboardInsetRef.current = 0;
           setKeyboardInsetPx(0);
           return;
         }
         const inset = Math.max(0, Math.round(innerH - (vv.height + vv.offsetTop)));
         const nextInset = inset >= 80 ? inset : 0;
-        if (nextInset === 0) {
-          stableViewportHeightRef.current = Math.max(innerH, Math.round(vv.height));
+        const prevInset = prevKeyboardInsetRef.current;
+        prevKeyboardInsetRef.current = nextInset;
+
+        if (prevInset >= 80 && nextInset === 0 && isInputFocusedRef.current && !bodyPointerActiveRef.current) {
+          cancelBlurExpandTimer();
+          isInputFocusedRef.current = false;
+          setIsInputFocused(false);
+          searchInputRef.current?.blur();
+          if (!loadingRef.current && hasResultRef.current) {
+            setHasToggledExpand(true);
+            setIsExpanded(true);
+          } else {
+            pendingExpandOnResultRef.current = true;
+          }
         }
+
         setKeyboardInsetPx((prev) => (prev === nextInset ? prev : nextInset));
       };
       updateViewport();
@@ -901,12 +965,18 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         vv?.removeEventListener('scroll', updateViewport);
         window.removeEventListener('resize', updateViewport);
       };
-    }, []);
+    }, [cancelBlurExpandTimer]);
 
     useEffect(() => {
       return () => {
         if (liveSearchTimerRef.current !== null) {
           window.clearTimeout(liveSearchTimerRef.current);
+        }
+        if (blurExpandTimerRef.current !== null) {
+          window.clearTimeout(blurExpandTimerRef.current);
+        }
+        if (bodyPointerClearTimerRef.current !== null) {
+          window.clearTimeout(bodyPointerClearTimerRef.current);
         }
       };
     }, []);
@@ -1037,7 +1107,29 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       });
     }, [updatePopupEdgeClips]);
 
+    const applyPinnedScrollIfNeeded = useCallback((): boolean => {
+      const pinned = pinnedScrollAfterExpandRef.current;
+      if (!pinned) return false;
+      if (performance.now() > pinned.expiresAt) {
+        pinnedScrollAfterExpandRef.current = null;
+        return false;
+      }
+      const el = bodyScrollRef.current;
+      if (!el) return false;
+      const naturalMax = getNaturalMaxScroll(el);
+      const neededSpacer = Math.max(0, Math.ceil(pinned.scrollTop - naturalMax));
+      setSpacerHeightSync(neededSpacer);
+      if (Math.abs(el.scrollTop - pinned.scrollTop) > 0.5) {
+        el.scrollTop = pinned.scrollTop;
+      }
+      return true;
+    }, [getNaturalMaxScroll, setSpacerHeightSync]);
+
     const handleBodyScroll = useCallback(() => {
+      if (applyPinnedScrollIfNeeded()) {
+        scheduleEdgeClipUpdate();
+        return;
+      }
       const el = bodyScrollRef.current;
       if (el && bottomSpacerHeightRef.current > 0) {
         const naturalMax = getNaturalMaxScroll(el);
@@ -1047,62 +1139,16 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         }
       }
       scheduleEdgeClipUpdate();
-    }, [getNaturalMaxScroll, setSpacerHeightSync, scheduleEdgeClipUpdate]);
-
-    const runOverflowAutoExpandCheck = useCallback(() => {
-      if (isExpandedRef.current || manualExpandToggledRef.current || loadingRef.current) {
-        pendingAutoExpandCheckRef.current = false;
-        return;
-      }
-      const el = bodyScrollRef.current;
-      const contentEl = bodyContentRef.current;
-      if (!el || !contentEl) return;
-
-      const viewHeight = el.clientHeight;
-      if (viewHeight <= 0) return;
-
-      // Measure against standard compact body height so mobile soft-keyboard shrinkage
-      // never falsely triggers auto-expand for a short definition.
-      const standardCompactOuter = Math.min(stableViewportHeightRef.current * 0.4, 340);
-      const headerH = headerRef.current?.offsetHeight || 44;
-      const standardCompactBodyHeight = Math.max(80, standardCompactOuter - headerH - 12);
-      const effectiveCompactHeight = Math.max(viewHeight, standardCompactBodyHeight);
-
-      const lines = collectPopupVisualLines(el, contentEl, shadowRootRef.current);
-      const style = window.getComputedStyle(el);
-      const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
-      const contentNaturalHeight = contentEl.getBoundingClientRect().height + padY;
-
-      // Shadow DOM content not painted yet — keep pending so onContentRendered triggers the check
-      if (lines.length === 0 && contentNaturalHeight <= padY + 1) {
-        return;
-      }
-
-      pendingAutoExpandCheckRef.current = false;
-      const overflowsByLines =
-        lines.length > 0 && lines[lines.length - 1].bottom > effectiveCompactHeight + 2;
-      const overflowsByHeight = contentNaturalHeight > effectiveCompactHeight + 6;
-      if (overflowsByLines || overflowsByHeight) {
-        setHasToggledExpand(true);
-        setIsExpanded(true);
-      }
-    }, []);
-
-    const scheduleAutoExpandCheck = useCallback(() => {
-      if (autoExpandRafRef.current !== null) {
-        window.cancelAnimationFrame(autoExpandRafRef.current);
-      }
-      autoExpandRafRef.current = window.requestAnimationFrame(() => {
-        autoExpandRafRef.current = null;
-        runOverflowAutoExpandCheck();
-      });
-    }, [runOverflowAutoExpandCheck]);
+    }, [applyPinnedScrollIfNeeded, getNaturalMaxScroll, setSpacerHeightSync, scheduleEdgeClipUpdate]);
 
     const autoExpandIfOverflowing = useCallback(() => {
-      if (isExpandedRef.current || manualExpandToggledRef.current) return;
-      pendingAutoExpandCheckRef.current = true;
-      scheduleAutoExpandCheck();
-    }, [scheduleAutoExpandCheck]);
+      if (isInputFocusedRef.current) return;
+      if (!loadingRef.current && hasResultRef.current) {
+        expandPopupDirectly();
+      } else {
+        pendingExpandOnResultRef.current = true;
+      }
+    }, [expandPopupDirectly]);
 
     const scrollToAnchor = useCallback(
       (anchorId: string, sourceEntry?: Element | null): boolean => {
@@ -1161,17 +1207,22 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         setSpacerHeightSync(neededSpacer);
         scrollEl.scrollTop = desiredTop;
         updatePopupEdgeClips();
+        if (isInputFocusedRef.current) {
+          exitEditModeAndExpand();
+        }
         return true;
       },
-      [getNaturalMaxScroll, setSpacerHeightSync, updatePopupEdgeClips]
+      [exitEditModeAndExpand, getNaturalMaxScroll, setSpacerHeightSync, updatePopupEdgeClips]
     );
 
     const handleLookupWordWithAnchor = useCallback(
       (word: string, anchorId?: string) => {
+        pinnedScrollAfterExpandRef.current = null;
         pendingAnchorRef.current = anchorId || null;
+        exitEditModeAndExpand({ waitForResult: true });
         onLookupWord(word);
       },
-      [onLookupWord]
+      [exitEditModeAndExpand, onLookupWord]
     );
 
     const currentWords = useMemo(() => {
@@ -1184,45 +1235,31 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     }, [queryWord, result?.matchedHeadword]);
 
     const handleShadowContentRendered = useCallback(() => {
+      applyPinnedScrollIfNeeded();
       scheduleEdgeClipUpdate();
-      if (pendingAutoExpandCheckRef.current) {
-        scheduleAutoExpandCheck();
-      }
-    }, [scheduleEdgeClipUpdate, scheduleAutoExpandCheck]);
+    }, [applyPinnedScrollIfNeeded, scheduleEdgeClipUpdate]);
 
     useEffect(() => {
       return () => {
         if (clipRafRef.current !== null) {
           window.cancelAnimationFrame(clipRafRef.current);
         }
-        if (autoExpandRafRef.current !== null) {
-          window.cancelAnimationFrame(autoExpandRafRef.current);
-        }
       };
     }, []);
 
-    // Whenever displayed content changes (live search, suggestion list, cross-ref click, back, dict switch)
-    // while in compact mode, automatically switch to expanded mode if the new content overflows.
-    const contentSignature = useMemo(
-      () =>
-        `${result?.dictId ?? ''}|${result?.matchedHeadword ?? ''}|${result?.htmlDefinitions.length ?? 0}|${suggestions.join('\u001f')}|${error ?? ''}`,
-      [result?.dictId, result?.matchedHeadword, result?.htmlDefinitions.length, suggestions, error]
-    );
-    const prevContentSigRef = useRef<string | null>(null);
+    // Directly expand the lookup popup whenever a definition result is ready and the user is not editing.
     useEffect(() => {
       if (loading) return;
-      const prev = prevContentSigRef.current;
-      prevContentSigRef.current = contentSignature;
-      if (prev !== null && prev !== contentSignature) {
-        manualExpandToggledRef.current = false;
-        if (!isExpandedRef.current) {
-          pendingAutoExpandCheckRef.current = true;
-          scheduleAutoExpandCheck();
-        }
+      if (isInputFocusedRef.current) return;
+      if (hasResult) {
+        expandPopupDirectly();
+      } else {
+        pendingExpandOnResultRef.current = false;
       }
-    }, [contentSignature, loading, scheduleAutoExpandCheck]);
+    }, [loading, hasResult, isInputFocused, queryWord, result?.dictId, result?.matchedHeadword, expandPopupDirectly]);
 
     useEffect(() => {
+      pinnedScrollAfterExpandRef.current = null;
       const pendingAnchor = pendingAnchorRef.current;
       if (pendingAnchor && result && result.htmlDefinitions.length > 0) {
         pendingAnchorRef.current = null;
@@ -1267,25 +1304,39 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     ]);
 
     useLayoutEffect(() => {
+      applyPinnedScrollIfNeeded();
       updatePopupEdgeClips();
-    }, [isExpanded, popupFontSize, loading, error, suggestions, updatePopupEdgeClips]);
+    }, [
+      isExpanded,
+      keyboardInsetPx,
+      popupFontSize,
+      loading,
+      error,
+      suggestions,
+      applyPinnedScrollIfNeeded,
+      updatePopupEdgeClips,
+    ]);
 
     useEffect(() => {
       const el = bodyScrollRef.current;
       if (!el || typeof ResizeObserver === 'undefined') return;
-      const ro = new ResizeObserver(() => scheduleEdgeClipUpdate());
+      const ro = new ResizeObserver(() => {
+        applyPinnedScrollIfNeeded();
+        scheduleEdgeClipUpdate();
+      });
       ro.observe(el);
       return () => ro.disconnect();
-    }, [scheduleEdgeClipUpdate]);
+    }, [applyPinnedScrollIfNeeded, scheduleEdgeClipUpdate]);
 
-    const performPopupPageUp = useCallback(() => {
+    const performPopupPageUp = useCallback((): number | null => {
+      pinnedScrollAfterExpandRef.current = null;
       const el = bodyScrollRef.current;
       const contentEl = bodyContentRef.current;
-      if (!el || !contentEl) return;
+      if (!el || !contentEl) return null;
 
       const viewHeight = el.clientHeight;
       const currentTop = el.scrollTop;
-      if (currentTop <= 0 || viewHeight <= 0) return;
+      if (currentTop <= 0 || viewHeight <= 0) return null;
 
       const currentBottom = currentTop + viewHeight;
       const effectiveTop = currentTop + topClipPxRef.current;
@@ -1320,16 +1371,18 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       el.scrollTop = targetScrollTop;
       setSpacerHeightSync(neededSpacer);
       updatePopupEdgeClips();
+      return targetScrollTop;
     }, [getNaturalMaxScroll, popupFontSize, setSpacerHeightSync, updatePopupEdgeClips]);
 
-    const performPopupPageDown = useCallback(() => {
+    const performPopupPageDown = useCallback((): number | null => {
+      pinnedScrollAfterExpandRef.current = null;
       const el = bodyScrollRef.current;
       const contentEl = bodyContentRef.current;
-      if (!el || !contentEl) return;
+      if (!el || !contentEl) return null;
 
       const viewHeight = el.clientHeight;
       const currentTop = el.scrollTop;
-      if (viewHeight <= 0) return;
+      if (viewHeight <= 0) return null;
 
       const effectiveBottom = currentTop + viewHeight - bottomClipPxRef.current;
       const lines = collectPopupVisualLines(el, contentEl, shadowRootRef.current);
@@ -1338,7 +1391,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       const firstIncompleteIdx = lines.findIndex((line) => line.bottom > effectiveBottom + EPS);
       if (firstIncompleteIdx === -1) {
         // Every remaining line of the definition is already fully visible
-        return;
+        return null;
       }
 
       const firstIncomplete = lines[firstIncompleteIdx];
@@ -1357,7 +1410,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       targetScrollTop = Math.min(maxPagedTop, targetScrollTop);
 
       if (targetScrollTop <= currentTop + 0.5) {
-        return;
+        return null;
       }
 
       const neededSpacer = Math.max(0, Math.ceil(targetScrollTop - naturalMax));
@@ -1365,26 +1418,99 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
 
       el.scrollTop = targetScrollTop;
       updatePopupEdgeClips();
+      return targetScrollTop;
     }, [getNaturalMaxScroll, popupFontSize, setSpacerHeightSync, updatePopupEdgeClips]);
+
+    const handlePageAction = useCallback(
+      (direction: 'up' | 'down', editingBeforeAction?: boolean) => {
+        const wasEditing =
+          Boolean(editingBeforeAction) ||
+          isInputFocusedRef.current ||
+          document.activeElement === searchInputRef.current;
+
+        if (wasEditing) {
+          // If an edited word hasn't flushed its debounced lookup yet, flush & expand directly
+          if (liveSearchTimerRef.current !== null) {
+            window.clearTimeout(liveSearchTimerRef.current);
+            liveSearchTimerRef.current = null;
+            const trimmed = (searchInputRef.current?.value ?? inputText).trim();
+            if (trimmed) {
+              const sameAsCurrent = trimmed.toLowerCase() === queryWord.trim().toLowerCase();
+              if (!sameAsCurrent || !hasResultRef.current) {
+                exitEditModeAndExpand({ waitForResult: true });
+                onLiveQueryChange(trimmed);
+                return;
+              }
+            }
+          }
+
+          // First turn half a page using the current half-screen viewport height,
+          // then exit edit mode and expand immediately while pinning the new top line.
+          const nextScrollTop =
+            direction === 'up' ? performPopupPageUp() : performPopupPageDown();
+          exitEditModeAndExpand({ preserveScrollTop: nextScrollTop });
+          return;
+        }
+
+        const nextScrollTop = direction === 'up' ? performPopupPageUp() : performPopupPageDown();
+        if (!isExpandedRef.current && hasResultRef.current && !loadingRef.current) {
+          exitEditModeAndExpand({ preserveScrollTop: nextScrollTop });
+        }
+      },
+      [
+        exitEditModeAndExpand,
+        inputText,
+        onLiveQueryChange,
+        performPopupPageDown,
+        performPopupPageUp,
+        queryWord,
+      ]
+    );
 
     useImperativeHandle(
       ref,
       () => ({
-        pageUp: performPopupPageUp,
-        pageDown: performPopupPageDown,
+        pageUp: () => handlePageAction('up'),
+        pageDown: () => handlePageAction('down'),
         autoExpandIfOverflowing,
         getScrollTop: () => bodyScrollRef.current?.scrollTop ?? 0,
       }),
-      [performPopupPageUp, performPopupPageDown, autoExpandIfOverflowing]
+      [handlePageAction, autoExpandIfOverflowing]
     );
+
+    const clearBodyPointerFlagSoon = useCallback(() => {
+      if (bodyPointerClearTimerRef.current !== null) {
+        window.clearTimeout(bodyPointerClearTimerRef.current);
+      }
+      bodyPointerClearTimerRef.current = window.setTimeout(() => {
+        bodyPointerClearTimerRef.current = null;
+        bodyPointerActiveRef.current = false;
+        wasEditingOnBodyDownRef.current = false;
+      }, 80);
+    }, []);
 
     const handleBodyPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
       pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
+      if (bodyPointerClearTimerRef.current !== null) {
+        window.clearTimeout(bodyPointerClearTimerRef.current);
+        bodyPointerClearTimerRef.current = null;
+      }
+      bodyPointerActiveRef.current = true;
+      wasEditingOnBodyDownRef.current =
+        isInputFocusedRef.current || document.activeElement === searchInputRef.current;
     };
 
     const handleBodyClick = (e: React.MouseEvent<HTMLDivElement>) => {
       const down = pointerDownPosRef.current;
       pointerDownPosRef.current = null;
+      const wasEditingOnDown = wasEditingOnBodyDownRef.current;
+      wasEditingOnBodyDownRef.current = false;
+      bodyPointerActiveRef.current = false;
+      if (bodyPointerClearTimerRef.current !== null) {
+        window.clearTimeout(bodyPointerClearTimerRef.current);
+        bodyPointerClearTimerRef.current = null;
+      }
+
       if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 10) {
         return;
       }
@@ -1426,11 +1552,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       const rect = scrollEl.getBoundingClientRect();
       if (rect.width <= 0) return;
       const xRatio = (e.clientX - rect.left) / rect.width;
-      if (xRatio < 0.5) {
-        performPopupPageUp();
-      } else {
-        performPopupPageDown();
-      }
+      handlePageAction(xRatio < 0.5 ? 'up' : 'down', wasEditingOnDown);
     };
 
     const handleInputChange = (nextVal: string) => {
@@ -1445,6 +1567,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     };
 
     const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.nativeEvent.isComposing) return;
       if (e.key === 'Enter') {
         e.preventDefault();
         if (liveSearchTimerRef.current !== null) {
@@ -1453,15 +1576,22 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         }
         const trimmed = inputText.trim();
         if (!result && suggestions.length > 0) {
+          exitEditModeAndExpand({ waitForResult: true });
           onSelectSuggestion(suggestions[0]);
-          searchInputRef.current?.blur();
         } else if (trimmed) {
-          onLiveQueryChange(trimmed);
-          searchInputRef.current?.blur();
+          const sameAsCurrent = trimmed.toLowerCase() === queryWord.trim().toLowerCase();
+          if (sameAsCurrent && hasResultRef.current && !loadingRef.current) {
+            exitEditModeAndExpand();
+          } else {
+            exitEditModeAndExpand({ waitForResult: true });
+            onLiveQueryChange(trimmed);
+          }
+        } else {
+          exitEditModeAndExpand();
         }
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        searchInputRef.current?.blur();
+        exitEditModeAndExpand();
       }
     };
 
@@ -1478,6 +1608,11 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const popupContainerStyle: React.CSSProperties | undefined =
       keyboardInsetPx > 0 && (isExpanded || placement === 'bottom')
         ? { bottom: `${keyboardInsetPx + 8}px` }
+        : undefined;
+
+    const compactCardStyle: React.CSSProperties | undefined =
+      !isExpanded && keyboardInsetPx > 0
+        ? { maxHeight: `min(40vh, 340px, calc(100vh - ${keyboardInsetPx + 24}px))` }
         : undefined;
 
     const lowerTrimmedInput = inputText.trim().toLowerCase();
@@ -1499,6 +1634,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         }`}
       >
         <div
+          style={compactCardStyle}
           className={`pointer-events-auto w-full max-w-[720px] flex flex-col bg-[var(--fei-popup-bg)] border-[1.5px] border-[var(--fei-popup-border)] rounded-2xl shadow-[0_12px_32px_-6px_rgba(0,0,0,0.14)] dark:ring-1 dark:ring-white/10 dark:shadow-[0_14px_36px_-4px_rgba(0,0,0,0.75)] eink:shadow-none overflow-hidden text-[var(--fei-text-primary)] ${
             isExpanded ? 'h-full' : 'max-h-[min(40vh,340px)]'
           }`}
@@ -1521,7 +1657,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => {
-                    searchInputRef.current?.blur();
+                    exitEditModeAndExpand({ waitForResult: true });
                     onGoBack();
                   }}
                   aria-label="返回上一个词条"
@@ -1542,10 +1678,25 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                 type="text"
                 value={inputText}
                 onFocus={() => {
+                  cancelBlurExpandTimer();
+                  pinnedScrollAfterExpandRef.current = null;
                   isInputFocusedRef.current = true;
+                  setIsInputFocused(true);
+                  setHasToggledExpand(true);
+                  setIsExpanded(false);
                 }}
                 onBlur={() => {
                   isInputFocusedRef.current = false;
+                  setIsInputFocused(false);
+                  if (bodyPointerActiveRef.current) return;
+                  cancelBlurExpandTimer();
+                  blurExpandTimerRef.current = window.setTimeout(() => {
+                    blurExpandTimerRef.current = null;
+                    if (!isInputFocusedRef.current && !loadingRef.current && hasResultRef.current) {
+                      setHasToggledExpand(true);
+                      setIsExpanded(true);
+                    }
+                  }, 120);
                 }}
                 onChange={(e) => handleInputChange(e.target.value)}
                 onKeyDown={handleInputKeyDown}
@@ -1564,8 +1715,14 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                 matchCount > 1 ? (
                   <button
                     type="button"
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onClick={onCycleDict}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                    onClick={() => {
+                      exitEditModeAndExpand({ waitForResult: true });
+                      onCycleDict();
+                    }}
                     title="点击切换下一个包含该词的词典"
                     aria-label={`当前词典 ${displayedDictName}，点击切换词典`}
                     className="text-[12px] text-[var(--fei-text-primary)] underline decoration-[var(--fei-border-strong)] underline-offset-[3px] truncate min-w-0 hover:opacity-75 transition-opacity cursor-pointer"
@@ -1606,6 +1763,14 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                 }
               }}
               onPointerDown={handleBodyPointerDown}
+              onPointerUp={clearBodyPointerFlagSoon}
+              onPointerCancel={clearBodyPointerFlagSoon}
+              onWheel={() => {
+                pinnedScrollAfterExpandRef.current = null;
+              }}
+              onTouchMove={() => {
+                pinnedScrollAfterExpandRef.current = null;
+              }}
               onClick={handleBodyClick}
               onScroll={handleBodyScroll}
               className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3.5 py-2.5 bg-[var(--fei-popup-bg)] cursor-pointer"
@@ -1629,9 +1794,10 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                           <button
                             key={word}
                             type="button"
+                            onMouseDown={(e) => e.preventDefault()}
                             onClick={(e) => {
                               e.stopPropagation();
-                              searchInputRef.current?.blur();
+                              exitEditModeAndExpand({ waitForResult: true });
                               onSelectSuggestion(word);
                             }}
                             className="font-doc-body text-[12.5px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] underline decoration-transparent hover:decoration-[var(--fei-border-strong)] underline-offset-[3px] transition-colors shrink-0 cursor-pointer"
@@ -1668,9 +1834,10 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
                         <button
                           key={word}
                           type="button"
+                          onMouseDown={(e) => e.preventDefault()}
                           onClick={(e) => {
                             e.stopPropagation();
-                            searchInputRef.current?.blur();
+                            exitEditModeAndExpand({ waitForResult: true });
                             onSelectSuggestion(word);
                           }}
                           style={{ fontSize: `${popupFontSize}px` }}
