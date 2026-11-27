@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Bookmark,
   BookOpen,
   Download,
   FolderTree,
@@ -10,8 +11,8 @@ import {
   Plus,
   Scissors,
   Settings,
-  StickyNote,
   Trash2,
+  Undo2,
 } from 'lucide-react';
 import { ImportModal } from './components/ImportModal';
 import { InputPastePopover } from './components/InputPastePopover';
@@ -23,7 +24,6 @@ import {
   MinimalDocViewHandle,
 } from './components/MinimalDocView';
 import { NoteAnchorTarget, ReadingNotePopover } from './components/ReadingNotePopover';
-import { ReadingNotesListModal } from './components/ReadingNotesListModal';
 import {
   DragPayload,
   InsertPosition,
@@ -293,12 +293,13 @@ export default function App() {
   const [showFontSizeBar, setShowFontSizeBar] = useState(false);
   const [visibleNoteIds, setVisibleNoteIds] = useState<string[]>([]);
   const [notePopoverState, setNotePopoverState] = useState<{
-    screenNoteIds: string[];
     initialNoteId: string | null;
     defaultAnchor: NoteAnchorTarget;
-    canCreateAtDefaultAnchor: boolean;
   } | null>(null);
-  const [showNotesListModal, setShowNotesListModal] = useState(false);
+  const [outlineReturnPos, setOutlineReturnPos] = useState<{
+    charOffset: number;
+    readProgress: number;
+  } | null>(null);
   const [fontSize, setFontSize] = useState<number>(() => {
     const raw = loadReaderSettings().fontSize;
     if (!Number.isFinite(raw)) return DEFAULT_READER_SETTINGS.fontSize;
@@ -419,6 +420,11 @@ export default function App() {
   const autoCatalogDebounceTimerRef = useRef<number | null>(null);
   const autoProgressDebounceTimerRef = useRef<number | null>(null);
   const progressLongPressTimerRef = useRef<number | null>(null);
+  const suppressProgressClickRef = useRef(false);
+  const suppressProgressClickTimerRef = useRef<number | null>(null);
+  const returnBtnLongPressTimerRef = useRef<number | null>(null);
+  const suppressReturnBtnClickRef = useRef(false);
+  const suppressReturnBtnClickTimerRef = useRef<number | null>(null);
   const toolbarBlankTapRef = useRef<{ pointerId: number; startX: number; startY: number } | null>(null);
   const lastAutoProgressPushAtRef = useRef(0);
   const lastAutoPullAtRef = useRef(0);
@@ -1606,7 +1612,7 @@ export default function App() {
     setLiveProgressDecimals(0);
     setVisibleNoteIds([]);
     setNotePopoverState(null);
-    setShowNotesListModal(false);
+    setOutlineReturnPos(null);
     // Plan B: clear session dismissal on book open so any unresolved pending progress prompts cleanly
     setDismissedConflictKeys((prev) => {
       if (!prev[docId]) return prev;
@@ -1891,7 +1897,7 @@ export default function App() {
     setMdictLookup(null);
     setShowFontSizeBar(false);
     setNotePopoverState(null);
-    setShowNotesListModal(false);
+    setOutlineReturnPos(null);
     setVisibleNoteIds([]);
     setWhistleEnabled(false);
     setMainView('tree');
@@ -1909,7 +1915,7 @@ export default function App() {
     const docId = selectedDocIdRef.current;
     if (!docId) return;
     const now = Date.now();
-    const trimmed = payload.content.trim();
+    const trimmed = payload.content.replace(/[\r\n]+/g, ' ').trim();
 
     let changed = false;
     const nextDocs = docsRef.current.map((doc) => {
@@ -1933,7 +1939,7 @@ export default function App() {
         }
         const prevNote = existing[idx];
         if (!trimmed) {
-          // Emptying an existing note soft-deletes it so sync propagates cleanly
+          // Emptying an existing bookmark soft-deletes it so sync propagates cleanly
           const updated: ReadingNote = {
             ...prevNote,
             deleted: true,
@@ -1978,33 +1984,6 @@ export default function App() {
     markAutoCatalogDirty();
   };
 
-  const handleDeleteReadingNote = (noteId: string) => {
-    const docId = selectedDocIdRef.current;
-    if (!docId) return;
-    const now = Date.now();
-    let changed = false;
-    const nextDocs = docsRef.current.map((doc) => {
-      if (doc.id !== docId) return doc;
-      const existing = sanitizeNotesList(doc.notes) ?? [];
-      const idx = existing.findIndex((n) => n.id === noteId);
-      if (idx === -1 || existing[idx].deleted) return doc;
-      const nextNotes = [...existing];
-      nextNotes[idx] = {
-        ...existing[idx],
-        deleted: true,
-        deletedAt: now,
-        updatedAt: now,
-      };
-      changed = true;
-      return { ...doc, notes: sanitizeNotesList(nextNotes) };
-    });
-    if (!changed) return;
-    docsRef.current = nextDocs;
-    setDocs(nextDocs);
-    markAutoCatalogDirty();
-    showToast('已删除笔记');
-  };
-
   const handleOpenNotePopover = () => {
     if (notePopoverState) {
       setNotePopoverState(null);
@@ -2012,7 +1991,6 @@ export default function App() {
     }
     if (!selectedDoc) return;
     setShowFontSizeBar(false);
-    setShowNotesListModal(false);
     setMdictLookup(null);
 
     const ctx = docViewRef.current?.captureNoteAnchorContext();
@@ -2020,29 +1998,18 @@ export default function App() {
       charOffset: Math.max(0, Math.round(selectedDoc.lastCharOffset ?? 0)),
       anchorText: '',
     };
-    const screenNoteIds = ctx?.screenNoteIds ?? [];
-    const defaultAnchorHasNote = ctx?.defaultAnchorHasNote ?? false;
-    const initialNoteId = screenNoteIds[0] ?? null;
-
-    if (initialNoteId) {
-      const targetNote = getActiveNotes(selectedDoc.notes).find((n) => n.id === initialNoteId);
-      if (targetNote) {
-        docViewRef.current?.jumpToCharOffset(targetNote.charOffset);
-      }
-    }
+    // Edit existing bookmark if default anchor paragraph already has one; otherwise show temporary vertical bar to create new
+    const initialNoteId = ctx?.defaultAnchorNoteId ?? null;
 
     setNotePopoverState({
-      screenNoteIds,
       initialNoteId,
       defaultAnchor,
-      canCreateAtDefaultAnchor: !defaultAnchorHasNote,
     });
   };
 
   const handleOpenNoteFromMargin = (noteId: string) => {
     if (!selectedDoc) return;
     setShowFontSizeBar(false);
-    setShowNotesListModal(false);
     setMdictLookup(null);
 
     const ctx = docViewRef.current?.captureNoteAnchorContext();
@@ -2050,33 +2017,27 @@ export default function App() {
       charOffset: Math.max(0, Math.round(selectedDoc.lastCharOffset ?? 0)),
       anchorText: '',
     };
-    const rawVisible = ctx?.screenNoteIds ?? [];
-    const screenNoteIds = rawVisible.includes(noteId) ? rawVisible : [noteId, ...rawVisible];
-    const defaultAnchorHasNote = ctx?.defaultAnchorHasNote ?? false;
-
-    const targetNote = getActiveNotes(selectedDoc.notes).find((n) => n.id === noteId);
-    if (targetNote) {
-      docViewRef.current?.jumpToCharOffset(targetNote.charOffset);
-    }
 
     setNotePopoverState({
-      screenNoteIds,
       initialNoteId: noteId,
       defaultAnchor,
-      canCreateAtDefaultAnchor: !defaultAnchorHasNote,
     });
   };
 
-  const handleOpenNotesListModal = () => {
-    setShowFontSizeBar(false);
-    setNotePopoverState(null);
-    setMdictLookup(null);
-    setShowNotesListModal(true);
-  };
-
-  const handleJumpToNoteFromList = (note: ReadingNote) => {
-    setShowNotesListModal(false);
-    docViewRef.current?.jumpToCharOffset(note.charOffset);
+  const handleReturnFromOutlineJump = () => {
+    if (suppressReturnBtnClickRef.current) {
+      suppressReturnBtnClickRef.current = false;
+      if (suppressReturnBtnClickTimerRef.current !== null) {
+        window.clearTimeout(suppressReturnBtnClickTimerRef.current);
+        suppressReturnBtnClickTimerRef.current = null;
+      }
+      return;
+    }
+    const target = outlineReturnPos;
+    if (!target) return;
+    dismissReadingOverlaysAndSelection();
+    setOutlineReturnPos(null);
+    docViewRef.current?.jumpToCharOffset(target.charOffset);
   };
 
   const handleChangeFontSize = (nextSize: number) => {
@@ -2242,7 +2203,6 @@ export default function App() {
     closeMdictPopup();
     setShowFontSizeBar(false);
     setNotePopoverState(null);
-    setShowNotesListModal(false);
     if (docViewRef.current) {
       docViewRef.current.clearPopupsAndSelection();
     } else {
@@ -3384,6 +3344,18 @@ export default function App() {
         window.clearTimeout(progressLongPressTimerRef.current);
         progressLongPressTimerRef.current = null;
       }
+      if (suppressProgressClickTimerRef.current !== null) {
+        window.clearTimeout(suppressProgressClickTimerRef.current);
+        suppressProgressClickTimerRef.current = null;
+      }
+      if (returnBtnLongPressTimerRef.current !== null) {
+        window.clearTimeout(returnBtnLongPressTimerRef.current);
+        returnBtnLongPressTimerRef.current = null;
+      }
+      if (suppressReturnBtnClickTimerRef.current !== null) {
+        window.clearTimeout(suppressReturnBtnClickTimerRef.current);
+        suppressReturnBtnClickTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -3919,8 +3891,25 @@ export default function App() {
     return Math.max(160, TOOLBAR_LONG_PRESS_MS - deliveryLag);
   };
 
+  const clearSuppressProgressClickTimer = () => {
+    if (suppressProgressClickTimerRef.current !== null) {
+      window.clearTimeout(suppressProgressClickTimerRef.current);
+      suppressProgressClickTimerRef.current = null;
+    }
+  };
+
+  const scheduleSuppressProgressClickReset = () => {
+    clearSuppressProgressClickTimer();
+    suppressProgressClickTimerRef.current = window.setTimeout(() => {
+      suppressProgressClickTimerRef.current = null;
+      suppressProgressClickRef.current = false;
+    }, 400);
+  };
+
   const triggerProgressLongPress = () => {
     progressLongPressTimerRef.current = null;
+    clearSuppressProgressClickTimer();
+    suppressProgressClickRef.current = true;
     try {
       navigator.vibrate?.(10);
     } catch {
@@ -3929,12 +3918,30 @@ export default function App() {
     handleToggleFocusToolbar();
   };
 
+  const handleProgressLabelClick = () => {
+    if (suppressProgressClickRef.current) {
+      suppressProgressClickRef.current = false;
+      clearSuppressProgressClickTimer();
+      return;
+    }
+    const wasOutlineOpen = Boolean(docViewRef.current?.isOutlineOpen());
+    dismissReadingOverlaysAndSelection();
+    if (!wasOutlineOpen) {
+      docViewRef.current?.openOutline();
+    }
+  };
+
   const handleProgressLabelTouchStart = (e: React.TouchEvent<HTMLButtonElement>) => {
     if (e.touches.length !== 1) return;
+    clearSuppressProgressClickTimer();
+    suppressProgressClickRef.current = false;
+
     const touch = e.touches[0];
     const touchId = touch.identifier;
     const startX = touch.clientX;
     const startY = touch.clientY;
+    let longPressFired = false;
+    let movedTooFar = false;
 
     const clearTimer = () => {
       if (progressLongPressTimerRef.current !== null) {
@@ -3944,16 +3951,17 @@ export default function App() {
     };
 
     clearTimer();
-    progressLongPressTimerRef.current = window.setTimeout(
-      triggerProgressLongPress,
-      computeEffectiveLongPressDelay(e.timeStamp)
-    );
+    progressLongPressTimerRef.current = window.setTimeout(() => {
+      longPressFired = true;
+      triggerProgressLongPress();
+    }, computeEffectiveLongPressDelay(e.timeStamp));
 
     const onTouchMove = (moveEvent: TouchEvent) => {
       for (let i = 0; i < moveEvent.touches.length; i++) {
         const t = moveEvent.touches[i];
         if (t.identifier === touchId) {
           if (Math.hypot(t.clientX - startX, t.clientY - startY) >= 12) {
+            movedTooFar = true;
             clearTimer();
           }
           break;
@@ -3971,6 +3979,10 @@ export default function App() {
       }
       if (!matched) return;
       clearTimer();
+      if (longPressFired || movedTooFar) {
+        suppressProgressClickRef.current = true;
+        scheduleSuppressProgressClickReset();
+      }
       window.removeEventListener('touchmove', onTouchMove);
       window.removeEventListener('touchend', cleanup);
       window.removeEventListener('touchcancel', cleanup);
@@ -3986,9 +3998,14 @@ export default function App() {
     if (e.pointerType === 'touch') return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
 
+    clearSuppressProgressClickTimer();
+    suppressProgressClickRef.current = false;
+
     const pointerId = e.pointerId;
     const startX = e.clientX;
     const startY = e.clientY;
+    let longPressFired = false;
+    let movedTooFar = false;
 
     const clearTimer = () => {
       if (progressLongPressTimerRef.current !== null) {
@@ -3998,14 +4015,15 @@ export default function App() {
     };
 
     clearTimer();
-    progressLongPressTimerRef.current = window.setTimeout(
-      triggerProgressLongPress,
-      computeEffectiveLongPressDelay(e.timeStamp)
-    );
+    progressLongPressTimerRef.current = window.setTimeout(() => {
+      longPressFired = true;
+      triggerProgressLongPress();
+    }, computeEffectiveLongPressDelay(e.timeStamp));
 
     const onPointerMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) >= 12) {
+        movedTooFar = true;
         clearTimer();
       }
     };
@@ -4013,6 +4031,150 @@ export default function App() {
     const cleanup = (endEvent: PointerEvent) => {
       if (endEvent.pointerId !== pointerId) return;
       clearTimer();
+      if (longPressFired || movedTooFar) {
+        suppressProgressClickRef.current = true;
+        scheduleSuppressProgressClickReset();
+      }
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', cleanup);
+      window.removeEventListener('pointercancel', cleanup);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', cleanup);
+    window.addEventListener('pointercancel', cleanup);
+  };
+
+  const clearSuppressReturnBtnClickTimer = () => {
+    if (suppressReturnBtnClickTimerRef.current !== null) {
+      window.clearTimeout(suppressReturnBtnClickTimerRef.current);
+      suppressReturnBtnClickTimerRef.current = null;
+    }
+  };
+
+  const scheduleSuppressReturnBtnClickReset = () => {
+    clearSuppressReturnBtnClickTimer();
+    suppressReturnBtnClickTimerRef.current = window.setTimeout(() => {
+      suppressReturnBtnClickTimerRef.current = null;
+      suppressReturnBtnClickRef.current = false;
+    }, 400);
+  };
+
+  const triggerReturnBtnLongPress = () => {
+    returnBtnLongPressTimerRef.current = null;
+    clearSuppressReturnBtnClickTimer();
+    suppressReturnBtnClickRef.current = true;
+    try {
+      navigator.vibrate?.(10);
+    } catch {
+      // ignore
+    }
+    setOutlineReturnPos(null);
+  };
+
+  const handleReturnBtnTouchStart = (e: React.TouchEvent<HTMLButtonElement>) => {
+    if (e.touches.length !== 1) return;
+    clearSuppressReturnBtnClickTimer();
+    suppressReturnBtnClickRef.current = false;
+
+    const touch = e.touches[0];
+    const touchId = touch.identifier;
+    const startX = touch.clientX;
+    const startY = touch.clientY;
+    let longPressFired = false;
+    let movedTooFar = false;
+
+    const clearTimer = () => {
+      if (returnBtnLongPressTimerRef.current !== null) {
+        window.clearTimeout(returnBtnLongPressTimerRef.current);
+        returnBtnLongPressTimerRef.current = null;
+      }
+    };
+
+    clearTimer();
+    returnBtnLongPressTimerRef.current = window.setTimeout(() => {
+      longPressFired = true;
+      triggerReturnBtnLongPress();
+    }, computeEffectiveLongPressDelay(e.timeStamp));
+
+    const onTouchMove = (moveEvent: TouchEvent) => {
+      for (let i = 0; i < moveEvent.touches.length; i++) {
+        const t = moveEvent.touches[i];
+        if (t.identifier === touchId) {
+          if (Math.hypot(t.clientX - startX, t.clientY - startY) >= 12) {
+            movedTooFar = true;
+            clearTimer();
+          }
+          break;
+        }
+      }
+    };
+
+    const cleanup = (endEvent: TouchEvent) => {
+      let matched = false;
+      for (let i = 0; i < endEvent.changedTouches.length; i++) {
+        if (endEvent.changedTouches[i].identifier === touchId) {
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) return;
+      clearTimer();
+      if (longPressFired || movedTooFar) {
+        suppressReturnBtnClickRef.current = true;
+        scheduleSuppressReturnBtnClickReset();
+      }
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', cleanup);
+      window.removeEventListener('touchcancel', cleanup);
+    };
+
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('touchend', cleanup, { passive: true });
+    window.addEventListener('touchcancel', cleanup, { passive: true });
+  };
+
+  const handleReturnBtnPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.pointerType === 'touch') return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+    clearSuppressReturnBtnClickTimer();
+    suppressReturnBtnClickRef.current = false;
+
+    const pointerId = e.pointerId;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let longPressFired = false;
+    let movedTooFar = false;
+
+    const clearTimer = () => {
+      if (returnBtnLongPressTimerRef.current !== null) {
+        window.clearTimeout(returnBtnLongPressTimerRef.current);
+        returnBtnLongPressTimerRef.current = null;
+      }
+    };
+
+    clearTimer();
+    returnBtnLongPressTimerRef.current = window.setTimeout(() => {
+      longPressFired = true;
+      triggerReturnBtnLongPress();
+    }, computeEffectiveLongPressDelay(e.timeStamp));
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) >= 12) {
+        movedTooFar = true;
+        clearTimer();
+      }
+    };
+
+    const cleanup = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== pointerId) return;
+      clearTimer();
+      if (longPressFired || movedTooFar) {
+        suppressReturnBtnClickRef.current = true;
+        scheduleSuppressReturnBtnClickReset();
+      }
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', cleanup);
       window.removeEventListener('pointercancel', cleanup);
@@ -4263,6 +4425,11 @@ export default function App() {
             hasActiveMdict={mdictDicts.length > 0}
             isMdictPopupOpen={mdictLookup !== null}
             isMdictLookupPending={mdictLookupPending}
+            pendingBookmarkCharOffset={
+              notePopoverState && !notePopoverState.initialNoteId
+                ? notePopoverState.defaultAnchor.charOffset
+                : null
+            }
             onEnglishWordSelected={({ word, placement }) => {
               setShowFontSizeBar(false);
               setNotePopoverState(null);
@@ -4302,6 +4469,9 @@ export default function App() {
             }}
             onVisibleNotesChange={setVisibleNoteIds}
             onOpenNoteFromMargin={handleOpenNoteFromMargin}
+            onOutlineNavigate={(origin) => {
+              setOutlineReturnPos((prev) => prev ?? origin);
+            }}
             onFetchRemoteBody={() => handleFetchRemoteBody(selectedDoc.id)}
             onReturnToTree={handleExitDocToTree}
           />
@@ -4700,13 +4870,10 @@ export default function App() {
                       key={iconId}
                       ref={bindRef}
                       type="button"
-                      onPointerDown={(e) =>
-                        handleToolbarIconPointerDown(e, 'note', 'doc', handleOpenNotesListModal)
-                      }
+                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'note', 'doc')}
                       onContextMenu={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        handleOpenNotesListModal();
                       }}
                       onClick={() => {
                         if (suppressToolbarClickRef.current) return;
@@ -4714,14 +4881,14 @@ export default function App() {
                       }}
                       aria-label={
                         hasVisibleNotes
-                          ? `当前页有 ${visibleNoteIds.length} 条读书笔记（点击编辑，长按查看全部笔记）`
-                          : '添加读书笔记（长按查看全部笔记）'
+                          ? `当前页有 ${visibleNoteIds.length} 个书签（点击添加或编辑书签）`
+                          : '添加书签'
                       }
                       aria-pressed={noteActive}
                       title={
                         hasVisibleNotes
-                          ? `当前页有 ${visibleNoteIds.length} 条笔记（点击查看/编辑，长按或右键打开全部笔记列表）`
-                          : '读书笔记（点击记录，长按或右键查看全部笔记，可拖动调整位置）'
+                          ? `当前页有 ${visibleNoteIds.length} 个书签（点击添加或编辑，可拖动调整图标位置）`
+                          : '添加书签（可拖动调整图标位置）'
                       }
                       className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
                         isDraggingThis
@@ -4731,7 +4898,7 @@ export default function App() {
                             : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
                       }`}
                     >
-                      <StickyNote
+                      <Bookmark
                         className="w-[20px] h-[20px]"
                         strokeWidth={hasVisibleNotes ? 2.1 : 1.8}
                       />
@@ -4767,26 +4934,51 @@ export default function App() {
                 );
               })}
 
-              {/* 最右侧固定：自适应精度百分比阅读进度（长按切换专注模式：隐藏/恢复其他工具栏图标） */}
-              <button
-                type="button"
-                onTouchStart={handleProgressLabelTouchStart}
-                onPointerDown={handleProgressLabelPointerDown}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                }}
-                aria-pressed={focusToolbarHidden}
-                aria-label={
-                  focusToolbarHidden
-                    ? `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，长按恢复工具栏图标`
-                    : `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，长按隐藏工具栏其他图标进入专注阅读`
-                }
-                title={focusToolbarHidden ? '长按恢复工具栏图标' : '长按隐藏其他图标进入专注阅读'}
-                className="ml-auto min-w-[64px] h-[46px] px-2.5 inline-flex items-center justify-end rounded-lg text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors touch-none select-none whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                {formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}
-              </button>
+              {/* 最右侧固定：跳转返回按钮（临时） + 自适应精度百分比阅读进度 */}
+              <div className="ml-auto flex items-center gap-0 shrink-0">
+                {outlineReturnPos !== null && (
+                  <button
+                    type="button"
+                    onTouchStart={handleReturnBtnTouchStart}
+                    onPointerDown={handleReturnBtnPointerDown}
+                    onClick={handleReturnFromOutlineJump}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                    aria-label={`返回跳转前位置（${formatAdaptiveProgressPercent(outlineReturnPos.readProgress, liveProgressDecimals)}），长按清除返回标记`}
+                    title={`单击返回跳转前位置（${formatAdaptiveProgressPercent(outlineReturnPos.readProgress, liveProgressDecimals)}），长按清除`}
+                    className="w-[38px] h-[46px] inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors touch-none select-none shrink-0 cursor-pointer"
+                  >
+                    <Undo2 className="w-[18px] h-[18px]" strokeWidth={1.85} />
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onTouchStart={handleProgressLabelTouchStart}
+                  onPointerDown={handleProgressLabelPointerDown}
+                  onClick={handleProgressLabelClick}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }}
+                  aria-pressed={focusToolbarHidden}
+                  aria-label={
+                    focusToolbarHidden
+                      ? `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，单击打开文档结构，长按恢复工具栏图标`
+                      : `当前阅读进度 ${formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}，单击打开文档结构，长按隐藏工具栏其他图标进入专注阅读`
+                  }
+                  title={
+                    focusToolbarHidden
+                      ? '单击打开文档结构，长按恢复工具栏图标'
+                      : '单击打开文档结构，长按隐藏其他图标进入专注阅读'
+                  }
+                  className="min-w-[64px] h-[46px] px-2.5 inline-flex items-center justify-end rounded-lg text-[14px] font-medium tabular-nums text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors touch-none select-none whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  {formatAdaptiveProgressPercent(liveReadProgress, liveProgressDecimals)}
+                </button>
+              </div>
             </>
           )}
         </div>
@@ -5073,35 +5265,21 @@ export default function App() {
         />
       )}
 
-      {/* Reading Note Input Popover in Browse Mode */}
+      {/* Single-line Bookmark Input Popover in Read Mode */}
       {mainView === 'doc' && selectedDoc && notePopoverState && (
         <ReadingNotePopover
-          allNotes={getActiveNotes(selectedDoc.notes)}
-          initialNoteId={notePopoverState.initialNoteId}
+          initialNote={
+            notePopoverState.initialNoteId
+              ? getActiveNotes(selectedDoc.notes).find(
+                  (n) => n.id === notePopoverState.initialNoteId
+                ) ?? null
+              : null
+          }
           defaultAnchor={notePopoverState.defaultAnchor}
           fontSize={fontSize}
-          onSwitchNote={(charOffset) => {
-            docViewRef.current?.jumpToCharOffset(charOffset);
-          }}
           onSaveNote={handleSaveReadingNote}
           onClose={() => {
             setNotePopoverState(null);
-            docViewRef.current?.clearPopupsAndSelection();
-          }}
-        />
-      )}
-
-      {/* Reading Notes List Modal (Long-press Note Toolbar Icon) */}
-      {mainView === 'doc' && selectedDoc && showNotesListModal && (
-        <ReadingNotesListModal
-          docTitle={selectedDoc.title}
-          docContentLength={selectedDoc.content.length}
-          notes={selectedDoc.notes}
-          onJumpToNote={handleJumpToNoteFromList}
-          onDeleteNote={handleDeleteReadingNote}
-          onCopySuccess={showToast}
-          onClose={() => {
-            setShowNotesListModal(false);
             docViewRef.current?.clearPopupsAndSelection();
           }}
         />

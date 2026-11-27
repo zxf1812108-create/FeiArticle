@@ -63,6 +63,7 @@ export interface ScreenNoteAnchorContext {
   };
   screenNoteIds: string[];
   defaultAnchorHasNote: boolean;
+  defaultAnchorNoteId: string | null;
 }
 
 export interface MinimalDocViewHandle {
@@ -72,6 +73,8 @@ export interface MinimalDocViewHandle {
   jumpToCharOffset: (charOffset: number) => void;
   captureNoteAnchorContext: () => ScreenNoteAnchorContext | null;
   clearPopupsAndSelection: () => void;
+  isOutlineOpen: () => boolean;
+  openOutline: () => void;
 }
 
 interface MinimalDocViewProps {
@@ -83,6 +86,7 @@ interface MinimalDocViewProps {
   hasActiveMdict?: boolean;
   isMdictPopupOpen?: boolean;
   isMdictLookupPending?: boolean;
+  pendingBookmarkCharOffset?: number | null;
   onEnglishWordSelected?: (payload: { word: string; placement: 'top' | 'bottom' }) => void;
   onClearMdictLookup?: () => void;
   onMdictPopupReleased?: () => void;
@@ -93,6 +97,7 @@ interface MinimalDocViewProps {
   onReadMetricsChange?: (metrics: DocReadMetrics) => void;
   onVisibleNotesChange?: (visibleNoteIds: string[]) => void;
   onOpenNoteFromMargin?: (noteId: string) => void;
+  onOutlineNavigate?: (origin: { charOffset: number; readProgress: number }) => void;
   onFetchRemoteBody: () => Promise<void>;
   onReturnToTree: () => void;
 }
@@ -417,6 +422,7 @@ interface BlockRenderContext {
   onImageLoaded: () => void;
   onPreviewImage: (payload: DocImagePreviewPayload) => void;
   notesByBlockIdx?: Map<number, ReadingNote[]>;
+  pendingBookmarkBlockIdx?: number | null;
   onOpenNoteFromMargin?: (noteId: string) => void;
 }
 
@@ -439,27 +445,53 @@ function getBlockPlainText(block: BlockNode): string {
   }
 }
 
+const MarginBookmarkRibbon: React.FC<{ className?: string }> = ({ className = '' }) => (
+  <svg
+    viewBox="0 0 8 13"
+    width="8"
+    height="13"
+    fill="currentColor"
+    aria-hidden="true"
+    className={`shrink-0 ${className}`}
+  >
+    <path d="M1.4 0.5H6.6C7.1 0.5 7.5 0.9 7.5 1.4V12.1C7.5 12.45 7.1 12.65 6.82 12.43L4 10.15L1.18 12.43C0.9 12.65 0.5 12.45 0.5 12.1V1.4C0.5 0.9 0.9 0.5 1.4 0.5Z" />
+  </svg>
+);
+
 function renderMarginNoteMarker(
   anchoredNotes: ReadingNote[] | undefined,
-  onOpenNoteFromMargin?: (noteId: string) => void
+  onOpenNoteFromMargin?: (noteId: string) => void,
+  isPendingBookmark = false
 ): React.ReactNode {
-  if (!anchoredNotes || anchoredNotes.length === 0) return null;
-  const primaryNote = anchoredNotes[0];
+  const hasSaved = Boolean(anchoredNotes && anchoredNotes.length > 0);
+  if (!hasSaved && !isPendingBookmark) return null;
+  if (!hasSaved) {
+    return (
+      <span
+        aria-hidden="true"
+        data-note-marker="true"
+        className="pointer-events-none absolute -left-[20px] sm:-left-[22px] top-[0.22em] h-[1.25em] w-[20px] sm:w-[22px] flex items-center justify-center select-none text-[var(--fei-text-muted)]/80 eink:text-[var(--fei-text-primary)]"
+      >
+        <MarginBookmarkRibbon />
+      </span>
+    );
+  }
+  const primaryNote = anchoredNotes![0];
   return (
     <button
       type="button"
       data-note-marker="true"
-      aria-label="查看本段读书笔记"
-      title="查看本段读书笔记"
+      aria-label="查看或编辑本段书签"
+      title="查看或编辑本段书签"
       onPointerDown={(e) => e.stopPropagation()}
       onTouchStart={(e) => e.stopPropagation()}
       onClick={(e) => {
         e.stopPropagation();
         onOpenNoteFromMargin?.(primaryNote.id);
       }}
-      className="absolute -left-3.5 top-[0.26em] h-[1.12em] w-4 pl-[5px] flex items-stretch justify-start select-none cursor-pointer group/note"
+      className="absolute -left-[20px] sm:-left-[22px] top-[0.22em] h-[1.25em] w-[20px] sm:w-[22px] flex items-center justify-center select-none cursor-pointer group/note text-[var(--fei-text-muted)]/80 hover:text-[var(--fei-text-primary)] eink:text-[var(--fei-text-primary)] transition-colors"
     >
-      <span className="w-[2.5px] h-full rounded-full bg-[var(--fei-text-muted)]/60 group-hover/note:bg-[var(--fei-text-primary)] eink:bg-[var(--fei-text-primary)] transition-colors" />
+      <MarginBookmarkRibbon />
     </button>
   );
 }
@@ -479,7 +511,12 @@ function renderBlock(
   const topZero = isFirstOverall ? 'mt-0' : '';
   const justifyCls = autoHyphenate ? 'text-justify' : '';
   const anchoredNotes = renderCtx?.notesByBlockIdx?.get(idx);
-  const noteMarker = renderMarginNoteMarker(anchoredNotes, renderCtx?.onOpenNoteFromMargin);
+  const isPendingBookmark = renderCtx?.pendingBookmarkBlockIdx === idx;
+  const noteMarker = renderMarginNoteMarker(
+    anchoredNotes,
+    renderCtx?.onOpenNoteFromMargin,
+    isPendingBookmark
+  );
   const relativeCls = noteMarker ? 'relative' : '';
 
   switch (block.type) {
@@ -704,6 +741,7 @@ const DocBlockChunk = memo(function DocBlockChunk({
   onImageLoaded,
   onPreviewImage,
   notesByBlockIdx,
+  pendingBookmarkBlockIdx,
   onOpenNoteFromMargin,
 }: {
   blocks: BlockNode[];
@@ -715,6 +753,7 @@ const DocBlockChunk = memo(function DocBlockChunk({
   onImageLoaded: () => void;
   onPreviewImage: (payload: DocImagePreviewPayload) => void;
   notesByBlockIdx?: Map<number, ReadingNote[]>;
+  pendingBookmarkBlockIdx?: number | null;
   onOpenNoteFromMargin?: (noteId: string) => void;
 }) {
   const renderCtx: BlockRenderContext = {
@@ -723,6 +762,7 @@ const DocBlockChunk = memo(function DocBlockChunk({
     onImageLoaded,
     onPreviewImage,
     notesByBlockIdx,
+    pendingBookmarkBlockIdx,
     onOpenNoteFromMargin,
   };
   const nodes: React.ReactNode[] = [];
@@ -749,6 +789,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       hasActiveMdict = false,
       isMdictPopupOpen = false,
       isMdictLookupPending = false,
+      pendingBookmarkCharOffset = null,
       onEnglishWordSelected,
       onClearMdictLookup,
       onMdictPopupReleased,
@@ -759,6 +800,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       onReadMetricsChange,
       onVisibleNotesChange,
       onOpenNoteFromMargin,
+      onOutlineNavigate,
       onFetchRemoteBody,
       onReturnToTree,
     },
@@ -858,6 +900,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     onVisibleNotesChangeRef.current = onVisibleNotesChange;
     const onOpenNoteFromMarginRef = useRef(onOpenNoteFromMargin);
     onOpenNoteFromMarginRef.current = onOpenNoteFromMargin;
+    const onOutlineNavigateRef = useRef(onOutlineNavigate);
+    onOutlineNavigateRef.current = onOutlineNavigate;
     const lastReportedVisibleNotesKeyRef = useRef<string>('');
 
     const { blocks, toc } = useMemo(
@@ -881,6 +925,17 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }
       return map;
     }, [blocks, activeNotes]);
+
+    const pendingBookmarkBlockIdx = useMemo(() => {
+      if (
+        pendingBookmarkCharOffset === null ||
+        pendingBookmarkCharOffset === undefined ||
+        blocks.length === 0
+      ) {
+        return null;
+      }
+      return findBlockIndexByCharOffset(blocks, pendingBookmarkCharOffset);
+    }, [blocks, pendingBookmarkCharOffset]);
 
     const notesByBlockIdxRef = useRef(notesByBlockIdx);
     notesByBlockIdxRef.current = notesByBlockIdx;
@@ -1512,7 +1567,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         0;
       const chosenBlock = blocks[chosenIdx] ?? blocks[0];
       const anchorText = extractNoteAnchorExcerpt(getBlockPlainText(chosenBlock));
-      const defaultAnchorHasNote = (noteMap.get(chosenIdx)?.length ?? 0) > 0;
+      const defaultAnchorNotes = noteMap.get(chosenIdx);
+      const defaultAnchorHasNote = (defaultAnchorNotes?.length ?? 0) > 0;
+      const defaultAnchorNoteId = defaultAnchorNotes?.[0]?.id ?? null;
 
       return {
         defaultAnchor: {
@@ -1521,6 +1578,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         },
         screenNoteIds: visibleNoteIds,
         defaultAnchorHasNote,
+        defaultAnchorNoteId,
       };
     };
 
@@ -1958,28 +2016,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           }
         }, 50);
       },
-      jumpToCharOffset(charOffset: number) {
-        const clamped = Math.max(0, Math.min(contentRef.current.length, Math.round(charOffset)));
-        if (clamped > 0) {
-          scrollReadToCharOffset(clamped);
-          pendingTypographyAnchorRef.current = { kind: 'read', charOffset: clamped };
-          typographyLockUntilRef.current = Date.now() + 1500;
-        } else {
-          const targetEl = scrollRef.current;
-          if (targetEl) {
-            lastProgrammaticScrollAtRef.current = performance.now();
-            targetEl.scrollTop = 0;
-            lastProgrammaticScrollTopRef.current = 0;
-            if (isVirtualized) {
-              syncMountedWindowToScroll(0, targetEl.clientHeight);
-            }
-            updateEdgeClips();
-          }
+      isOutlineOpen() {
+        return showOutlineRef.current;
+      },
+      openOutline() {
+        if (blocks.length > 0) {
+          setShowOutline(true);
         }
-        reportReadProgress();
-        window.requestAnimationFrame(() => {
-          reportVisibleNotesRef.current();
-        });
+      },
+      jumpToCharOffset(charOffset: number) {
+        jumpToCharOffsetInternal(charOffset, true);
       },
       captureNoteAnchorContext() {
         return computeScreenNoteAnchorContext();
@@ -3054,9 +3100,8 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       };
     }, [showOutline]);
 
-    // 5-zone tap interaction in Read mode:
-    // Top half: Left 1/3 => Page Up, Middle 1/3 => Outline TOC, Right 1/3 => Page Down
-    // Bottom half: Left 1/2 => Page Up, Right 1/2 => Page Down
+    // 2-zone tap interaction in Read mode:
+    // Left half => Page Up, Right half => Page Down
     const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
       const hadSelectionOnDown = hadSelectionOnDownRef.current;
       hadSelectionOnDownRef.current = false;
@@ -3105,20 +3150,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (rect.width <= 0 || rect.height <= 0) return;
 
       const xRatio = (e.clientX - rect.left) / rect.width;
-      const yRatio = (e.clientY - rect.top) / rect.height;
-
-      if (yRatio < 0.5) {
-        if (xRatio < 1 / 3) {
-          performPageUp();
-        } else if (xRatio <= 2 / 3) {
-          if (blocks.length > 0) {
-            setShowOutline(true);
-          }
-        } else {
-          performPageDown();
-        }
-        return;
-      }
 
       if (xRatio < 0.5) {
         performPageUp();
@@ -3168,7 +3199,44 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       setShowOutline(false);
     };
 
+    function jumpToCharOffsetInternal(charOffset: number, shouldEmitState = false) {
+      const clamped = Math.max(0, Math.min(contentRef.current.length, Math.round(charOffset)));
+      if (clamped > 0) {
+        scrollReadToCharOffset(clamped);
+        pendingTypographyAnchorRef.current = { kind: 'read', charOffset: clamped };
+        typographyLockUntilRef.current = Date.now() + 1500;
+      } else {
+        clearTypographyLock();
+        const targetEl = scrollRef.current;
+        if (targetEl) {
+          lastProgrammaticScrollAtRef.current = performance.now();
+          targetEl.scrollTop = 0;
+          lastProgrammaticScrollTopRef.current = 0;
+          if (isVirtualized) {
+            syncMountedWindowToScroll(0, targetEl.clientHeight);
+          }
+          updateEdgeClips();
+        }
+      }
+      reportReadProgress();
+      if (shouldEmitState) {
+        emitCurrentViewState();
+      }
+      window.requestAnimationFrame(() => {
+        reportVisibleNotesRef.current();
+      });
+    }
+
+    const notifyOutlineOrigin = () => {
+      const originOffset = captureCurrentCharOffset();
+      onOutlineNavigateRef.current?.({
+        charOffset: originOffset,
+        readProgress: computeReadProgress(originOffset),
+      });
+    };
+
     const handleJumpToHeading = (tocId: string) => {
+      notifyOutlineOrigin();
       const item = toc.find((t) => t.id === tocId);
       if (isVirtualized && item && typeof item.blockIndex === 'number') {
         const didSlide = ensureChunkMountedForBlock(item.blockIndex);
@@ -3186,6 +3254,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }
       const el = articleRef.current?.querySelector<HTMLElement>(`[data-toc-id="${tocId}"]`) ?? null;
       jumpToElement(el);
+    };
+
+    const handleJumpToBookmark = (bookmark: ReadingNote) => {
+      notifyOutlineOrigin();
+      setShowOutline(false);
+      jumpToCharOffsetInternal(bookmark.charOffset, true);
     };
 
     const handleFetch = async () => {
@@ -3323,6 +3397,13 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                                 onImageLoaded={handleDocImageLoaded}
                                 onPreviewImage={handleDocImagePreview}
                                 notesByBlockIdx={notesByBlockIdx}
+                                pendingBookmarkBlockIdx={
+                                  pendingBookmarkBlockIdx !== null &&
+                                  pendingBookmarkBlockIdx >= startIdx &&
+                                  pendingBookmarkBlockIdx < endIdx
+                                    ? pendingBookmarkBlockIdx
+                                    : null
+                                }
                                 onOpenNoteFromMargin={handleOpenNoteFromMarginStable}
                               />
                             </div>
@@ -3340,6 +3421,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                           onImageLoaded: handleDocImageLoaded,
                           onPreviewImage: handleDocImagePreview,
                           notesByBlockIdx,
+                          pendingBookmarkBlockIdx,
                           onOpenNoteFromMargin: handleOpenNoteFromMarginStable,
                         })
                       )
@@ -3406,8 +3488,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         {showOutline && (
           <DocOutlineModal
             toc={toc}
+            bookmarks={activeNotes}
             activeTocId={getActiveTocId()}
             onJumpToHeading={handleJumpToHeading}
+            onJumpToBookmark={handleJumpToBookmark}
             onClose={() => setShowOutline(false)}
           />
         )}
