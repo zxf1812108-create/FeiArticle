@@ -26,6 +26,7 @@ import {
   resolveReadViewportCharOffset,
 } from '../utils/docAnchor';
 import {
+  hasNativeTouchTracking,
   NativeTouchPoint,
   setNativeVolumeKeyIntercept,
   subscribeNativeTouchMove,
@@ -40,6 +41,7 @@ import {
   expandRangeToFullSentences,
   getSentenceRangeAtPoint,
   getSentenceRangeAtViewportPoint,
+  getWordRangeAtViewportPoint,
   unionDomRanges,
 } from '../utils/sentenceSelection';
 
@@ -789,6 +791,34 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const [copyPopover, setCopyPopover] = useState<CopyPopoverState | null>(null);
     const copyPopoverRef = useRef<CopyPopoverState | null>(null);
     copyPopoverRef.current = copyPopover;
+    const useWebCustomTouchSelection = useMemo(() => {
+      if (typeof window === 'undefined') return false;
+      if (hasNativeTouchTracking()) return false;
+      const hasTouch =
+        'ontouchstart' in window ||
+        (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
+      const isCoarse =
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(pointer: coarse)').matches;
+      return hasTouch && isCoarse;
+    }, []);
+    const [webCustomSelection, setWebCustomSelection] = useState<{
+      points: DomRangePoints;
+      text: string;
+      isSentence: boolean;
+      rects: Array<{ left: number; top: number; width: number; height: number }>;
+    } | null>(null);
+    const webCustomSelectionRef = useRef<{
+      points: DomRangePoints;
+      text: string;
+      isSentence: boolean;
+      rects: Array<{ left: number; top: number; width: number; height: number }>;
+    } | null>(null);
+    webCustomSelectionRef.current = webCustomSelection;
+    const webLongPressTimerRef = useRef<number | null>(null);
+    const webLongPressStartRef = useRef<NativeTouchPoint | null>(null);
+    const webLongPressActiveRef = useRef(false);
+    const lastWebLongPressEndAtRef = useRef(0);
     const [topClipPx, setTopClipPx] = useState(0);
     const [bottomClipPx, setBottomClipPx] = useState(0);
     const topClipPxRef = useRef(0);
@@ -2041,6 +2071,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
         cancelPendingSelectionClear();
         setCopyPopover(null);
+        clearWebCustomSelection();
         setShowOutline(false);
         setPreviewImage(null);
         try {
@@ -2104,19 +2135,75 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const isUserPressing = () =>
       nativeTouchActiveRef.current || domTouchActiveRef.current || domMouseActiveRef.current;
 
+    const clearWebCustomSelection = () => {
+      webCustomSelectionRef.current = null;
+      setWebCustomSelection((prev) => (prev === null ? prev : null));
+    };
+
+    const buildRangeFromDomPoints = (points: DomRangePoints): Range | null => {
+      try {
+        const r = document.createRange();
+        r.setStart(points.start.node, points.start.offset);
+        r.setEnd(points.end.node, points.end.offset);
+        return r;
+      } catch {
+        return null;
+      }
+    };
+
+    const applyWebCustomSelection = (
+      articleEl: HTMLElement,
+      points: DomRangePoints,
+      rawText: string,
+      isSentence: boolean
+    ): boolean => {
+      const range = buildRangeFromDomPoints(points);
+      if (!range) return false;
+      const articleRect = articleEl.getBoundingClientRect();
+      const rawRects = Array.from(range.getClientRects()).filter(
+        (r) => r.width > 0.5 && r.height > 0.5
+      );
+      const rects = rawRects.map((r) => ({
+        left: r.left - articleRect.left,
+        top: r.top - articleRect.top,
+        width: r.width,
+        height: r.height,
+      }));
+      const cleanText = rawText.replace(/\u00AD/g, '');
+      const next = { points, text: cleanText, isSentence, rects };
+      webCustomSelectionRef.current = next;
+      setWebCustomSelection(next);
+      return true;
+    };
+
+    useEffect(() => {
+      clearWebCustomSelection();
+    }, [doc.id, content, fontSize]);
+
     const computeSelectionCopyPopover = (): CopyPopoverState | null => {
       const articleEl = articleRef.current;
       const scrollEl = scrollRef.current;
+      if (!articleEl || !scrollEl) return null;
+
+      let cleanText = '';
+      let range: Range | null = null;
       const sel = window.getSelection();
-      if (!articleEl || !scrollEl || !sel || sel.isCollapsed || sel.rangeCount === 0) {
-        return null;
+      if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+        const candidateRange = sel.getRangeAt(0);
+        if (articleEl.contains(candidateRange.commonAncestorContainer)) {
+          cleanText = sel.toString().replace(/\u00AD/g, '');
+          range = candidateRange;
+        }
       }
-
-      const cleanText = sel.toString().replace(/\u00AD/g, '');
-      if (!cleanText.trim()) return null;
-
-      const range = sel.getRangeAt(0);
-      if (!articleEl.contains(range.commonAncestorContainer)) {
+      if (!range && webCustomSelectionRef.current) {
+        const custom = webCustomSelectionRef.current;
+        const customRange = buildRangeFromDomPoints(custom.points);
+        if (customRange && articleEl.contains(customRange.commonAncestorContainer)) {
+          cleanText = custom.text.replace(/\u00AD/g, '');
+          range = customRange;
+        }
+      }
+      if (!range || !cleanText.trim()) {
         return null;
       }
 
@@ -2216,7 +2303,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       e.stopPropagation();
 
       const liveSel = window.getSelection()?.toString() || '';
-      const textToCopy = (liveSel || copyPopoverRef.current?.text || '').replace(/\u00AD/g, '');
+      const textToCopy = (
+        liveSel ||
+        webCustomSelectionRef.current?.text ||
+        copyPopoverRef.current?.text ||
+        ''
+      ).replace(/\u00AD/g, '');
       setCopyPopover(null);
 
       let copied = false;
@@ -2249,6 +2341,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         }
       }
 
+      clearWebCustomSelection();
       try {
         window.getSelection()?.removeAllRanges();
       } catch {
@@ -2266,7 +2359,19 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     const clearDocumentSelectionIfEligible = () => {
-      if (isUserPressing() || !isMdictPopupOpenRef.current) return;
+      if (!isMdictPopupOpenRef.current) return;
+      if (sentenceSnapActiveRef.current) return;
+      if (isUserPressing()) return;
+
+      if (webCustomSelectionRef.current) {
+        if (webCustomSelectionRef.current.isSentence || !extractLookupWord(webCustomSelectionRef.current.text)) {
+          onClearMdictLookupRef.current?.();
+          return;
+        }
+        clearWebCustomSelection();
+        lastSelectionClearedOnReleaseAtRef.current = performance.now();
+      }
+
       const articleEl = articleRef.current;
       const sel = window.getSelection();
       if (!sel || (sel.isCollapsed && sel.rangeCount === 0)) return;
@@ -2292,34 +2397,62 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     const scheduleClearSelectionIfPopupOpen = (delayMs = 0) => {
       cancelPendingSelectionClear();
-      if (delayMs <= 0) {
+      const runWithFollowUps = () => {
         clearDocumentSelectionIfEligible();
-        // Follow-up pass in case WebView finishes touch-up selection finalization 1–2 frames later
+        // Follow-up passes in case Android WebView restores native long-press selection handles 1–3 frames later
         clearSelectionTimerRef.current = window.setTimeout(() => {
-          clearSelectionTimerRef.current = null;
           clearDocumentSelectionIfEligible();
+          clearSelectionTimerRef.current = window.setTimeout(() => {
+            clearSelectionTimerRef.current = null;
+            clearDocumentSelectionIfEligible();
+          }, 120);
         }, 60);
+      };
+      if (delayMs <= 0) {
+        runWithFollowUps();
         return;
       }
       clearSelectionTimerRef.current = window.setTimeout(() => {
         clearSelectionTimerRef.current = null;
-        clearDocumentSelectionIfEligible();
+        runWithFollowUps();
       }, delayMs);
     };
 
     const evaluateSelectionForMdict = () => {
       if (!hasActiveMdictRef.current) return;
       const articleEl = articleRef.current;
+      if (!articleEl) return;
+
+      let range: Range | null = null;
+      let rawSelectedText = '';
+
       const sel = window.getSelection();
-      if (!articleEl || !sel || sel.isCollapsed || sel.rangeCount === 0) {
-        return;
+      if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+        const candidateRange = sel.getRangeAt(0);
+        if (articleEl.contains(candidateRange.commonAncestorContainer)) {
+          range = candidateRange;
+          rawSelectedText = sel.toString();
+        }
       }
 
-      const range = sel.getRangeAt(0);
-      const commonAncestor = range.commonAncestorContainer;
-      if (!articleEl.contains(commonAncestor)) return;
+      if (!range && webCustomSelectionRef.current) {
+        const custom = webCustomSelectionRef.current;
+        if (custom.isSentence) {
+          if (isMdictPopupOpenRef.current) {
+            onClearMdictLookupRef.current?.();
+          }
+          return;
+        }
+        const customRange = buildRangeFromDomPoints(custom.points);
+        if (customRange && articleEl.contains(customRange.commonAncestorContainer)) {
+          range = customRange;
+          rawSelectedText = custom.text;
+        }
+      }
 
-      const word = extractLookupWord(sel.toString());
+      if (!range) return;
+
+      const word = extractLookupWord(rawSelectedText);
       if (!word) {
         // User expanded selection into a sentence / non-lookup text (e.g., to copy); dismiss lookup popup and keep selection
         if (isMdictPopupOpenRef.current) {
@@ -2329,16 +2462,18 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }
 
       const rect = range.getBoundingClientRect();
-      const vh = window.innerHeight || 800;
-      const wordMidY = rect.height > 0 ? (rect.top + rect.bottom) / 2 : vh * 0.25;
-      const placement: 'top' | 'bottom' = wordMidY >= vh * 0.5 ? 'top' : 'bottom';
+      const viewportHeight = window.innerHeight || 800;
+      const wordMidY = rect.height > 0 ? rect.top + rect.height / 2 : viewportHeight / 2;
+      const placement: 'top' | 'bottom' = wordMidY < viewportHeight * 0.5 ? 'bottom' : 'top';
+
       lastPopupOpenedAtRef.current = performance.now();
       onEnglishWordSelectedRef.current?.({ word, placement });
 
-      // Never clear selection while finger/mouse is still pressing the screen;
-      // if already released and popup is open, clear on release/popup-open.
-      if (!isUserPressing() && isMdictPopupOpenRef.current) {
-        scheduleClearSelectionIfPopupOpen(40);
+      if (!isUserPressing()) {
+        if (isMdictPopupOpenRef.current) {
+          scheduleClearSelectionIfPopupOpen(0);
+        }
+        onMdictPopupReleasedRef.current?.();
       }
     };
 
@@ -2357,7 +2492,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (isMdictPopupOpen) {
         setCopyPopover(null);
         if (!isUserPressing()) {
-          scheduleClearSelectionIfPopupOpen(30);
+          scheduleClearSelectionIfPopupOpen(0);
         }
         return;
       }
@@ -2591,12 +2726,107 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         applySnappedSelection(sel, target, backward);
       };
 
+      const cancelWebLongPressTimer = () => {
+        if (webLongPressTimerRef.current !== null) {
+          window.clearTimeout(webLongPressTimerRef.current);
+          webLongPressTimerRef.current = null;
+        }
+      };
+
+      const updateWebCustomSentenceDrag = (clientX: number, clientY: number) => {
+        const articleEl = articleRef.current;
+        const anchorSentence = anchorSentenceRangeRef.current;
+        if (!articleEl || !anchorSentence) return;
+
+        if (!sentenceSnapActiveRef.current) {
+          const downPt = webLongPressStartRef.current;
+          if (!downPt || Math.hypot(clientX - downPt.x, clientY - downPt.y) < 10) {
+            return;
+          }
+          sentenceSnapActiveRef.current = true;
+        }
+
+        dismissMdictForSentenceDrag();
+        const focusSentence = getSentenceRangeAtViewportPoint(articleEl, clientX, clientY);
+        if (!focusSentence) return;
+        const target = unionDomRanges(anchorSentence, focusSentence);
+        const targetRange = buildRangeFromDomPoints(target);
+        if (!targetRange) return;
+        applyWebCustomSelection(articleEl, target, targetRange.toString(), true);
+      };
+
       const handleUserReleased = (releasePoint?: NativeTouchPoint) => {
         if (isUserPressing()) return;
 
         const wasSentenceSnapping = sentenceSnapActiveRef.current;
+        const wasWebCustomLongPress = webLongPressActiveRef.current;
+        webLongPressActiveRef.current = false;
+        webLongPressStartRef.current = null;
+        cancelWebLongPressTimer();
+
         const articleEl = articleRef.current;
         const sel = window.getSelection();
+
+        if (wasWebCustomLongPress) {
+          lastWebLongPressEndAtRef.current = performance.now();
+          if (wasSentenceSnapping && articleEl && releasePoint && anchorSentenceRangeRef.current) {
+            const focusSentence = getSentenceRangeAtViewportPoint(
+              articleEl,
+              releasePoint.x,
+              releasePoint.y
+            );
+            if (focusSentence) {
+              const target = unionDomRanges(anchorSentenceRangeRef.current, focusSentence);
+              const targetRange = buildRangeFromDomPoints(target);
+              if (targetRange) {
+                applyWebCustomSelection(articleEl, target, targetRange.toString(), true);
+              }
+            }
+          }
+          resetSelectionGesture();
+
+          const custom = webCustomSelectionRef.current;
+          if (!custom || wasSentenceSnapping || custom.isSentence || !extractLookupWord(custom.text)) {
+            if (selectionCheckTimerRef.current) {
+              window.clearTimeout(selectionCheckTimerRef.current);
+              selectionCheckTimerRef.current = null;
+            }
+            if (isMdictPopupOpenRef.current || isMdictLookupPendingRef.current) {
+              onClearMdictLookupRef.current?.();
+            }
+            syncCopyPopover();
+            return;
+          }
+
+          const startedInsidePopup = pressStartedInsidePopupRef.current;
+          pressStartedInsidePopupRef.current = false;
+
+          if (isMdictPopupOpenRef.current) {
+            setCopyPopover(null);
+            scheduleClearSelectionIfPopupOpen(0);
+            if (!startedInsidePopup) {
+              onMdictPopupReleasedRef.current?.();
+            }
+          } else if (hasActiveMdictRef.current) {
+            if (selectionCheckTimerRef.current) {
+              window.clearTimeout(selectionCheckTimerRef.current);
+              selectionCheckTimerRef.current = null;
+              evaluateSelectionForMdict();
+              if (!startedInsidePopup) {
+                onMdictPopupReleasedRef.current?.();
+              }
+            } else if (isMdictLookupPendingRef.current) {
+              if (!startedInsidePopup) {
+                onMdictPopupReleasedRef.current?.();
+              }
+            } else {
+              syncCopyPopover();
+            }
+          } else {
+            syncCopyPopover();
+          }
+          return;
+        }
 
         // Final safeguard snap on finger lift using the exact release point or current selection
         if (wasSentenceSnapping && articleEl && sel) {
@@ -2701,8 +2931,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           beginSelectionGestureIfIdle(point);
           cancelPendingSelectionClear();
         } else {
-          // Physical finger lifted (ACTION_UP/ACTION_CANCEL); also clear any stale DOM touch flag left by WebView touchcancel
+          // Physical finger lifted (ACTION_UP/ACTION_CANCEL); also clear any stale DOM touch/pointer flag
           domTouchActiveRef.current = false;
+          domMouseActiveRef.current = false;
           handleUserReleased(point);
         }
       });
@@ -2722,6 +2953,46 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
           const t = e.touches[0];
           beginSelectionGestureIfIdle(t ? { x: t.clientX, y: t.clientY } : undefined);
           cancelPendingSelectionClear();
+
+          if (useWebCustomTouchSelection && e.touches.length === 1 && t) {
+            cancelWebLongPressTimer();
+            webLongPressActiveRef.current = false;
+            webLongPressStartRef.current = null;
+            const targetEl = e.target instanceof Element ? e.target : null;
+            const articleEl = articleRef.current;
+            const blockedInteractive = Boolean(
+              targetEl?.closest(
+                'button, a, img, input, textarea, select, [data-mdict-popup="true"], [data-copy-popover="true"], [data-note-marker="true"], [data-image-block="true"], [data-image-preview="true"], [data-outline-modal="true"]'
+              )
+            );
+            if (articleEl && targetEl && articleEl.contains(targetEl) && !blockedInteractive) {
+              const startPt = { x: t.clientX, y: t.clientY };
+              webLongPressStartRef.current = startPt;
+              webLongPressTimerRef.current = window.setTimeout(() => {
+                webLongPressTimerRef.current = null;
+                if (!domTouchActiveRef.current) return;
+                const currentArticle = articleRef.current;
+                if (!currentArticle) return;
+                const hit = getWordRangeAtViewportPoint(currentArticle, startPt.x, startPt.y);
+                if (!hit) return;
+                webLongPressActiveRef.current = true;
+                sentenceSnapActiveRef.current = false;
+                setCopyPopover(null);
+                applyWebCustomSelection(currentArticle, hit.points, hit.text, false);
+                anchorSentenceRangeRef.current = getSentenceRangeAtPoint(
+                  currentArticle,
+                  hit.points.start.node,
+                  hit.points.start.offset,
+                  'next'
+                );
+                if (hasActiveMdictRef.current && extractLookupWord(hit.text)) {
+                  scheduleMdictSelectionCheck(110);
+                }
+              }, 300);
+            }
+          } else {
+            cancelWebLongPressTimer();
+          }
         }
       };
 
@@ -2729,13 +3000,43 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         if (!domTouchActiveRef.current || e.touches.length !== 1) return;
         const t = e.touches[0];
         if (!t) return;
+
+        if (useWebCustomTouchSelection) {
+          if (webLongPressActiveRef.current) {
+            if (e.cancelable) {
+              e.preventDefault();
+            }
+            updateWebCustomSentenceDrag(t.clientX, t.clientY);
+            return;
+          }
+          const startPt = webLongPressStartRef.current;
+          if (startPt && Math.hypot(t.clientX - startPt.x, t.clientY - startPt.y) >= 10) {
+            cancelWebLongPressTimer();
+            webLongPressStartRef.current = null;
+          }
+          return;
+        }
+
         updateSentenceSelectionFromCoords(t.clientX, t.clientY);
       };
 
-      // IMPORTANT: Do NOT listen to touchcancel/pointercancel as "finger lifted".
-      // On Android WebView & mobile Chrome, long-press text selection fires touchcancel/pointercancel
-      // WHILE the user's finger is still physically pressing the screen.
+      // IMPORTANT: Do NOT listen to touchcancel/pointercancel as "finger lifted" on native WebView.
+      // On Android WebView, long-press text selection fires touchcancel WHILE the finger is still down,
+      // and ReaderNative delivers the true physical ACTION_UP event.
+      // For mobile web browsers using custom touch selection (`useWebCustomTouchSelection`),
+      // <article> uses select-none so touchcancel never fires for long-press; clean up if OS interrupts touch.
+      const onTouchCancelGlobal = () => {
+        if (!useWebCustomTouchSelection) return;
+        cancelWebLongPressTimer();
+        webLongPressStartRef.current = null;
+        if (domTouchActiveRef.current) {
+          domTouchActiveRef.current = false;
+          handleUserReleased();
+        }
+      };
+
       const onTouchEndGlobal = (e: TouchEvent) => {
+        cancelWebLongPressTimer();
         domTouchActiveRef.current = e.touches.length > 0;
         if (!domTouchActiveRef.current) {
           nativeTouchActiveRef.current = false;
@@ -2764,7 +3065,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         handleUserReleased({ x: e.clientX, y: e.clientY });
       };
 
+      const onPointerCancelGlobal = (e: PointerEvent) => {
+        if (e.pointerType === 'touch') return;
+        domMouseActiveRef.current = false;
+        handleUserReleased();
+      };
+
       const onWindowBlur = () => {
+        cancelWebLongPressTimer();
+        webLongPressActiveRef.current = false;
+        webLongPressStartRef.current = null;
         nativeTouchActiveRef.current = false;
         domTouchActiveRef.current = false;
         domMouseActiveRef.current = false;
@@ -2782,7 +3092,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !sel.toString().trim()) {
           lastSnappedRangeRef.current = null;
           gestureInitialRangeRef.current = null;
-          anchorSentenceRangeRef.current = null;
+          if (!isMdictPopupOpenRef.current || !isUserPressing()) {
+            anchorSentenceRangeRef.current = null;
+          }
           sentenceSnapActiveRef.current = false;
           if (selectionCheckTimerRef.current) {
             window.clearTimeout(selectionCheckTimerRef.current);
@@ -2911,11 +3223,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       };
 
       window.addEventListener('touchstart', onTouchStartGlobal, { capture: true, passive: true });
-      window.addEventListener('touchmove', onTouchMoveGlobal, { capture: true, passive: true });
+      window.addEventListener('touchmove', onTouchMoveGlobal, {
+        capture: true,
+        passive: !useWebCustomTouchSelection,
+      });
+      window.addEventListener('touchcancel', onTouchCancelGlobal, { capture: true, passive: true });
       window.addEventListener('touchend', onTouchEndGlobal, { capture: true, passive: true });
       window.addEventListener('pointerdown', onPointerDownGlobal, true);
       window.addEventListener('pointermove', onPointerMoveGlobal, true);
       window.addEventListener('pointerup', onPointerUpGlobal, true);
+      window.addEventListener('pointercancel', onPointerCancelGlobal, true);
       window.addEventListener('blur', onWindowBlur);
       document.addEventListener('selectionchange', handleSelectionChange);
       return () => {
@@ -2923,21 +3240,25 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         unsubscribeNativeTouchMove();
         window.removeEventListener('touchstart', onTouchStartGlobal, true);
         window.removeEventListener('touchmove', onTouchMoveGlobal, true);
+        window.removeEventListener('touchcancel', onTouchCancelGlobal, true);
         window.removeEventListener('touchend', onTouchEndGlobal, true);
         window.removeEventListener('pointerdown', onPointerDownGlobal, true);
         window.removeEventListener('pointermove', onPointerMoveGlobal, true);
         window.removeEventListener('pointerup', onPointerUpGlobal, true);
+        window.removeEventListener('pointercancel', onPointerCancelGlobal, true);
         window.removeEventListener('blur', onWindowBlur);
         document.removeEventListener('selectionchange', handleSelectionChange);
         if (selectionCheckTimerRef.current) {
           window.clearTimeout(selectionCheckTimerRef.current);
           selectionCheckTimerRef.current = null;
         }
+        cancelWebLongPressTimer();
         cancelPendingSelectionClear();
       };
-    }, []);
+    }, [useWebCustomTouchSelection]);
 
     const hasActiveSelection = () => {
+      if (webCustomSelectionRef.current) return true;
       const sel = window.getSelection();
       return Boolean(sel && !sel.isCollapsed && sel.toString().length > 0);
     };
@@ -3161,7 +3482,10 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         return;
       }
 
-      if (performance.now() - lastPopupOpenedAtRef.current < 350) {
+      if (
+        performance.now() - lastPopupOpenedAtRef.current < 350 ||
+        performance.now() - lastWebLongPressEndAtRef.current < 350
+      ) {
         return;
       }
 
@@ -3177,6 +3501,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         if (isMdictPopupOpenRef.current) {
           onClearMdictLookupRef.current?.();
         }
+        clearWebCustomSelection();
         if (hasActiveSelection()) {
           try {
             window.getSelection()?.removeAllRanges();
@@ -3376,7 +3701,28 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                 articleOverflow ? 'pb-[calc(100vh-110px)]' : 'pb-12'
               }`}
             >
-              <article ref={articleRef} className="relative w-full min-w-0 font-doc-body">
+              <article
+                ref={articleRef}
+                className={`relative w-full min-w-0 font-doc-body ${
+                  useWebCustomTouchSelection ? 'select-none' : ''
+                }`}
+              >
+                {webCustomSelection && webCustomSelection.rects.length > 0 && (
+                  <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-[1]">
+                    {webCustomSelection.rects.map((r, idx) => (
+                      <span
+                        key={idx}
+                        style={{
+                          left: `${r.left}px`,
+                          top: `${r.top}px`,
+                          width: `${r.width}px`,
+                          height: `${r.height}px`,
+                        }}
+                        className="absolute rounded-[2px] bg-[#2563EB]/20 dark:bg-[#60A5FA]/30 eink:bg-black/20"
+                      />
+                    ))}
+                  </div>
+                )}
                 {doc.syncStatus === 'remote-only' && !content ? (
                   <div className="py-12 text-center space-y-3">
                     {doc.cloudBodySynced ? (

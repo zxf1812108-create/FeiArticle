@@ -762,3 +762,136 @@ export function getSentenceRangeAtViewportPoint(
   return null;
 }
 
+const LATIN_WORD_CHAR_RE = /[A-Za-z\u00C0-\u024F\u00AD]/;
+const WORD_JOINER_RE = /['’\-]/;
+const CJK_CHAR_RE = /[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/;
+
+function isLatinWordChar(ch: string | undefined): boolean {
+  return Boolean(ch && LATIN_WORD_CHAR_RE.test(ch));
+}
+
+/**
+ * Resolve the exact word directly beneath viewport coordinates `(clientX, clientY)`.
+ * Handles soft-hyphenated (`\u00AD`) English words across inline formatting spans as well as CJK words.
+ */
+export function getWordRangeAtViewportPoint(
+  articleEl: HTMLElement,
+  clientX: number,
+  clientY: number
+): { points: DomRangePoints; text: string } | null {
+  const caret = probeCaretPoint(clientX, clientY);
+  if (!caret || caret.node.nodeType !== Node.TEXT_NODE || !articleEl.contains(caret.node)) {
+    return null;
+  }
+
+  const textNode = caret.node as Text;
+  const nodeLen = textNode.data.length;
+  if (nodeLen === 0) return null;
+
+  try {
+    const checkRange = document.createRange();
+    const probeIdx = Math.min(nodeLen - 1, Math.max(0, caret.offset > 0 && caret.offset >= nodeLen ? nodeLen - 1 : caret.offset));
+    checkRange.setStart(textNode, probeIdx);
+    checkRange.setEnd(textNode, Math.min(nodeLen, probeIdx + 1));
+    const charRect = checkRange.getBoundingClientRect();
+    if (
+      charRect.height <= 0 ||
+      distancePointToRect(clientX, clientY, charRect) > Math.max(28, charRect.height * 1.4)
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  const blockEl = findEnclosingBlock(articleEl, textNode);
+  const { text, segments } = collectBlockTextSegments(blockEl);
+  if (segments.length === 0 || !text) return null;
+
+  const rawFlat = resolveContainerOffsetToFlat(blockEl, segments, textNode, caret.offset);
+  const maxIdx = text.length - 1;
+  let idx = Math.min(maxIdx, Math.max(0, rawFlat));
+
+  // If caret landed just after a word (on space/punctuation or right edge), step back 1 char
+  const isSelectableChar = (ch: string | undefined) =>
+    Boolean(ch && (isLatinWordChar(ch) || CJK_CHAR_RE.test(ch) || /[0-9]/.test(ch)));
+
+  if (!isSelectableChar(text[idx]) && idx > 0 && isSelectableChar(text[idx - 1])) {
+    idx -= 1;
+  }
+  if (!isSelectableChar(text[idx])) {
+    return null;
+  }
+
+  let startFlat = idx;
+  let endFlat = idx + 1;
+
+  if (isLatinWordChar(text[idx])) {
+    while (startFlat > 0) {
+      const prev = text[startFlat - 1];
+      if (isLatinWordChar(prev)) {
+        startFlat--;
+      } else if (WORD_JOINER_RE.test(prev) && startFlat - 2 >= 0 && isLatinWordChar(text[startFlat - 2])) {
+        startFlat--;
+      } else {
+        break;
+      }
+    }
+    while (endFlat < text.length) {
+      const next = text[endFlat];
+      if (isLatinWordChar(next)) {
+        endFlat++;
+      } else if (WORD_JOINER_RE.test(next) && endFlat + 1 < text.length && isLatinWordChar(text[endFlat + 1])) {
+        endFlat++;
+      } else {
+        break;
+      }
+    }
+  } else if (CJK_CHAR_RE.test(text[idx])) {
+    const IntlWithSegmenter = Intl as typeof Intl & {
+      Segmenter?: new (
+        locales?: string | string[],
+        options?: { granularity?: 'grapheme' | 'word' | 'sentence' }
+      ) => {
+        segment: (input: string) => Iterable<{ segment: string; index: number; isWordLike?: boolean }>;
+      };
+    };
+    let segmented = false;
+    if (typeof IntlWithSegmenter.Segmenter === 'function') {
+      try {
+        const segmenter = new IntlWithSegmenter.Segmenter('zh', { granularity: 'word' });
+        for (const seg of segmenter.segment(text)) {
+          if (idx >= seg.index && idx < seg.index + seg.segment.length) {
+            startFlat = seg.index;
+            endFlat = seg.index + seg.segment.length;
+            segmented = true;
+            break;
+          }
+        }
+      } catch {
+        segmented = false;
+      }
+    }
+    if (!segmented) {
+      startFlat = idx;
+      endFlat = idx + 1;
+    }
+  } else {
+    while (startFlat > 0 && /[0-9]/.test(text[startFlat - 1])) startFlat--;
+    while (endFlat < text.length && /[0-9]/.test(text[endFlat])) endFlat++;
+  }
+
+  const start = resolveFlatOffsetToDomPoint(segments, startFlat, 'start');
+  const end = resolveFlatOffsetToDomPoint(segments, endFlat, 'end');
+  if (!start || !end) return null;
+
+  const selectedText = text.slice(startFlat, endFlat).replace(/\u00AD/g, '');
+  if (!selectedText.trim()) return null;
+
+  return {
+    points: { start, end },
+    text: selectedText,
+  };
+}
+
+

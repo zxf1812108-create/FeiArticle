@@ -871,13 +871,13 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       const fullH = Math.max(innerH, vvH);
       return { fullHeight: fullH, visibleHeight: vvH, overlayInset: 0 };
     });
-    const [isExpanded, setIsExpanded] = useState(() => !loading && hasResult);
+    const [isExpanded, setIsExpanded] = useState(false);
     const isExpandedRef = useRef(isExpanded);
     isExpandedRef.current = isExpanded;
     const loadingRef = useRef(loading);
     loadingRef.current = loading;
     const pendingExpandOnResultRef = useRef(false);
-    const [hasToggledExpand, setHasToggledExpand] = useState(() => !loading && hasResult);
+    const [hasToggledExpand, setHasToggledExpand] = useState(false);
     const [topClipPx, setTopClipPx] = useState(0);
     const [bottomClipPx, setBottomClipPx] = useState(0);
     const topClipPxRef = useRef(0);
@@ -1157,6 +1157,12 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       const el = bodyScrollRef.current;
       if (!el) return false;
       const naturalMax = getNaturalMaxScroll(el);
+      if (isExpandedRef.current && naturalMax <= 0) {
+        // Entire definition already fits inside the adaptive expanded card — don't inflate it with spacer
+        pinnedScrollAfterExpandRef.current = null;
+        setSpacerHeightSync(0);
+        return false;
+      }
       const neededSpacer = Math.max(0, Math.ceil(pinned.scrollTop - naturalMax));
       setSpacerHeightSync(neededSpacer);
       if (Math.abs(el.scrollTop - pinned.scrollTop) > 0.5) {
@@ -1287,10 +1293,14 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       };
     }, []);
 
-    // Directly expand the lookup popup whenever a definition result is ready and the user is not editing.
+    // Complete deferred expand once definition finishes loading (e.g. finger released or edit exited while loading).
     useEffect(() => {
+      if (!pendingExpandOnResultRef.current) return;
       if (loading) return;
-      if (isInputFocusedRef.current) return;
+      if (isInputFocusedRef.current) {
+        pendingExpandOnResultRef.current = false;
+        return;
+      }
       if (hasResult) {
         expandPopupDirectly();
       } else {
@@ -1677,26 +1687,24 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         style={popupContainerStyle}
         className={`fixed left-3 right-3 z-40 flex justify-center pointer-events-none ${
           isExpanded
-            ? 'top-[max(0.75rem,env(safe-area-inset-top))] bottom-[64px]'
+            ? `top-[max(0.75rem,env(safe-area-inset-top))] bottom-[64px] ${
+                placement === 'bottom' ? 'items-end' : 'items-start'
+              }`
             : isEditHalfScreen
-              ? 'top-[max(0.75rem,env(safe-area-inset-top))]'
+              ? 'top-[max(0.75rem,env(safe-area-inset-top))] items-start'
               : placement === 'top'
-                ? `top-[max(0.75rem,env(safe-area-inset-top))] ${hasToggledExpand ? '' : 'animate-mdict-down'}`
-                : `bottom-[64px] ${hasToggledExpand ? '' : 'animate-mdict-up'}`
+                ? `top-[max(0.75rem,env(safe-area-inset-top))] items-start ${
+                    hasToggledExpand ? '' : 'animate-mdict-down'
+                  }`
+                : `bottom-[64px] items-end ${hasToggledExpand ? '' : 'animate-mdict-up'}`
         }`}
       >
         <div
           style={compactCardStyle}
           className={`pointer-events-auto w-full max-w-[720px] flex flex-col bg-[var(--fei-popup-bg)] border-[1.5px] border-[var(--fei-popup-border)] rounded-2xl shadow-[0_12px_32px_-6px_rgba(0,0,0,0.14)] dark:ring-1 dark:ring-white/10 dark:shadow-[0_14px_36px_-4px_rgba(0,0,0,0.75)] eink:shadow-none overflow-hidden text-[var(--fei-text-primary)] ${
-            isExpanded ? 'h-full' : isEditHalfScreen ? '' : 'max-h-[min(50vh,420px)]'
+            isExpanded ? 'max-h-full' : isEditHalfScreen ? '' : 'max-h-[min(40vh,340px)]'
           }`}
         >
-          {/* Subtle handle bar when docked at bottom */}
-          {placement === 'bottom' && !isExpanded && !isEditHalfScreen && (
-            <div className="flex justify-center pt-1.5 pb-0.5 bg-[var(--fei-popup-header-bg)] shrink-0">
-              <span className="w-7 h-[3px] rounded-full bg-[var(--fei-popup-handle)]" />
-            </div>
-          )}
 
           {/* Top Title Bar */}
           <div
@@ -1801,7 +1809,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
           </div>
 
           {/* Scrollable Definition / Suggestion Body (Left half click => Page Up, Right half click => Page Down; partial lines masked) */}
-          <div className="relative flex-1 min-h-0 flex flex-col">
+          <div className="relative flex-auto min-h-0 flex flex-col">
             <div
               ref={bodyScrollRef}
               onMouseDown={(e) => {
@@ -1825,7 +1833,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
               }}
               onClick={handleBodyClick}
               onScroll={handleBodyScroll}
-              className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3.5 py-2.5 bg-[var(--fei-popup-bg)] cursor-pointer"
+              className="flex-auto min-h-0 overflow-y-auto overscroll-contain px-3.5 py-2.5 bg-[var(--fei-popup-bg)] cursor-pointer"
             >
               <div ref={bodyContentRef}>
                 {loading ? (
@@ -1948,8 +1956,8 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
             )}
           </div>
 
-          {/* Subtle handle bar when docked at top */}
-          {placement === 'top' && !isExpanded && (
+          {/* Subtle bottom handle bar when in compact/edit height */}
+          {!isExpanded && (
             <div className="flex justify-center pt-0.5 pb-1.5 bg-[var(--fei-popup-bg)] shrink-0">
               <span className="w-7 h-[3px] rounded-full bg-[var(--fei-popup-handle)]" />
             </div>
