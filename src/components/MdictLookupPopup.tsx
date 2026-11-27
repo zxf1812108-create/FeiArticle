@@ -844,7 +844,15 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     const [isInputFocused, setIsInputFocused] = useState(false);
     const wasEditingOnBodyDownRef = useRef(false);
     const bodyPointerActiveRef = useRef(false);
-    const prevKeyboardInsetRef = useRef(0);
+    const prevEffectiveKeyboardRef = useRef(0);
+    const fullViewportHeightRef = useRef<number>(
+      typeof window !== 'undefined'
+        ? Math.max(window.innerHeight, Math.round(window.visualViewport?.height ?? window.innerHeight))
+        : 800
+    );
+    const lastViewportWidthRef = useRef<number>(
+      typeof window !== 'undefined' ? window.innerWidth : 400
+    );
     const pinnedScrollAfterExpandRef = useRef<{ scrollTop: number; expiresAt: number } | null>(
       null
     );
@@ -854,7 +862,15 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     hasResultRef.current = hasResult;
 
     const [inputText, setInputText] = useState(queryWord);
-    const [keyboardInsetPx, setKeyboardInsetPx] = useState(0);
+    const [viewportMetrics, setViewportMetrics] = useState(() => {
+      if (typeof window === 'undefined') {
+        return { fullHeight: 800, visibleHeight: 800, overlayInset: 0 };
+      }
+      const innerH = window.innerHeight;
+      const vvH = Math.round(window.visualViewport?.height ?? innerH);
+      const fullH = Math.max(innerH, vvH);
+      return { fullHeight: fullH, visibleHeight: vvH, overlayInset: 0 };
+    });
     const [isExpanded, setIsExpanded] = useState(() => !loading && hasResult);
     const isExpandedRef = useRef(isExpanded);
     isExpandedRef.current = isExpanded;
@@ -884,7 +900,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
     }, [cancelBlurExpandTimer]);
 
     const exitEditModeAndExpand = useCallback(
-      (options?: { preserveScrollTop?: number | null; waitForResult?: boolean }) => {
+      (options?: { preserveScrollTop?: number | null; waitForResult?: boolean; forceExpand?: boolean }) => {
         cancelBlurExpandTimer();
         isInputFocusedRef.current = false;
         setIsInputFocused(false);
@@ -904,7 +920,7 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
           return;
         }
 
-        if (hasResultRef.current && !loadingRef.current) {
+        if (options?.forceExpand || (hasResultRef.current && !loadingRef.current)) {
           expandPopupDirectly();
         } else {
           pendingExpandOnResultRef.current = true;
@@ -923,37 +939,61 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       }
     }, [queryWord]);
 
-    // Lift bottom-docked/expanded popup cleanly above mobile soft keyboard via visualViewport,
-    // and auto-exit edit mode + expand if the user dismisses the soft keyboard manually.
+    // Track both overlay soft keyboards (visualViewport inset) and Android adjustResize
+    // (window.innerHeight shrink), keeping full pre-keyboard screen height intact and
+    // auto-exiting edit mode + expanding the popup whenever the user dismisses the keyboard.
     useEffect(() => {
       if (typeof window === 'undefined') return;
       const updateViewport = () => {
         const vv = window.visualViewport;
         const innerH = window.innerHeight;
-        if (!vv) {
-          prevKeyboardInsetRef.current = 0;
-          setKeyboardInsetPx(0);
-          return;
-        }
-        const inset = Math.max(0, Math.round(innerH - (vv.height + vv.offsetTop)));
-        const nextInset = inset >= 80 ? inset : 0;
-        const prevInset = prevKeyboardInsetRef.current;
-        prevKeyboardInsetRef.current = nextInset;
+        const innerW = window.innerWidth;
+        const visibleH = vv ? Math.round(vv.height) : innerH;
+        const rawOverlayInset = vv ? Math.max(0, Math.round(innerH - (vv.height + vv.offsetTop))) : 0;
+        const overlayInset = rawOverlayInset >= 80 ? rawOverlayInset : 0;
 
-        if (prevInset >= 80 && nextInset === 0 && isInputFocusedRef.current && !bodyPointerActiveRef.current) {
-          cancelBlurExpandTimer();
-          isInputFocusedRef.current = false;
-          setIsInputFocused(false);
-          searchInputRef.current?.blur();
-          if (!loadingRef.current && hasResultRef.current) {
+        // Reset full-height baseline on screen rotation / major width resize
+        const widthChanged = Math.abs(innerW - lastViewportWidthRef.current) > 20;
+        if (widthChanged) {
+          lastViewportWidthRef.current = innerW;
+          fullViewportHeightRef.current = Math.max(innerH, visibleH);
+        } else if (!isInputFocusedRef.current && overlayInset === 0) {
+          fullViewportHeightRef.current = Math.max(innerH, visibleH);
+        } else if (visibleH > fullViewportHeightRef.current) {
+          fullViewportHeightRef.current = visibleH;
+        }
+
+        const fullH = Math.max(fullViewportHeightRef.current, visibleH);
+        const resizedInset = widthChanged ? 0 : Math.max(0, fullH - visibleH);
+        const rawEffectiveKeyboard = Math.max(overlayInset, resizedInset);
+        const effectiveKeyboard = rawEffectiveKeyboard >= 80 ? rawEffectiveKeyboard : 0;
+        const prevEffectiveKeyboard = prevEffectiveKeyboardRef.current;
+        prevEffectiveKeyboardRef.current = effectiveKeyboard;
+
+        if (
+          prevEffectiveKeyboard >= 80 &&
+          effectiveKeyboard === 0 &&
+          !bodyPointerActiveRef.current
+        ) {
+          const wasBlurredJustBeforeResize = blurExpandTimerRef.current !== null;
+          if (isInputFocusedRef.current || wasBlurredJustBeforeResize) {
+            cancelBlurExpandTimer();
+            isInputFocusedRef.current = false;
+            setIsInputFocused(false);
+            searchInputRef.current?.blur();
+            pendingExpandOnResultRef.current = false;
             setHasToggledExpand(true);
             setIsExpanded(true);
-          } else {
-            pendingExpandOnResultRef.current = true;
           }
         }
 
-        setKeyboardInsetPx((prev) => (prev === nextInset ? prev : nextInset));
+        setViewportMetrics((prev) =>
+          prev.fullHeight === fullH &&
+          prev.visibleHeight === visibleH &&
+          prev.overlayInset === overlayInset
+            ? prev
+            : { fullHeight: fullH, visibleHeight: visibleH, overlayInset }
+        );
       };
       updateViewport();
       const vv = window.visualViewport;
@@ -1308,7 +1348,8 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       updatePopupEdgeClips();
     }, [
       isExpanded,
-      keyboardInsetPx,
+      isInputFocused,
+      viewportMetrics,
       popupFontSize,
       loading,
       error,
@@ -1444,11 +1485,9 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
             }
           }
 
-          // First turn half a page using the current half-screen viewport height,
-          // then exit edit mode and expand immediately while pinning the new top line.
-          const nextScrollTop =
-            direction === 'up' ? performPopupPageUp() : performPopupPageDown();
-          exitEditModeAndExpand({ preserveScrollTop: nextScrollTop });
+          // Exit edit mode and expand directly without skipping the current page
+          const currentScrollTop = bodyScrollRef.current?.scrollTop ?? 0;
+          exitEditModeAndExpand({ preserveScrollTop: currentScrollTop, forceExpand: true });
           return;
         }
 
@@ -1605,14 +1644,25 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
       });
     }, [result, suggestions, queryWord]);
 
+    const isEditHalfScreen = !isExpanded && isInputFocused;
+
     const popupContainerStyle: React.CSSProperties | undefined =
-      keyboardInsetPx > 0 && (isExpanded || placement === 'bottom')
-        ? { bottom: `${keyboardInsetPx + 8}px` }
+      viewportMetrics.overlayInset > 0 && (isExpanded || (!isEditHalfScreen && placement === 'bottom'))
+        ? { bottom: `${viewportMetrics.overlayInset + 8}px` }
         : undefined;
 
-    const compactCardStyle: React.CSSProperties | undefined =
-      !isExpanded && keyboardInsetPx > 0
-        ? { maxHeight: `min(40vh, 340px, calc(100vh - ${keyboardInsetPx + 24}px))` }
+    // While editing the top-left word, keep the popup at half of the FULL screen height
+    // (capped only by the available area above the soft keyboard so it never gets clipped),
+    // preventing Android adjustResize from shrinking 40vh down to ~20% of the screen.
+    const halfFullScreenPx = Math.max(240, Math.round(viewportMetrics.fullHeight * 0.5));
+    const compactCardStyle: React.CSSProperties | undefined = isEditHalfScreen
+      ? {
+          height: `min(${halfFullScreenPx}px, calc(${viewportMetrics.visibleHeight}px - max(0.75rem, env(safe-area-inset-top)) - 8px))`,
+        }
+      : !isExpanded && viewportMetrics.overlayInset > 0
+        ? {
+            maxHeight: `min(${halfFullScreenPx}px, calc(${viewportMetrics.visibleHeight}px - max(0.75rem, env(safe-area-inset-top)) - 8px))`,
+          }
         : undefined;
 
     const lowerTrimmedInput = inputText.trim().toLowerCase();
@@ -1628,19 +1678,21 @@ export const MdictLookupPopup = forwardRef<MdictLookupPopupHandle, MdictLookupPo
         className={`fixed left-3 right-3 z-40 flex justify-center pointer-events-none ${
           isExpanded
             ? 'top-[max(0.75rem,env(safe-area-inset-top))] bottom-[64px]'
-            : placement === 'top'
-              ? `top-[max(0.75rem,env(safe-area-inset-top))] ${hasToggledExpand ? '' : 'animate-mdict-down'}`
-              : `bottom-[64px] ${hasToggledExpand ? '' : 'animate-mdict-up'}`
+            : isEditHalfScreen
+              ? 'top-[max(0.75rem,env(safe-area-inset-top))]'
+              : placement === 'top'
+                ? `top-[max(0.75rem,env(safe-area-inset-top))] ${hasToggledExpand ? '' : 'animate-mdict-down'}`
+                : `bottom-[64px] ${hasToggledExpand ? '' : 'animate-mdict-up'}`
         }`}
       >
         <div
           style={compactCardStyle}
           className={`pointer-events-auto w-full max-w-[720px] flex flex-col bg-[var(--fei-popup-bg)] border-[1.5px] border-[var(--fei-popup-border)] rounded-2xl shadow-[0_12px_32px_-6px_rgba(0,0,0,0.14)] dark:ring-1 dark:ring-white/10 dark:shadow-[0_14px_36px_-4px_rgba(0,0,0,0.75)] eink:shadow-none overflow-hidden text-[var(--fei-text-primary)] ${
-            isExpanded ? 'h-full' : 'max-h-[min(40vh,340px)]'
+            isExpanded ? 'h-full' : isEditHalfScreen ? '' : 'max-h-[min(50vh,420px)]'
           }`}
         >
           {/* Subtle handle bar when docked at bottom */}
-          {placement === 'bottom' && !isExpanded && (
+          {placement === 'bottom' && !isExpanded && !isEditHalfScreen && (
             <div className="flex justify-center pt-1.5 pb-0.5 bg-[var(--fei-popup-header-bg)] shrink-0">
               <span className="w-7 h-[3px] rounded-full bg-[var(--fei-popup-handle)]" />
             </div>
