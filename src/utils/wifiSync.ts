@@ -5,7 +5,13 @@ import { StorageDirectoryConfig } from './storage';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
 import { isTrashExpired, pruneExpiredPurgedRecords, purgeExpiredTrash } from './trash';
 import { isDocBodyMissing } from './webdavSync';
-import { mergeReadingNotes, notesEqual, notesSignature, sanitizeNotesList } from './notes';
+import {
+  mergeReadingNotes,
+  notesEqual,
+  notesSignature,
+  relocateNotesAfterContentEdit,
+  sanitizeNotesList,
+} from './notes';
 import {
   extractReadAnchorText,
   reconcileReadingProgress,
@@ -531,7 +537,11 @@ export function mergeWifiCatalogIntoLocal(
       changed = true;
     }
 
-    const mergedNotes = mergeReadingNotes(updated.notes, pd.notes, now);
+    const rawMergedNotes = mergeReadingNotes(updated.notes, pd.notes, now);
+    const mergedNotes =
+      updated.content && rawMergedNotes.length > 0
+        ? (relocateNotesAfterContentEdit(rawMergedNotes, updated.content) ?? rawMergedNotes)
+        : rawMergedNotes;
     if (!notesEqual(updated.notes, mergedNotes)) {
       updated = {
         ...updated,
@@ -1038,6 +1048,10 @@ export function applyWifiReceivedDocToDocs(
           })()
         : d.pendingRemoteProgress;
 
+    const relocatedNotes = relocateNotesAfterContentEdit(d.notes, payload.content, {
+      prevContent: d.content,
+    });
+
     return {
       ...d,
       content: payload.content,
@@ -1049,6 +1063,7 @@ export function applyWifiReceivedDocToDocs(
       updatedAt: Math.max(d.updatedAt, payload.updatedAt),
       syncStatus: 'synced' as const,
       pendingRemoteProgress: nextPending,
+      notes: relocatedNotes,
       ...(relocated?.matched
         ? {
             lastCharOffset: relocated.offset,

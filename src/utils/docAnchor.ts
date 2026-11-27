@@ -645,7 +645,10 @@ export function findScrollTopForCharOffset(
   return null;
 }
 
-function findFirstTextTopInElement(scrollEl: HTMLElement, el: HTMLElement): number | null {
+function findFirstTextLineBoxInElement(
+  scrollEl: HTMLElement,
+  el: HTMLElement
+): { top: number; height: number } | null {
   const containerRect = scrollEl.getBoundingClientRect();
   const baseOffset = scrollEl.scrollTop - containerRect.top;
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -660,10 +663,175 @@ function findFirstTextTopInElement(scrollEl: HTMLElement, el: HTMLElement): numb
       const rects = range.getClientRects();
       const r = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
       if (r && r.height > 0) {
-        return r.top + baseOffset;
+        return { top: r.top + baseOffset, height: r.height };
       }
     }
     node = walker.nextNode();
   }
   return null;
+}
+
+function findFirstTextTopInElement(scrollEl: HTMLElement, el: HTMLElement): number | null {
+  return findFirstTextLineBoxInElement(scrollEl, el)?.top ?? null;
+}
+
+/**
+ * Resolve the exact visual-line vertical box ({ top, height } in scrollEl content coordinates)
+ * for a given charOffset ONLY when its owning block is currently mounted inside articleEl.
+ * Returns null if the owning block is outside the mounted DOM window.
+ */
+export function findVisualLineBoxForCharOffset(
+  scrollEl: HTMLElement,
+  articleEl: HTMLElement,
+  rawContent: string,
+  charOffset: number
+): { top: number; height: number } | null {
+  if (!rawContent) return null;
+
+  const safeOffset = Math.min(rawContent.length, Math.max(0, charOffset));
+  const containerRect = scrollEl.getBoundingClientRect();
+  const baseOffset = scrollEl.scrollTop - containerRect.top;
+
+  const blockEls = articleEl.querySelectorAll<HTMLElement>('[data-start-offset][data-end-offset]');
+  const len = blockEls.length;
+  if (len === 0) return null;
+
+  const firstEl = blockEls[0];
+  const firstStart = Number(firstEl.getAttribute('data-start-offset'));
+  const firstIdx = Number(firstEl.getAttribute('data-block-idx'));
+  const lastEl = blockEls[len - 1];
+  const lastEnd = Number(lastEl.getAttribute('data-end-offset'));
+
+  if (!Number.isFinite(firstStart) || !Number.isFinite(lastEnd)) return null;
+  if (safeOffset < firstStart && firstIdx > 0) return null;
+  if (safeOffset > lastEnd + 2) return null;
+
+  let matchedBlock: { el: HTMLElement; start: number; end: number } | null = null;
+  let lo = 0;
+  let hi = len - 1;
+  let nextAfterIdx = -1;
+
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const el = blockEls[mid];
+    const start = Number(el.getAttribute('data-start-offset'));
+    const end = Number(el.getAttribute('data-end-offset'));
+    if (!Number.isFinite(start) || !Number.isFinite(end)) break;
+    if (safeOffset >= start && safeOffset <= end) {
+      matchedBlock = { el, start, end };
+      break;
+    }
+    if (start > safeOffset) {
+      nextAfterIdx = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+
+  // Handle offset landing in whitespace/newline gap between two adjacent mounted blocks (or before block 0)
+  if (!matchedBlock && nextAfterIdx >= 0) {
+    const el = blockEls[nextAfterIdx];
+    const start = Number(el.getAttribute('data-start-offset'));
+    const end = Number(el.getAttribute('data-end-offset'));
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      matchedBlock = { el, start, end };
+    }
+  }
+
+  if (!matchedBlock) {
+    // Allow slight overshoot at very end of last mounted block (only if within 2 chars)
+    if (safeOffset <= lastEnd + 2) {
+      const start = Number(lastEl.getAttribute('data-start-offset'));
+      if (Number.isFinite(start)) {
+        matchedBlock = { el: lastEl, start, end: lastEnd };
+      }
+    }
+  }
+
+  if (!matchedBlock) return null;
+
+  const blockRect = matchedBlock.el.getBoundingClientRect();
+  const blockTop = blockRect.top + baseOffset;
+  const fallbackHeight = Math.max(18, Math.min(blockRect.height || 26, 30));
+
+  if (safeOffset <= matchedBlock.start + 1) {
+    const firstBox = findFirstTextLineBoxInElement(scrollEl, matchedBlock.el);
+    return firstBox ?? { top: blockTop, height: fallbackHeight };
+  }
+
+  const blockRaw = rawContent.slice(matchedBlock.start, matchedBlock.end);
+  const localOffset = Math.min(blockRaw.length, Math.max(0, safeOffset - matchedBlock.start));
+  const localMap = buildNormalizedTextMap(blockRaw, true, true);
+
+  if (localMap.norm && localMap.rawIndices.length > 0) {
+    let normIdx = localMap.rawIndices.findIndex((rawIdx) => rawIdx >= localOffset);
+    if (normIdx === -1) {
+      normIdx = localMap.rawIndices.length - 1;
+    }
+
+    const domMap = collectNormalizedDomMap(matchedBlock.el);
+    if (domMap.norm && domMap.points.length > 0) {
+      const mappedDomIdx = Math.min(
+        domMap.points.length - 1,
+        Math.max(
+          0,
+          localMap.norm.length === domMap.norm.length
+            ? normIdx
+            : Math.round((normIdx / Math.max(1, localMap.norm.length)) * domMap.norm.length)
+        )
+      );
+
+      const targetSlice = localMap.norm.slice(normIdx, normIdx + 36);
+      const intraRatio = localOffset / Math.max(1, blockRaw.length);
+
+      // Try exact normalized anchor match first to get the exact DOM point & line height
+      if (targetSlice) {
+        const probeLengths = [targetSlice.length, 24, 16, 10, 6];
+        for (const lenProbe of probeLengths) {
+          if (lenProbe > targetSlice.length) continue;
+          const probe = targetSlice.slice(0, lenProbe);
+          if (probe.length < 4 && targetSlice.length >= 4) continue;
+          const exactIdx = findClosestOccurrence(
+            domMap.norm,
+            probe,
+            domMap.norm.length,
+            (m) => m / Math.max(1, domMap.norm.length),
+            intraRatio
+          );
+          if (exactIdx !== null) {
+            const pt = domMap.points[exactIdx];
+            if (pt && pt.node.nodeValue && pt.offset < pt.node.nodeValue.length) {
+              const range = document.createRange();
+              range.setStart(pt.node, pt.offset);
+              range.setEnd(pt.node, pt.offset + 1);
+              const rects = range.getClientRects();
+              const r = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
+              if (r && r.height > 0) {
+                return { top: r.top + baseOffset, height: r.height };
+              }
+            }
+          }
+        }
+      }
+
+      const pt = domMap.points[mappedDomIdx];
+      if (pt && pt.node.nodeValue && pt.offset < pt.node.nodeValue.length) {
+        const range = document.createRange();
+        range.setStart(pt.node, pt.offset);
+        range.setEnd(pt.node, pt.offset + 1);
+        const rects = range.getClientRects();
+        const r = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
+        if (r && r.height > 0) {
+          return { top: r.top + baseOffset, height: r.height };
+        }
+      }
+    }
+  }
+
+  const intraRatio = localOffset / Math.max(1, matchedBlock.end - matchedBlock.start);
+  return {
+    top: blockTop + intraRatio * Math.max(0, blockRect.height - fallbackHeight),
+    height: fallbackHeight,
+  };
 }

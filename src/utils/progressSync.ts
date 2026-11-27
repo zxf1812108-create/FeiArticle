@@ -164,10 +164,106 @@ function searchNormalizedWindow(
   return bestRawIdx;
 }
 
+function stripAnchorFormatting(text: string): string {
+  return text
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[#>*_`~[\]]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function searchMarkdownNormalizedWindow(
+  content: string,
+  windowStart: number,
+  windowEnd: number,
+  normNeedle: string,
+  targetRawOffset: number
+): number {
+  if (!normNeedle) return -1;
+  const normChars: string[] = [];
+  const rawIndexMap: number[] = [];
+  let prevWasSpace = true;
+
+  for (let i = windowStart; i < windowEnd; i++) {
+    const ch = content[i];
+    if (/\s/.test(ch)) {
+      if (!prevWasSpace) {
+        normChars.push(' ');
+        rawIndexMap.push(i);
+        prevWasSpace = true;
+      }
+      continue;
+    }
+    if (
+      ch === '#' ||
+      ch === '>' ||
+      ch === '*' ||
+      ch === '_' ||
+      ch === '`' ||
+      ch === '~' ||
+      ch === '[' ||
+      ch === ']'
+    ) {
+      continue;
+    }
+    normChars.push(ch);
+    rawIndexMap.push(i);
+    prevWasSpace = false;
+  }
+
+  const normText = normChars.join('');
+  if (!normText || normText.length < normNeedle.length) return -1;
+
+  let bestRawIdx = -1;
+  let bestDist = Number.POSITIVE_INFINITY;
+  let pos = 0;
+  while (pos <= normText.length - normNeedle.length) {
+    const found = normText.indexOf(normNeedle, pos);
+    if (found === -1) break;
+    const rawIdx = rawIndexMap[found] ?? windowStart;
+    const dist = Math.abs(rawIdx - targetRawOffset);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestRawIdx = rawIdx;
+    }
+    pos = found + 1;
+  }
+  return bestRawIdx;
+}
+
+function findProbeAcrossContent(
+  content: string,
+  probe: string,
+  mdProbe: string,
+  clampedFallback: number,
+  localStart: number,
+  localEnd: number
+): number {
+  const exactIdx = findClosestOccurrence(content, probe, clampedFallback);
+  if (exactIdx !== -1) return exactIdx;
+
+  let idx = searchNormalizedWindow(content, localStart, localEnd, probe, clampedFallback);
+  if (idx === -1 && (localStart > 0 || localEnd < content.length)) {
+    idx = searchNormalizedWindow(content, 0, content.length, probe, clampedFallback);
+  }
+  if (idx !== -1) return idx;
+
+  if (mdProbe.length >= ANCHOR_MIN_MATCH_LEN) {
+    idx = searchMarkdownNormalizedWindow(content, localStart, localEnd, mdProbe, clampedFallback);
+    if (idx === -1 && (localStart > 0 || localEnd < content.length)) {
+      idx = searchMarkdownNormalizedWindow(content, 0, content.length, mdProbe, clampedFallback);
+    }
+    if (idx !== -1) return idx;
+  }
+
+  return -1;
+}
+
 /**
  * Re-locate a saved reading offset inside modified (or cross-device) document content using
  * the stored `anchorText`. Prefers the match closest to `fallbackCharOffset`, falling back
- * to whitespace-normalized search and half-anchor fuzzy matching if a few characters changed.
+ * to whitespace-normalized, markdown-tolerant, and half-anchor fuzzy matching if text changed.
  */
 export function relocateCharOffsetByAnchor(
   content: string,
@@ -180,8 +276,14 @@ export function relocateCharOffsetByAnchor(
     return { offset: 0, progress: 0, matched: false };
   }
 
-  const normAnchor = (anchorText || '').replace(/\s+/g, ' ').trim();
-  if (normAnchor.length < ANCHOR_MIN_MATCH_LEN) {
+  // Strip trailing ellipsis from legacy bookmark excerpts before matching
+  const normAnchor = (anchorText || '')
+    .replace(/(?:…|\.{3,})\s*$/u, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const mdAnchor = stripAnchorFormatting(normAnchor);
+
+  if (normAnchor.length < ANCHOR_MIN_MATCH_LEN && mdAnchor.length < ANCHOR_MIN_MATCH_LEN) {
     return {
       offset: clampedFallback,
       progress: estimateProgressFromOffset(len, clampedFallback),
@@ -189,41 +291,91 @@ export function relocateCharOffsetByAnchor(
     };
   }
 
+  // 0. Fast already-anchored check: if the current offset already points at this anchor
+  //    (even with leading Markdown syntax like "## " or "> "), preserve the exact offset.
+  if (clampedFallback < len) {
+    const currentExtract = extractReadAnchorText(
+      content,
+      clampedFallback,
+      Math.max(normAnchor.length + 12, 56)
+    );
+    const currentMd = stripAnchorFormatting(currentExtract);
+    const compareLen = Math.min(
+      normAnchor.length >= ANCHOR_MIN_MATCH_LEN ? normAnchor.length : mdAnchor.length,
+      24
+    );
+    if (
+      (normAnchor.length >= ANCHOR_MIN_MATCH_LEN &&
+        currentExtract.startsWith(normAnchor.slice(0, compareLen))) ||
+      (mdAnchor.length >= ANCHOR_MIN_MATCH_LEN &&
+        currentMd.startsWith(mdAnchor.slice(0, Math.min(mdAnchor.length, 24))))
+    ) {
+      return {
+        offset: clampedFallback,
+        progress: estimateProgressFromOffset(len, clampedFallback),
+        matched: true,
+      };
+    }
+  }
+
   // 1. Exact substring match across full content (very fast native C++ indexOf)
-  const exactIdx = findClosestOccurrence(content, normAnchor, clampedFallback);
-  if (exactIdx !== -1) {
-    return {
-      offset: exactIdx,
-      progress: estimateProgressFromOffset(len, exactIdx),
-      matched: true,
-    };
+  if (normAnchor.length >= ANCHOR_MIN_MATCH_LEN) {
+    const exactIdx = findClosestOccurrence(content, normAnchor, clampedFallback);
+    if (exactIdx !== -1) {
+      return {
+        offset: exactIdx,
+        progress: estimateProgressFromOffset(len, exactIdx),
+        matched: true,
+      };
+    }
   }
 
   // 2. Whitespace-normalized match: try local ±60k window first, then full doc
   const localStart = Math.max(0, clampedFallback - 60_000);
   const localEnd = Math.min(len, clampedFallback + 60_000);
-  let normIdx = searchNormalizedWindow(content, localStart, localEnd, normAnchor, clampedFallback);
-  if (normIdx === -1 && (localStart > 0 || localEnd < len)) {
-    normIdx = searchNormalizedWindow(content, 0, len, normAnchor, clampedFallback);
-  }
-  if (normIdx !== -1) {
-    return {
-      offset: normIdx,
-      progress: estimateProgressFromOffset(len, normIdx),
-      matched: true,
-    };
+  if (normAnchor.length >= ANCHOR_MIN_MATCH_LEN) {
+    let normIdx = searchNormalizedWindow(content, localStart, localEnd, normAnchor, clampedFallback);
+    if (normIdx === -1 && (localStart > 0 || localEnd < len)) {
+      normIdx = searchNormalizedWindow(content, 0, len, normAnchor, clampedFallback);
+    }
+    if (normIdx !== -1) {
+      return {
+        offset: normIdx,
+        progress: estimateProgressFromOffset(len, normIdx),
+        matched: true,
+      };
+    }
   }
 
-  // 3. Partial-sentence fallback (in case a few words inside the anchored line were edited)
-  if (normAnchor.length >= ANCHOR_HALF_LEN + 4) {
-    const head = normAnchor.slice(0, ANCHOR_HALF_LEN).trim();
-    const tail = normAnchor.slice(-ANCHOR_HALF_LEN).trim();
+  // 2b. Markdown-tolerant normalized match (handles anchors extracted from rendered plain text or edited Markdown markers)
+  if (mdAnchor.length >= ANCHOR_MIN_MATCH_LEN) {
+    let mdIdx = searchMarkdownNormalizedWindow(content, localStart, localEnd, mdAnchor, clampedFallback);
+    if (mdIdx === -1 && (localStart > 0 || localEnd < len)) {
+      mdIdx = searchMarkdownNormalizedWindow(content, 0, len, mdAnchor, clampedFallback);
+    }
+    if (mdIdx !== -1) {
+      return {
+        offset: mdIdx,
+        progress: estimateProgressFromOffset(len, mdIdx),
+        matched: true,
+      };
+    }
+  }
 
-    if (head.length >= ANCHOR_MIN_MATCH_LEN) {
-      const headIdx =
-        findClosestOccurrence(content, head, clampedFallback) !== -1
-          ? findClosestOccurrence(content, head, clampedFallback)
-          : searchNormalizedWindow(content, localStart, localEnd, head, clampedFallback);
+  // 3. Partial-sentence fallback (handles minor edits inside the anchored line AND large front deletions > 60k)
+  const baseAnchor = normAnchor.length >= ANCHOR_HALF_LEN + 4 ? normAnchor : mdAnchor;
+  if (baseAnchor.length >= ANCHOR_HALF_LEN + 4) {
+    const head = baseAnchor.slice(0, ANCHOR_HALF_LEN).trim();
+    const headMd = stripAnchorFormatting(head);
+    if (head.length >= ANCHOR_MIN_MATCH_LEN || headMd.length >= ANCHOR_MIN_MATCH_LEN) {
+      const headIdx = findProbeAcrossContent(
+        content,
+        head,
+        headMd,
+        clampedFallback,
+        localStart,
+        localEnd
+      );
       if (headIdx !== -1) {
         return {
           offset: headIdx,
@@ -233,13 +385,19 @@ export function relocateCharOffsetByAnchor(
       }
     }
 
-    if (tail.length >= ANCHOR_MIN_MATCH_LEN) {
-      const tailRaw =
-        findClosestOccurrence(content, tail, clampedFallback) !== -1
-          ? findClosestOccurrence(content, tail, clampedFallback)
-          : searchNormalizedWindow(content, localStart, localEnd, tail, clampedFallback);
+    const tail = baseAnchor.slice(-ANCHOR_HALF_LEN).trim();
+    const tailMd = stripAnchorFormatting(tail);
+    if (tail.length >= ANCHOR_MIN_MATCH_LEN || tailMd.length >= ANCHOR_MIN_MATCH_LEN) {
+      const tailRaw = findProbeAcrossContent(
+        content,
+        tail,
+        tailMd,
+        clampedFallback,
+        localStart,
+        localEnd
+      );
       if (tailRaw !== -1) {
-        const estimatedStart = Math.max(0, tailRaw - (normAnchor.length - tail.length));
+        const estimatedStart = Math.max(0, tailRaw - (baseAnchor.length - tail.length));
         return {
           offset: estimatedStart,
           progress: estimateProgressFromOffset(len, estimatedStart),

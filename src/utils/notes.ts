@@ -1,5 +1,5 @@
 import { ReadingNote } from '../types';
-import { relocateCharOffsetByAnchor } from './progressSync';
+import { extractReadAnchorText, relocateCharOffsetByAnchor } from './progressSync';
 import { TRASH_RETENTION_MS } from './trash';
 
 export function getActiveNotes(notes?: ReadingNote[] | null): ReadingNote[] {
@@ -89,34 +89,110 @@ export function notesEqual(a?: ReadingNote[] | null, b?: ReadingNote[] | null): 
   return notesSignature(a) === notesSignature(b);
 }
 
-export function extractNoteAnchorExcerpt(rawParagraphText: string, maxChars = 36): string {
+export const NOTE_ANCHOR_MAX_CHARS = 48;
+
+export function extractNoteAnchorExcerpt(
+  rawParagraphText: string,
+  maxChars = NOTE_ANCHOR_MAX_CHARS
+): string {
   const cleaned = rawParagraphText
     .replace(/\r\n?/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/[#>*_`~[\]]+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
   if (!cleaned) return '';
   if (cleaned.length <= maxChars) return cleaned;
-  return `${cleaned.slice(0, maxChars).trim()}…`;
+  return cleaned.slice(0, maxChars).trim();
+}
+
+/**
+ * Extract a clean, ellipsis-free anchor text starting at `charOffset` in raw content.
+ * Automatically spans across short lines/headings to gather ~48 chars so bookmark
+ * relocation stays accurate even after large edits earlier in the document.
+ */
+export function extractNoteAnchorText(
+  rawContent: string,
+  charOffset: number,
+  fallbackText = '',
+  maxChars = NOTE_ANCHOR_MAX_CHARS
+): string {
+  if (rawContent) {
+    const fromRaw = extractReadAnchorText(rawContent, charOffset, maxChars);
+    if (fromRaw.length >= 6) {
+      return fromRaw;
+    }
+  }
+  const fromFallback = extractNoteAnchorExcerpt(fallbackText, maxChars);
+  if (fromFallback) return fromFallback;
+  return rawContent ? extractReadAnchorText(rawContent, charOffset, maxChars) : '';
+}
+
+export interface RelocateNotesOptions {
+  prevContent?: string;
+  bumpUpdatedAt?: boolean;
+  now?: number;
 }
 
 export function relocateNotesAfterContentEdit(
   notes: ReadingNote[] | undefined,
-  newContent: string
+  newContent: string,
+  options?: RelocateNotesOptions
 ): ReadingNote[] | undefined {
   if (!Array.isArray(notes) || notes.length === 0 || !newContent) return notes;
+  const prevContent = options?.prevContent || '';
+  const bumpUpdatedAt = Boolean(options?.bumpUpdatedAt);
+  const now = options?.now ?? Date.now();
+
   let anyChanged = false;
   const next = notes.map((note) => {
-    if (note.deleted || !note.anchorText) return note;
-    const relocated = relocateCharOffsetByAnchor(newContent, note.charOffset, note.anchorText);
-    if (relocated.matched && relocated.offset !== note.charOffset) {
-      anyChanged = true;
-      return { ...note, charOffset: relocated.offset };
+    if (note.deleted) return note;
+
+    const storedAnchor = (note.anchorText || '').trim();
+    const needsRicherAnchor =
+      Boolean(prevContent) &&
+      (!storedAnchor || storedAnchor.endsWith('…') || storedAnchor.length < 18);
+    const prevExtractedAnchor = needsRicherAnchor
+      ? extractReadAnchorText(prevContent, note.charOffset, NOTE_ANCHOR_MAX_CHARS)
+      : '';
+    const effectiveAnchor =
+      prevExtractedAnchor.length >= 6 ? prevExtractedAnchor : storedAnchor;
+
+    if (effectiveAnchor) {
+      const relocated = relocateCharOffsetByAnchor(newContent, note.charOffset, effectiveAnchor);
+      if (relocated.matched) {
+        const offsetChanged = relocated.offset !== note.charOffset;
+        const cleanedStored = storedAnchor.replace(/(?:…|\.{3,})\s*$/u, '').trim();
+        const nextAnchorText = storedAnchor
+          ? prevExtractedAnchor.length > cleanedStored.length
+            ? prevExtractedAnchor
+            : cleanedStored
+          : storedAnchor;
+        const anchorChanged = nextAnchorText !== note.anchorText;
+        if (offsetChanged || anchorChanged) {
+          anyChanged = true;
+          return {
+            ...note,
+            charOffset: relocated.offset,
+            anchorText: nextAnchorText,
+            ...(bumpUpdatedAt && offsetChanged
+              ? { updatedAt: Math.max(now, note.updatedAt + 1) }
+              : {}),
+          };
+        }
+        return note;
+      }
     }
+
     const clamped = Math.min(newContent.length, Math.max(0, note.charOffset));
     if (clamped !== note.charOffset) {
       anyChanged = true;
-      return { ...note, charOffset: clamped };
+      return {
+        ...note,
+        charOffset: clamped,
+        ...(bumpUpdatedAt ? { updatedAt: Math.max(now, note.updatedAt + 1) } : {}),
+      };
     }
     return note;
   });

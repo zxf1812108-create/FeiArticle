@@ -284,7 +284,7 @@ export function saveActiveMdictId(dictId: string | null): void {
 }
 
 export type TreeToolbarIconId = 'read' | 'import' | 'cut' | 'encrypt' | 'settings';
-export type DocToolbarIconId = 'back' | 'font' | 'note' | 'whistle';
+export type DocToolbarIconId = 'back' | 'font' | 'whistle';
 
 export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
   'read',
@@ -297,7 +297,6 @@ export const DEFAULT_TREE_TOOLBAR_ORDER: TreeToolbarIconId[] = [
 export const DEFAULT_DOC_TOOLBAR_ORDER: DocToolbarIconId[] = [
   'back',
   'font',
-  'note',
   'whistle',
 ];
 

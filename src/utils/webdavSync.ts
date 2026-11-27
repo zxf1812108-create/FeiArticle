@@ -25,7 +25,13 @@ import {
 } from './inbox';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
 import { isTrashExpired, purgeExpiredTrash } from './trash';
-import { mergeReadingNotes, notesEqual, notesSignature, sanitizeNotesList } from './notes';
+import {
+  mergeReadingNotes,
+  notesEqual,
+  notesSignature,
+  relocateNotesAfterContentEdit,
+  sanitizeNotesList,
+} from './notes';
 import {
   extractReadAnchorText,
   isProgressMeaningfullyDifferent,
@@ -1453,6 +1459,10 @@ export async function runAutoMetadataProgressSync(
               anchor && (nextLocal.lastCharOffset ?? 0) > 0
                 ? relocateCharOffsetByAnchor(downloaded.content, nextLocal.lastCharOffset ?? 0, anchor)
                 : null;
+            const prevBody = nextLocal.content;
+            const relocatedNotes = relocateNotesAfterContentEdit(nextLocal.notes, downloaded.content, {
+              prevContent: prevBody,
+            });
             nextLocal = {
               ...nextLocal,
               content: downloaded.content,
@@ -1463,6 +1473,7 @@ export async function runAutoMetadataProgressSync(
               updatedAt: remoteEntry.updatedAt,
               syncStatus: 'synced',
               cloudBodySynced: true,
+              notes: relocatedNotes,
               ...(relocated?.matched
                 ? {
                     lastCharOffset: relocated.offset,
@@ -1515,6 +1526,10 @@ export async function runAutoMetadataProgressSync(
             anchor && (nextLocal.lastCharOffset ?? 0) > 0
               ? relocateCharOffsetByAnchor(downloaded.content, nextLocal.lastCharOffset ?? 0, anchor)
               : null;
+          const prevBody = nextLocal.content;
+          const relocatedNotes = relocateNotesAfterContentEdit(nextLocal.notes, downloaded.content, {
+            prevContent: prevBody,
+          });
           nextLocal = {
             ...nextLocal,
             content: downloaded.content,
@@ -1525,6 +1540,7 @@ export async function runAutoMetadataProgressSync(
             updatedAt: remoteEntry.updatedAt,
             syncStatus: 'synced',
             cloudBodySynced: true,
+            notes: relocatedNotes,
             ...(relocated?.matched
               ? {
                   lastCharOffset: relocated.offset,
@@ -1560,6 +1576,7 @@ export async function runAutoMetadataProgressSync(
             anchor && (nextLocal.lastCharOffset ?? 0) > 0
               ? relocateCharOffsetByAnchor(downloaded.content, nextLocal.lastCharOffset ?? 0, anchor)
               : null;
+          const relocatedNotes = relocateNotesAfterContentEdit(nextLocal.notes, downloaded.content);
           nextLocal = {
             ...nextLocal,
             content: downloaded.content,
@@ -1570,6 +1587,7 @@ export async function runAutoMetadataProgressSync(
             updatedAt: Math.max(nextLocal.updatedAt, remoteEntry.updatedAt),
             syncStatus: 'synced',
             cloudBodySynced: true,
+            notes: relocatedNotes,
             ...(relocated?.matched
               ? {
                   lastCharOffset: relocated.offset,
@@ -1613,7 +1631,11 @@ export async function runAutoMetadataProgressSync(
       ? ''
       : trimManifestExcerpt(nextRemoteEntry.excerpt);
 
-    const mergedNotes = mergeReadingNotes(nextLocal.notes, remoteEntry.notes, syncNow);
+    const rawMergedNotes = mergeReadingNotes(nextLocal.notes, remoteEntry.notes, syncNow);
+    const mergedNotes =
+      nextLocal.content && rawMergedNotes.length > 0
+        ? (relocateNotesAfterContentEdit(rawMergedNotes, nextLocal.content) ?? rawMergedNotes)
+        : rawMergedNotes;
     if (!notesEqual(nextLocal.notes, mergedNotes)) {
       nextLocal = {
         ...nextLocal,
@@ -1697,9 +1719,11 @@ export async function runAutoMetadataProgressSync(
             deletedAt: rEntry.deletedAt,
             deletedByFolderId: rEntry.deletedByFolderId,
             highlights: [],
-            notes: sanitizeNotesList(rEntry.notes, syncNow).length > 0
-              ? sanitizeNotesList(rEntry.notes, syncNow)
-              : undefined,
+            notes: (() => {
+              const sanitized = sanitizeNotesList(rEntry.notes, syncNow);
+              if (sanitized.length === 0) return undefined;
+              return relocateNotesAfterContentEdit(sanitized, downloaded.content) ?? sanitized;
+            })(),
             byteSize: downloaded.byteSize,
             syncStatus: 'synced',
             lastSyncedContentHash: downloaded.contentHash,

@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Bookmark,
   BookOpen,
   Download,
   FolderTree,
@@ -58,7 +57,12 @@ import {
   WebDavConfig,
   WhistleSensitivity,
 } from './types';
-import { getActiveNotes, notesSignature, sanitizeNotesList } from './utils/notes';
+import {
+  getActiveNotes,
+  notesSignature,
+  relocateNotesAfterContentEdit,
+  sanitizeNotesList,
+} from './utils/notes';
 import {
   attachMdictCss,
   deleteMdictDictionary,
@@ -291,7 +295,6 @@ export default function App() {
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTrashModal, setShowTrashModal] = useState(false);
   const [showFontSizeBar, setShowFontSizeBar] = useState(false);
-  const [visibleNoteIds, setVisibleNoteIds] = useState<string[]>([]);
   const [notePopoverState, setNotePopoverState] = useState<{
     initialNoteId: string | null;
     defaultAnchor: NoteAnchorTarget;
@@ -831,20 +834,45 @@ export default function App() {
         const byteSize = getByteSize(content);
         const excerpt = extractExcerpt(content);
         setDocs((prev) =>
-          prev.map((d) =>
-            d.id === action.docId
-              ? {
-                  ...d,
-                  title,
-                  content,
-                  contentHash: hash,
-                  byteSize,
-                  excerpt,
-                  updatedAt: now,
-                  syncStatus: 'dirty',
-                }
-              : d
-          )
+          prev.map((d) => {
+            if (d.id !== action.docId) return d;
+            const prevContent = d.content || '';
+            const prevOffset = Math.max(0, Math.round(d.lastCharOffset ?? 0));
+            const anchor =
+              d.readAnchorText ||
+              (prevContent && prevOffset > 0 ? extractReadAnchorText(prevContent, prevOffset) : '');
+            const relocated =
+              anchor && prevOffset > 0 && content
+                ? relocateCharOffsetByAnchor(content, prevOffset, anchor)
+                : null;
+            const relocatedNotes =
+              content && d.notes && d.notes.length > 0
+                ? relocateNotesAfterContentEdit(d.notes, content, {
+                    prevContent,
+                    bumpUpdatedAt: true,
+                    now,
+                  })
+                : d.notes;
+            return {
+              ...d,
+              title,
+              content,
+              contentHash: hash,
+              byteSize,
+              excerpt,
+              updatedAt: now,
+              syncStatus: 'dirty',
+              notes: relocatedNotes,
+              ...(relocated?.matched
+                ? {
+                    lastCharOffset: relocated.offset,
+                    readProgress: relocated.progress,
+                    lastScrollTop: 0,
+                    readAnchorText: extractReadAnchorText(content, relocated.offset) || anchor,
+                  }
+                : {}),
+            };
+          })
         );
         markAutoCatalogDirty();
         return;
@@ -1610,7 +1638,6 @@ export default function App() {
     setSelectedDocId(docId);
     setLiveReadProgress(target?.readProgress ?? 0);
     setLiveProgressDecimals(0);
-    setVisibleNoteIds([]);
     setNotePopoverState(null);
     setOutlineReturnPos(null);
     // Plan B: clear session dismissal on book open so any unresolved pending progress prompts cleanly
@@ -1898,7 +1925,6 @@ export default function App() {
     setShowFontSizeBar(false);
     setNotePopoverState(null);
     setOutlineReturnPos(null);
-    setVisibleNoteIds([]);
     setWhistleEnabled(false);
     setMainView('tree');
     if (autoProgressDirtyRef.current || autoCatalogDirtyRef.current) {
@@ -4312,18 +4338,36 @@ export default function App() {
     );
     const hash = await sha256Hex(content);
     setDocs((prev) =>
-      prev.map((d) =>
-        d.id === docId
-          ? {
-              ...d,
-              content,
-              contentHash: hash,
-              excerpt: d.encrypted ? '' : extractExcerpt(content),
-              byteSize: getByteSize(content),
-              syncStatus: 'synced',
-            }
-          : d
-      )
+      prev.map((d) => {
+        if (d.id !== docId) return d;
+        const prevOffset = Math.max(0, Math.round(d.lastCharOffset ?? 0));
+        const anchor = d.readAnchorText;
+        const relocated =
+          anchor && prevOffset > 0 && content
+            ? relocateCharOffsetByAnchor(content, prevOffset, anchor)
+            : null;
+        const relocatedNotes =
+          content && d.notes && d.notes.length > 0
+            ? relocateNotesAfterContentEdit(d.notes, content, { prevContent: d.content })
+            : d.notes;
+        return {
+          ...d,
+          content,
+          contentHash: hash,
+          excerpt: d.encrypted ? '' : extractExcerpt(content),
+          byteSize: getByteSize(content),
+          syncStatus: 'synced',
+          notes: relocatedNotes,
+          ...(relocated?.matched
+            ? {
+                lastCharOffset: relocated.offset,
+                readProgress: relocated.progress,
+                lastScrollTop: 0,
+                readAnchorText: extractReadAnchorText(content, relocated.offset) || anchor,
+              }
+            : {}),
+        };
+      })
     );
     applyQuotaDelta({
       uploadBytes: 0,
@@ -4467,8 +4511,8 @@ export default function App() {
                 prev === metrics.progressDecimals ? prev : metrics.progressDecimals
               );
             }}
-            onVisibleNotesChange={setVisibleNoteIds}
             onOpenNoteFromMargin={handleOpenNoteFromMargin}
+            onQuickBookmarkTap={handleOpenNotePopover}
             onOutlineNavigate={(origin) => {
               setOutlineReturnPos((prev) => prev ?? origin);
             }}
@@ -4858,50 +4902,6 @@ export default function App() {
                       }`}
                     >
                       <Music2 className="w-[20px] h-[20px]" strokeWidth={1.8} />
-                    </button>
-                  );
-                }
-
-                if (iconId === 'note') {
-                  const hasVisibleNotes = visibleNoteIds.length > 0;
-                  const noteActive = hasVisibleNotes || Boolean(notePopoverState);
-                  return (
-                    <button
-                      key={iconId}
-                      ref={bindRef}
-                      type="button"
-                      onPointerDown={(e) => handleToolbarIconPointerDown(e, 'note', 'doc')}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                      }}
-                      onClick={() => {
-                        if (suppressToolbarClickRef.current) return;
-                        handleOpenNotePopover();
-                      }}
-                      aria-label={
-                        hasVisibleNotes
-                          ? `当前页有 ${visibleNoteIds.length} 个书签（点击添加或编辑书签）`
-                          : '添加书签'
-                      }
-                      aria-pressed={noteActive}
-                      title={
-                        hasVisibleNotes
-                          ? `当前页有 ${visibleNoteIds.length} 个书签（点击添加或编辑，可拖动调整图标位置）`
-                          : '添加书签（可拖动调整图标位置）'
-                      }
-                      className={`w-[44px] sm:w-[48px] h-[46px] inline-flex items-center justify-center rounded-lg transition-all shrink-0 touch-none select-none ${
-                        isDraggingThis
-                          ? dragCls
-                          : noteActive
-                            ? 'bg-[var(--fei-bg-selected)] border border-transparent eink:border-[var(--fei-border-strong)] text-[var(--fei-text-primary)]'
-                            : 'text-[var(--fei-text-muted)] hover:bg-[var(--fei-bg-hover)]'
-                      }`}
-                    >
-                      <Bookmark
-                        className="w-[20px] h-[20px]"
-                        strokeWidth={hasVisibleNotes ? 2.1 : 1.8}
-                      />
                     </button>
                   );
                 }

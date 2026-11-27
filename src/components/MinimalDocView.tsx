@@ -12,7 +12,7 @@ import React, {
 import { CloudDownload, Copy, Wifi, X } from 'lucide-react';
 import { ArticleDoc, ReadingNote } from '../types';
 import { extractLookupWord } from '../utils/mdict';
-import { extractNoteAnchorExcerpt, getActiveNotes } from '../utils/notes';
+import { extractNoteAnchorText, getActiveNotes } from '../utils/notes';
 import { isPureLatinQuotedBlock, splitLatinQuoteSegments } from '../utils/quoteTypography';
 import { DocImageBlock, DocImagePreviewPayload } from './DocImageBlock';
 import { DocOutlineModal } from './DocOutlineModal';
@@ -22,6 +22,7 @@ import {
   extractExactVisualLineText,
   findBlocksInClientYRange,
   findScrollTopForCharOffset,
+  findVisualLineBoxForCharOffset,
   resolveReadViewportCharOffset,
 } from '../utils/docAnchor';
 import {
@@ -97,6 +98,7 @@ interface MinimalDocViewProps {
   onReadMetricsChange?: (metrics: DocReadMetrics) => void;
   onVisibleNotesChange?: (visibleNoteIds: string[]) => void;
   onOpenNoteFromMargin?: (noteId: string) => void;
+  onQuickBookmarkTap?: () => void;
   onOutlineNavigate?: (origin: { charOffset: number; readProgress: number }) => void;
   onFetchRemoteBody: () => Promise<void>;
   onReturnToTree: () => void;
@@ -458,42 +460,12 @@ const MarginBookmarkRibbon: React.FC<{ className?: string }> = ({ className = ''
   </svg>
 );
 
-function renderMarginNoteMarker(
-  anchoredNotes: ReadingNote[] | undefined,
-  onOpenNoteFromMargin?: (noteId: string) => void,
-  isPendingBookmark = false
-): React.ReactNode {
-  const hasSaved = Boolean(anchoredNotes && anchoredNotes.length > 0);
-  if (!hasSaved && !isPendingBookmark) return null;
-  if (!hasSaved) {
-    return (
-      <span
-        aria-hidden="true"
-        data-note-marker="true"
-        className="pointer-events-none absolute -left-[20px] sm:-left-[22px] top-[0.22em] h-[1.25em] w-[20px] sm:w-[22px] flex items-center justify-center select-none text-[var(--fei-text-muted)]/80 eink:text-[var(--fei-text-primary)]"
-      >
-        <MarginBookmarkRibbon />
-      </span>
-    );
-  }
-  const primaryNote = anchoredNotes![0];
-  return (
-    <button
-      type="button"
-      data-note-marker="true"
-      aria-label="查看或编辑本段书签"
-      title="查看或编辑本段书签"
-      onPointerDown={(e) => e.stopPropagation()}
-      onTouchStart={(e) => e.stopPropagation()}
-      onClick={(e) => {
-        e.stopPropagation();
-        onOpenNoteFromMargin?.(primaryNote.id);
-      }}
-      className="absolute -left-[20px] sm:-left-[22px] top-[0.22em] h-[1.25em] w-[20px] sm:w-[22px] flex items-center justify-center select-none cursor-pointer group/note text-[var(--fei-text-muted)]/80 hover:text-[var(--fei-text-primary)] eink:text-[var(--fei-text-primary)] transition-colors"
-    >
-      <MarginBookmarkRibbon />
-    </button>
-  );
+interface MarginBookmarkMarker {
+  key: string;
+  noteId: string | null;
+  isPending: boolean;
+  top: number;
+  height: number;
 }
 
 function renderBlock(
@@ -510,14 +482,8 @@ function renderBlock(
   };
   const topZero = isFirstOverall ? 'mt-0' : '';
   const justifyCls = autoHyphenate ? 'text-justify' : '';
-  const anchoredNotes = renderCtx?.notesByBlockIdx?.get(idx);
-  const isPendingBookmark = renderCtx?.pendingBookmarkBlockIdx === idx;
-  const noteMarker = renderMarginNoteMarker(
-    anchoredNotes,
-    renderCtx?.onOpenNoteFromMargin,
-    isPendingBookmark
-  );
-  const relativeCls = noteMarker ? 'relative' : '';
+  const noteMarker: React.ReactNode = null;
+  const relativeCls = '';
 
   switch (block.type) {
     case 'heading': {
@@ -800,6 +766,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       onReadMetricsChange,
       onVisibleNotesChange,
       onOpenNoteFromMargin,
+      onQuickBookmarkTap,
       onOutlineNavigate,
       onFetchRemoteBody,
       onReturnToTree,
@@ -910,6 +877,11 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     );
 
     const activeNotes = useMemo(() => getActiveNotes(doc.notes), [doc.notes]);
+    const activeNotesRef = useRef(activeNotes);
+    activeNotesRef.current = activeNotes;
+    const pendingBookmarkCharOffsetRef = useRef<number | null>(pendingBookmarkCharOffset);
+    pendingBookmarkCharOffsetRef.current = pendingBookmarkCharOffset;
+    const [marginMarkers, setMarginMarkers] = useState<MarginBookmarkMarker[]>([]);
 
     const notesByBlockIdx = useMemo(() => {
       const map = new Map<number, ReadingNote[]>();
@@ -926,19 +898,81 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return map;
     }, [blocks, activeNotes]);
 
-    const pendingBookmarkBlockIdx = useMemo(() => {
-      if (
-        pendingBookmarkCharOffset === null ||
-        pendingBookmarkCharOffset === undefined ||
-        blocks.length === 0
-      ) {
-        return null;
-      }
-      return findBlockIndexByCharOffset(blocks, pendingBookmarkCharOffset);
-    }, [blocks, pendingBookmarkCharOffset]);
-
     const notesByBlockIdxRef = useRef(notesByBlockIdx);
     notesByBlockIdxRef.current = notesByBlockIdx;
+
+    const recomputeMarginMarkers = useCallback(() => {
+      const el = scrollRef.current;
+      const articleEl = articleRef.current;
+      const raw = contentRef.current;
+      const notes = activeNotesRef.current;
+      const pendingOffset = pendingBookmarkCharOffsetRef.current;
+      if (!el || !articleEl || !raw || (notes.length === 0 && pendingOffset === null)) {
+        setMarginMarkers((prev) => (prev.length === 0 ? prev : []));
+        return;
+      }
+
+      const containerRect = el.getBoundingClientRect();
+      const articleRect = articleEl.getBoundingClientRect();
+      const articleTopInScroll = articleRect.top - containerRect.top + el.scrollTop;
+
+      const next: MarginBookmarkMarker[] = [];
+      const seenLineTops: number[] = [];
+
+      for (const note of notes) {
+        const box = findVisualLineBoxForCharOffset(el, articleEl, raw, note.charOffset);
+        if (!box) continue;
+        const relTop = Math.round(box.top - articleTopInScroll);
+        const height = Math.max(18, Math.round(box.height));
+        if (seenLineTops.some((t) => Math.abs(t - relTop) <= Math.max(6, height * 0.45))) {
+          continue;
+        }
+        seenLineTops.push(relTop);
+        next.push({
+          key: note.id,
+          noteId: note.id,
+          isPending: false,
+          top: relTop,
+          height,
+        });
+      }
+
+      if (pendingOffset !== null) {
+        const box = findVisualLineBoxForCharOffset(el, articleEl, raw, pendingOffset);
+        if (box) {
+          const relTop = Math.round(box.top - articleTopInScroll);
+          const height = Math.max(18, Math.round(box.height));
+          if (!seenLineTops.some((t) => Math.abs(t - relTop) <= Math.max(6, height * 0.45))) {
+            next.push({
+              key: '__pending_bookmark__',
+              noteId: null,
+              isPending: true,
+              top: relTop,
+              height,
+            });
+          }
+        }
+      }
+
+      setMarginMarkers((prev) => {
+        if (
+          prev.length === next.length &&
+          prev.every(
+            (p, i) =>
+              p.key === next[i].key &&
+              p.isPending === next[i].isPending &&
+              Math.abs(p.top - next[i].top) <= 1 &&
+              Math.abs(p.height - next[i].height) <= 1
+          )
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    }, []);
+
+    const recomputeMarginMarkersRef = useRef(recomputeMarginMarkers);
+    recomputeMarginMarkersRef.current = recomputeMarginMarkers;
 
     const handleOpenNoteFromMarginStable = useCallback((noteId: string) => {
       onOpenNoteFromMarginRef.current?.(noteId);
@@ -1505,84 +1539,62 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const computeScreenNoteAnchorContext = (): ScreenNoteAnchorContext | null => {
       const el = scrollRef.current;
       const articleEl = articleRef.current;
+      const raw = contentRef.current;
       if (!el || !articleEl || blocks.length === 0) return null;
 
-      const containerRect = el.getBoundingClientRect();
-      const effectiveTop = containerRect.top + topClipPxRef.current;
-      const effectiveBottom = containerRect.bottom - bottomClipPxRef.current;
-      const blockEls = Array.from(articleEl.querySelectorAll<HTMLElement>('[data-block-idx]'));
+      // Anchor bookmark directly to the start of the first visible visual line on screen
+      const firstLineOffset = captureCurrentCharOffset();
+      const viewTop = el.scrollTop;
+      const lines = collectVisualLinesInBand(
+        el,
+        articleEl,
+        Math.max(0, viewTop - 24),
+        viewTop + Math.min(el.clientHeight, 260)
+      );
+      const effectiveViewTop = viewTop + topClipPxRef.current;
+      const firstVisLine = lines.find((line) => {
+        if (!line.text.trim()) return false;
+        const lh = Math.max(12, line.bottom - line.top);
+        const minKeep = Math.min(10, Math.max(4, lh * 0.45));
+        return line.bottom > effectiveViewTop + minKeep;
+      });
+      const fallbackBlock = blocks[findBlockIndexByCharOffset(blocks, firstLineOffset)] ?? blocks[0];
+      const anchorText = extractNoteAnchorText(
+        raw,
+        firstLineOffset,
+        firstVisLine?.text || getBlockPlainText(fallbackBlock)
+      );
 
-      const visibleNoteIds: string[] = [];
-      const seenNoteIds = new Set<string>();
-      const noteMap = notesByBlockIdxRef.current;
-
-      let firstCompleteTextIdx: number | null = null;
-      let firstStartInViewTextIdx: number | null = null;
-      let firstOverlappingTextIdx: number | null = null;
-      let firstOverlappingAnyIdx: number | null = null;
-
-      for (const bEl of blockEls) {
-        const r = bEl.getBoundingClientRect();
-        if (r.bottom <= effectiveTop + 4 || r.top >= effectiveBottom - 4) continue;
-        const idx = Number(bEl.getAttribute('data-block-idx'));
-        if (!Number.isFinite(idx) || idx < 0 || idx >= blocks.length) continue;
-
-        const blockNotes = noteMap.get(idx);
-        if (blockNotes && blockNotes.length > 0) {
-          for (const n of blockNotes) {
-            if (!seenNoteIds.has(n.id)) {
-              seenNoteIds.add(n.id);
-              visibleNoteIds.push(n.id);
-            }
-          }
+      // Check whether an existing bookmark already sits on this exact first visible line
+      let existingNoteOnFirstLine: ReadingNote | null = null;
+      const targetBox = findVisualLineBoxForCharOffset(el, articleEl, raw, firstLineOffset);
+      for (const note of activeNotesRef.current) {
+        if (Math.abs(note.charOffset - firstLineOffset) <= 2) {
+          existingNoteOnFirstLine = note;
+          break;
         }
-
-        const block = blocks[idx];
-        if (firstOverlappingAnyIdx === null) {
-          firstOverlappingAnyIdx = idx;
-        }
-        const isTextBlock = block.type !== 'hr' && block.type !== 'image';
-        if (isTextBlock) {
-          if (firstOverlappingTextIdx === null) {
-            firstOverlappingTextIdx = idx;
-          }
-          if (firstStartInViewTextIdx === null && r.top >= effectiveTop - 3 && r.top < effectiveBottom - 4) {
-            firstStartInViewTextIdx = idx;
-          }
-          if (
-            firstCompleteTextIdx === null &&
-            r.top >= effectiveTop - 3 &&
-            r.bottom <= effectiveBottom + 3
-          ) {
-            firstCompleteTextIdx = idx;
+        if (targetBox) {
+          const noteBox = findVisualLineBoxForCharOffset(el, articleEl, raw, note.charOffset);
+          if (noteBox && Math.abs(noteBox.top - targetBox.top) <= Math.max(6, targetBox.height * 0.45)) {
+            existingNoteOnFirstLine = note;
+            break;
           }
         }
       }
 
-      const chosenIdx =
-        firstCompleteTextIdx ??
-        firstStartInViewTextIdx ??
-        firstOverlappingTextIdx ??
-        firstOverlappingAnyIdx ??
-        0;
-      const chosenBlock = blocks[chosenIdx] ?? blocks[0];
-      const anchorText = extractNoteAnchorExcerpt(getBlockPlainText(chosenBlock));
-      const defaultAnchorNotes = noteMap.get(chosenIdx);
-      const defaultAnchorHasNote = (defaultAnchorNotes?.length ?? 0) > 0;
-      const defaultAnchorNoteId = defaultAnchorNotes?.[0]?.id ?? null;
-
       return {
         defaultAnchor: {
-          charOffset: chosenBlock.startOffset,
+          charOffset: firstLineOffset,
           anchorText,
         },
-        screenNoteIds: visibleNoteIds,
-        defaultAnchorHasNote,
-        defaultAnchorNoteId,
+        screenNoteIds: existingNoteOnFirstLine ? [existingNoteOnFirstLine.id] : [],
+        defaultAnchorHasNote: Boolean(existingNoteOnFirstLine),
+        defaultAnchorNoteId: existingNoteOnFirstLine?.id ?? null,
       };
     };
 
     const reportVisibleNotes = () => {
+      if (!onVisibleNotesChangeRef.current) return;
       const ctx = computeScreenNoteAnchorContext();
       const ids = ctx?.screenNoteIds ?? [];
       const key = ids.join(',');
@@ -1602,6 +1614,38 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       return () => window.cancelAnimationFrame(raf);
     }, [doc.id, activeNotes, blocks]);
 
+    // Synchronously align margin bookmark ribbons to exact visual lines on layout/content/bookmark changes
+    useLayoutEffect(() => {
+      recomputeMarginMarkers();
+    }, [
+      doc.id,
+      content,
+      activeNotes,
+      pendingBookmarkCharOffset,
+      fontSize,
+      autoHyphenate,
+      contentWidth,
+      mountedRange.start,
+      mountedRange.end,
+      recomputeMarginMarkers,
+    ]);
+
+    useEffect(() => {
+      let cancelled = false;
+      document.fonts?.ready
+        ?.then(() => {
+          if (!cancelled) {
+            recomputeMarginMarkersRef.current();
+          }
+        })
+        .catch(() => {
+          // ignore
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [doc.id, fontSize]);
+
     const scheduleEdgeClipUpdate = () => {
       if (clipRafRef.current !== null) {
         window.cancelAnimationFrame(clipRafRef.current);
@@ -1620,6 +1664,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const handleDocImageLoaded = useCallback(() => {
       measureMountedChunksNowRef.current();
       scheduleEdgeClipUpdateRef.current();
+      recomputeMarginMarkersRef.current();
     }, []);
 
     const handleDocImagePreview = useCallback((payload: DocImagePreviewPayload) => {
@@ -3100,8 +3145,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       };
     }, [showOutline]);
 
-    // 2-zone tap interaction in Read mode:
-    // Left half => Page Up, Right half => Page Down
+    // Tap interaction in Read mode:
+    // Top-left corner (left 25% / >=88px, vertical ~3 lines tall) => Insert/edit bookmark at screen first line
+    // Remaining area: Left half => Page Up, Right half => Page Down
     const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
       const hadSelectionOnDown = hadSelectionOnDownRef.current;
       hadSelectionOnDownRef.current = false;
@@ -3149,7 +3195,25 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       const rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
 
-      const xRatio = (e.clientX - rect.left) / rect.width;
+      const xPx = e.clientX - rect.left;
+      const yPx = e.clientY - rect.top;
+      const xRatio = xPx / rect.width;
+
+      const topLeftWidth = Math.min(rect.width * 0.35, Math.max(88, rect.width * 0.25));
+      const approxThreeLinesHeight = Math.min(
+        rect.height * 0.34,
+        Math.max(96, Math.round(topClipPxRef.current + fontSize * DOC_LINE_HEIGHT_NUM * 3 + 12))
+      );
+
+      if (
+        xPx <= topLeftWidth &&
+        yPx <= approxThreeLinesHeight &&
+        blocks.length > 0 &&
+        onQuickBookmarkTap
+      ) {
+        onQuickBookmarkTap();
+        return;
+      }
 
       if (xRatio < 0.5) {
         performPageUp();
@@ -3312,7 +3376,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                 articleOverflow ? 'pb-[calc(100vh-110px)]' : 'pb-12'
               }`}
             >
-              <article ref={articleRef} className="w-full min-w-0 font-doc-body">
+              <article ref={articleRef} className="relative w-full min-w-0 font-doc-body">
                 {doc.syncStatus === 'remote-only' && !content ? (
                   <div className="py-12 text-center space-y-3">
                     {doc.cloudBodySynced ? (
@@ -3396,15 +3460,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                                 docFolderName={docFolderName}
                                 onImageLoaded={handleDocImageLoaded}
                                 onPreviewImage={handleDocImagePreview}
-                                notesByBlockIdx={notesByBlockIdx}
-                                pendingBookmarkBlockIdx={
-                                  pendingBookmarkBlockIdx !== null &&
-                                  pendingBookmarkBlockIdx >= startIdx &&
-                                  pendingBookmarkBlockIdx < endIdx
-                                    ? pendingBookmarkBlockIdx
-                                    : null
-                                }
-                                onOpenNoteFromMargin={handleOpenNoteFromMarginStable}
                               />
                             </div>
                           );
@@ -3420,13 +3475,42 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
                           docFolderName,
                           onImageLoaded: handleDocImageLoaded,
                           onPreviewImage: handleDocImagePreview,
-                          notesByBlockIdx,
-                          pendingBookmarkBlockIdx,
-                          onOpenNoteFromMargin: handleOpenNoteFromMarginStable,
                         })
                       )
                     )}
                   </div>
+                )}
+
+                {marginMarkers.map((marker) =>
+                  marker.isPending || !marker.noteId ? (
+                    <span
+                      key={marker.key}
+                      aria-hidden="true"
+                      data-note-marker="true"
+                      style={{ top: `${marker.top}px`, height: `${marker.height}px` }}
+                      className="pointer-events-none absolute -left-[20px] sm:-left-[22px] w-[20px] sm:w-[22px] flex items-center justify-center select-none text-[var(--fei-text-muted)]/80 eink:text-[var(--fei-text-primary)]"
+                    >
+                      <MarginBookmarkRibbon />
+                    </span>
+                  ) : (
+                    <button
+                      key={marker.key}
+                      type="button"
+                      data-note-marker="true"
+                      aria-label="查看或编辑此处书签"
+                      title="查看或编辑此处书签"
+                      style={{ top: `${marker.top}px`, height: `${marker.height}px` }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onTouchStart={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleOpenNoteFromMarginStable(marker.noteId!);
+                      }}
+                      className="absolute -left-[20px] sm:-left-[22px] w-[20px] sm:w-[22px] flex items-center justify-center select-none cursor-pointer group/note text-[var(--fei-text-muted)]/80 hover:text-[var(--fei-text-primary)] eink:text-[var(--fei-text-primary)] transition-colors"
+                    >
+                      <MarginBookmarkRibbon />
+                    </button>
+                  )
                 )}
               </article>
             </div>

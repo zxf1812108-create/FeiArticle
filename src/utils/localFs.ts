@@ -1446,7 +1446,11 @@ export function checkAndPullExternalLocalFsChanges(
         }
 
         if (existingDoc.notes && existingDoc.notes.length > 0 && diskContent.length > 0) {
-          existingDoc.notes = relocateNotesAfterContentEdit(existingDoc.notes, diskContent);
+          existingDoc.notes = relocateNotesAfterContentEdit(existingDoc.notes, diskContent, {
+            prevContent,
+            bumpUpdatedAt: true,
+            now,
+          });
         }
 
         updatedCount += 1;
