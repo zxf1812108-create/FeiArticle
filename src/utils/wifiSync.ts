@@ -13,9 +13,11 @@ import {
   sanitizeNotesList,
 } from './notes';
 import {
+  extractBackupAnchorText,
   extractReadAnchorText,
   reconcileReadingProgress,
   relocateCharOffsetByAnchor,
+  relocateOffsetAfterContentEdit,
   resolveComparableProgressPercent,
 } from './progressSync';
 
@@ -52,6 +54,7 @@ export interface WifiDocCatalogMeta {
   lastScrollTop?: number;
   lastCharOffset?: number;
   readAnchorText?: string;
+  readBackupAnchorText?: string;
   progressOverrideAt?: number;
   encrypted?: boolean;
   format?: 'txt' | 'md';
@@ -238,6 +241,11 @@ export function buildWifiCatalogSnapshot(
         : d.readAnchorText ||
           (d.content ? extractReadAnchorText(d.content, d.lastCharOffset ?? 0) : undefined) ||
           undefined,
+      readBackupAnchorText: d.encrypted
+        ? undefined
+        : d.readBackupAnchorText ||
+          (d.content ? extractBackupAnchorText(d.content, d.lastCharOffset ?? 0) : undefined) ||
+          undefined,
       progressOverrideAt: d.progressOverrideAt || undefined,
       encrypted: Boolean(d.encrypted),
       format: d.format ?? 'txt',
@@ -389,6 +397,7 @@ export function mergeWifiCatalogIntoLocal(
         lastScrollTop: pd.lastScrollTop ?? 0,
         lastCharOffset: pd.lastCharOffset ?? 0,
         readAnchorText: pd.encrypted ? undefined : pd.readAnchorText,
+        readBackupAnchorText: pd.encrypted ? undefined : pd.readBackupAnchorText,
         lastSyncedCharOffset: Math.max(0, Math.round(pd.lastCharOffset ?? 0)),
         lastSyncedProgress: pd.readProgress ?? 0,
         lastSyncedReadAt: pd.lastReadAt ?? 0,
@@ -421,8 +430,13 @@ export function mergeWifiCatalogIntoLocal(
     if (peerAuthoritativeOverride) {
       const rawPeerOffset = Math.max(0, Math.round(pd.lastCharOffset ?? 0));
       const relocated =
-        updated.content && pd.readAnchorText
-          ? relocateCharOffsetByAnchor(updated.content, rawPeerOffset, pd.readAnchorText)
+        updated.content && (pd.readAnchorText || pd.readBackupAnchorText)
+          ? relocateCharOffsetByAnchor(
+              updated.content,
+              rawPeerOffset,
+              pd.readAnchorText,
+              pd.readBackupAnchorText
+            )
           : null;
       const finalOffset = relocated?.matched ? relocated.offset : rawPeerOffset;
       const finalProgress = updated.content
@@ -446,6 +460,11 @@ export function mergeWifiCatalogIntoLocal(
           (updated.content && !updated.encrypted
             ? extractReadAnchorText(updated.content, finalOffset)
             : updated.readAnchorText),
+        readBackupAnchorText:
+          pd.readBackupAnchorText ||
+          (updated.content && !updated.encrypted
+            ? extractBackupAnchorText(updated.content, finalOffset) || undefined
+            : updated.readBackupAnchorText),
         lastSyncedCharOffset: finalOffset,
         lastSyncedProgress: finalProgress,
         lastSyncedReadAt: finalReadAt,
@@ -468,6 +487,11 @@ export function mergeWifiCatalogIntoLocal(
             (updated.content
               ? extractReadAnchorText(updated.content, progMerge.resolvedRemoteOffset)
               : updated.readAnchorText),
+          readBackupAnchorText:
+            progMerge.resolvedRemoteBackupAnchor ||
+            (updated.content && !updated.encrypted
+              ? extractBackupAnchorText(updated.content, progMerge.resolvedRemoteOffset) || undefined
+              : updated.readBackupAnchorText),
           lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? progMerge.resolvedRemoteOffset,
           lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
           lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
@@ -1033,17 +1057,37 @@ export function applyWifiReceivedDocToDocs(
     const anchor =
       d.readAnchorText ||
       (d.content && prevOffset > 0 ? extractReadAnchorText(d.content, prevOffset) : undefined);
+    const backupAnchor =
+      d.readBackupAnchorText ||
+      (d.content && prevOffset > 0 ? extractBackupAnchorText(d.content, prevOffset) : undefined);
     const relocated =
-      anchor && prevOffset > 0 && payload.content
-        ? relocateCharOffsetByAnchor(payload.content, prevOffset, anchor)
+      (anchor || backupAnchor || d.content) && prevOffset > 0 && payload.content
+        ? relocateOffsetAfterContentEdit(payload.content, prevOffset, {
+            prevContent: d.content || undefined,
+            primaryAnchor: anchor,
+            backupAnchor,
+            fallbackToBoundaryOnDelete: true,
+          })
         : null;
     const nextPending =
       d.pendingRemoteProgress && payload.content
         ? (() => {
             const p = d.pendingRemoteProgress;
-            const rp = relocateCharOffsetByAnchor(payload.content, p.lastCharOffset, p.anchorText);
+            const rp = relocateOffsetAfterContentEdit(payload.content, p.lastCharOffset, {
+              prevContent: d.content || undefined,
+              primaryAnchor: p.anchorText,
+              backupAnchor: p.backupAnchorText,
+              fallbackToBoundaryOnDelete: true,
+            });
             return rp.matched
-              ? { ...p, lastCharOffset: rp.offset, readProgress: rp.progress }
+              ? {
+                  ...p,
+                  lastCharOffset: rp.offset,
+                  readProgress: rp.progress,
+                  anchorText: extractReadAnchorText(payload.content, rp.offset) || p.anchorText,
+                  backupAnchorText:
+                    extractBackupAnchorText(payload.content, rp.offset) || p.backupAnchorText,
+                }
               : p;
           })()
         : d.pendingRemoteProgress;
@@ -1070,6 +1114,10 @@ export function applyWifiReceivedDocToDocs(
             readProgress: relocated.progress,
             lastScrollTop: 0,
             readAnchorText: extractReadAnchorText(payload.content, relocated.offset) || anchor,
+            readBackupAnchorText:
+              extractBackupAnchorText(payload.content, relocated.offset) ||
+              backupAnchor ||
+              undefined,
           }
         : {}),
     };

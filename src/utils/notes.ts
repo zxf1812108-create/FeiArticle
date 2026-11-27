@@ -1,5 +1,9 @@
 import { ReadingNote } from '../types';
-import { extractReadAnchorText, relocateCharOffsetByAnchor } from './progressSync';
+import {
+  extractBackupAnchorText,
+  extractReadAnchorText,
+  relocateOffsetAfterContentEdit,
+} from './progressSync';
 import { TRASH_RETENTION_MS } from './trash';
 
 export function getActiveNotes(notes?: ReadingNote[] | null): ReadingNote[] {
@@ -32,10 +36,15 @@ export function sanitizeNotesList(notes?: ReadingNote[] | null, now = Date.now()
       continue;
     }
     if (typeof n.content !== 'string' || !n.content.trim()) continue;
+    const backup =
+      typeof n.backupAnchorText === 'string' && n.backupAnchorText.trim()
+        ? n.backupAnchorText.trim()
+        : undefined;
     out.push({
       id: n.id,
       charOffset: Math.max(0, Math.round(n.charOffset || 0)),
       anchorText: typeof n.anchorText === 'string' ? n.anchorText : '',
+      ...(backup ? { backupAnchorText: backup } : {}),
       content: n.content,
       createdAt: n.createdAt || now,
       updatedAt: n.updatedAt || now,
@@ -150,6 +159,7 @@ export function relocateNotesAfterContentEdit(
     if (note.deleted) return note;
 
     const storedAnchor = (note.anchorText || '').trim();
+    const storedBackup = (note.backupAnchorText || '').trim();
     const needsRicherAnchor =
       Boolean(prevContent) &&
       (!storedAnchor || storedAnchor.endsWith('…') || storedAnchor.length < 18);
@@ -159,23 +169,41 @@ export function relocateNotesAfterContentEdit(
     const effectiveAnchor =
       prevExtractedAnchor.length >= 6 ? prevExtractedAnchor : storedAnchor;
 
-    if (effectiveAnchor) {
-      const relocated = relocateCharOffsetByAnchor(newContent, note.charOffset, effectiveAnchor);
+    if (effectiveAnchor || storedBackup || prevContent) {
+      const relocated = relocateOffsetAfterContentEdit(newContent, note.charOffset, {
+        prevContent: prevContent || undefined,
+        primaryAnchor: effectiveAnchor || undefined,
+        backupAnchor: storedBackup || undefined,
+        fallbackToBoundaryOnDelete: true,
+      });
       if (relocated.matched) {
         const offsetChanged = relocated.offset !== note.charOffset;
         const cleanedStored = storedAnchor.replace(/(?:…|\.{3,})\s*$/u, '').trim();
-        const nextAnchorText = storedAnchor
-          ? prevExtractedAnchor.length > cleanedStored.length
-            ? prevExtractedAnchor
-            : cleanedStored
-          : storedAnchor;
-        const anchorChanged = nextAnchorText !== note.anchorText;
+        const refreshedPrimary = extractReadAnchorText(
+          newContent,
+          relocated.offset,
+          NOTE_ANCHOR_MAX_CHARS
+        );
+        const nextAnchorText =
+          refreshedPrimary.length >= 6
+            ? refreshedPrimary
+            : storedAnchor
+              ? prevExtractedAnchor.length > cleanedStored.length
+                ? prevExtractedAnchor
+                : cleanedStored
+              : storedAnchor;
+        const nextBackupAnchorText =
+          extractBackupAnchorText(newContent, relocated.offset) || storedBackup || undefined;
+        const anchorChanged =
+          nextAnchorText !== note.anchorText ||
+          (nextBackupAnchorText || '') !== (note.backupAnchorText || '');
         if (offsetChanged || anchorChanged) {
           anyChanged = true;
           return {
             ...note,
             charOffset: relocated.offset,
             anchorText: nextAnchorText,
+            ...(nextBackupAnchorText ? { backupAnchorText: nextBackupAnchorText } : {}),
             ...(bumpUpdatedAt && offsetChanged
               ? { updatedAt: Math.max(now, note.updatedAt + 1) }
               : {}),

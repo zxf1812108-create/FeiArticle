@@ -14,6 +14,7 @@ export interface ReadingNote {
   id: string;
   charOffset: number;
   anchorText: string;
+  backupAnchorText?: string;
   content: string;
   createdAt: number;
   updatedAt: number;
@@ -38,6 +39,7 @@ export interface PendingRemoteProgress {
   lastMode?: 'read' | 'edit';
   lastReadAt: number;
   anchorText?: string;
+  backupAnchorText?: string;
   source: 'cloud' | 'wifi';
   detectedAt: number;
 }
@@ -58,6 +60,7 @@ export interface ArticleDoc {
   lastScrollTop?: number;
   lastCharOffset?: number;
   readAnchorText?: string;
+  readBackupAnchorText?: string;
   lastSyncedCharOffset?: number;
   lastSyncedProgress?: number;
   lastSyncedReadAt?: number;
@@ -94,6 +97,7 @@ export interface ManifestDocEntry {
   lastScrollTop?: number;
   lastCharOffset?: number;
   readAnchorText?: string;
+  readBackupAnchorText?: string;
   progressOverrideAt?: number;
   encrypted?: boolean;
   format?: 'txt' | 'md';

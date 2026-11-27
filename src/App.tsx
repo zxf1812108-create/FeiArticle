@@ -154,8 +154,10 @@ import {
 } from './utils/lanDirect';
 import { formatMicErrorMessage, WhistleDetector } from './utils/whistleDetector';
 import {
+  extractBackupAnchorText,
   extractReadAnchorText,
   relocateCharOffsetByAnchor,
+  relocateOffsetAfterContentEdit,
   resolveComparableProgressPercent,
 } from './utils/progressSync';
 import { ProgressConflictModal } from './components/ProgressConflictModal';
@@ -445,6 +447,7 @@ export default function App() {
   const localFsTimerRef = useRef<number | null>(null);
   const saveDocsTimerRef = useRef<number | null>(null);
   const isPullingLocalFsRef = useRef(false);
+  const openDocReqIdRef = useRef(0);
 
   useEffect(() => {
     if (mainView === 'doc' && mdictLookup && pendingMdictAutoExpandRef.current) {
@@ -629,9 +632,12 @@ export default function App() {
           );
           if (cancelled) return;
           if (pulled.changed) {
+            foldersRef.current = pulled.folders;
+            docsRef.current = pulled.docs;
             setFolders(pulled.folders);
             setDocs(pulled.docs);
             setFoldersDirty(true);
+            markAutoCatalogDirty();
           }
           await syncWorkspaceToLocalFs(pulled.folders, pulled.docs, effectiveConfig);
         }
@@ -841,9 +847,19 @@ export default function App() {
             const anchor =
               d.readAnchorText ||
               (prevContent && prevOffset > 0 ? extractReadAnchorText(prevContent, prevOffset) : '');
+            const backupAnchor =
+              d.readBackupAnchorText ||
+              (prevContent && prevOffset > 0
+                ? extractBackupAnchorText(prevContent, prevOffset)
+                : '');
             const relocated =
-              anchor && prevOffset > 0 && content
-                ? relocateCharOffsetByAnchor(content, prevOffset, anchor)
+              (anchor || backupAnchor || prevContent) && prevOffset > 0 && content
+                ? relocateOffsetAfterContentEdit(content, prevOffset, {
+                    prevContent: prevContent || undefined,
+                    primaryAnchor: anchor || undefined,
+                    backupAnchor: backupAnchor || undefined,
+                    fallbackToBoundaryOnDelete: true,
+                  })
                 : null;
             const relocatedNotes =
               content && d.notes && d.notes.length > 0
@@ -869,6 +885,10 @@ export default function App() {
                     readProgress: relocated.progress,
                     lastScrollTop: 0,
                     readAnchorText: extractReadAnchorText(content, relocated.offset) || anchor,
+                    readBackupAnchorText:
+                      extractBackupAnchorText(content, relocated.offset) ||
+                      backupAnchor ||
+                      undefined,
                   }
                 : {}),
             };
@@ -1606,6 +1626,10 @@ export default function App() {
     const nextAnchor = current.content
       ? extractReadAnchorText(current.content, nextCharOffset) || current.readAnchorText
       : current.readAnchorText;
+    const nextBackupAnchor =
+      current.content && !current.encrypted
+        ? extractBackupAnchorText(current.content, nextCharOffset) || undefined
+        : current.readBackupAnchorText;
     const nextDocs = docsRef.current.map((d) =>
       d.id === docId
         ? {
@@ -1615,6 +1639,7 @@ export default function App() {
             lastCharOffset: nextCharOffset,
             readProgress: nextProgress,
             readAnchorText: nextAnchor,
+            readBackupAnchorText: nextBackupAnchor,
             lastReadAt: now,
             updatedAt: now,
           }
@@ -1631,25 +1656,42 @@ export default function App() {
   };
 
   const handleOpenDoc = (docId: string) => {
-    const target = docsRef.current.find((d) => d.id === docId);
-    const nextTarget: TreeSelection = { kind: 'doc', id: docId };
-    captureAndSaveTreeState(nextTarget);
-    setActiveTarget(nextTarget);
-    setSelectedDocId(docId);
-    setLiveReadProgress(target?.readProgress ?? 0);
-    setLiveProgressDecimals(0);
-    setNotePopoverState(null);
-    setOutlineReturnPos(null);
-    // Plan B: clear session dismissal on book open so any unresolved pending progress prompts cleanly
-    setDismissedConflictKeys((prev) => {
-      if (!prev[docId]) return prev;
-      const next = { ...prev };
-      delete next[docId];
-      return next;
-    });
-    setMainView('doc');
-    // Pull any newer reading progress / notes / directory changes immediately (304 = 0 bytes if unchanged)
-    void runSilentAutoSyncRef.current({ forcePullCheck: true, bypassThrottle: true });
+    const reqId = ++openDocReqIdRef.current;
+
+    const finishOpen = () => {
+      if (openDocReqIdRef.current !== reqId) return;
+      const target = docsRef.current.find((d) => d.id === docId);
+      const nextTarget: TreeSelection = { kind: 'doc', id: docId };
+      captureAndSaveTreeState(nextTarget);
+      setActiveTarget(nextTarget);
+      setSelectedDocId(docId);
+      setLiveReadProgress(target?.readProgress ?? 0);
+      setLiveProgressDecimals(0);
+      setNotePopoverState(null);
+      setOutlineReturnPos(null);
+      // Plan B: clear session dismissal on book open so any unresolved pending progress prompts cleanly
+      setDismissedConflictKeys((prev) => {
+        if (!prev[docId]) return prev;
+        const next = { ...prev };
+        delete next[docId];
+        return next;
+      });
+      setMainView('doc');
+      // Pull any newer reading progress / notes / directory changes immediately (304 = 0 bytes if unchanged)
+      void runSilentAutoSyncRef.current({ forcePullCheck: true, bypassThrottle: true });
+    };
+
+    if (storageDirRef.current.initialized && localFsReady) {
+      // Fast fingerprint check (<5ms when unchanged); if disk file was edited externally,
+      // finish relocating reading progress & bookmarks before mounting MinimalDocView.
+      void Promise.race([
+        pullExternalLocalChanges({ silent: false }),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 900)),
+      ]).finally(finishOpen);
+      return;
+    }
+
+    finishOpen();
   };
 
   const getConflictSnapshotKey = (doc: ArticleDoc): string => {
@@ -1777,7 +1819,12 @@ export default function App() {
     if (!target || !pending) return;
 
     const relocated = target.content
-      ? relocateCharOffsetByAnchor(target.content, pending.lastCharOffset, pending.anchorText)
+      ? relocateCharOffsetByAnchor(
+          target.content,
+          pending.lastCharOffset,
+          pending.anchorText,
+          pending.backupAnchorText
+        )
       : null;
     const finalOffset = relocated?.matched
       ? relocated.offset
@@ -1794,6 +1841,12 @@ export default function App() {
       (target.content ? extractReadAnchorText(target.content, finalOffset) : '') ||
       pending.anchorText ||
       target.readAnchorText;
+    const finalBackupAnchor =
+      (target.content && !target.encrypted
+        ? extractBackupAnchorText(target.content, finalOffset)
+        : '') ||
+      pending.backupAnchorText ||
+      target.readBackupAnchorText;
     const resolvedOverrideAt =
       pending.source === 'wifi'
         ? Math.max(
@@ -1814,6 +1867,7 @@ export default function App() {
             lastMode: pending.lastMode ?? d.lastMode ?? 'read',
             lastReadAt: pending.lastReadAt || Date.now(),
             readAnchorText: finalAnchor || undefined,
+            readBackupAnchorText: finalBackupAnchor || undefined,
             lastSyncedCharOffset: Math.max(0, Math.round(pending.lastCharOffset)),
             lastSyncedProgress: pending.readProgress,
             lastSyncedReadAt: pending.lastReadAt,
@@ -1867,6 +1921,10 @@ export default function App() {
     const localAnchor = target.content
       ? extractReadAnchorText(target.content, localOffset) || target.readAnchorText
       : target.readAnchorText;
+    const localBackupAnchor =
+      target.content && !target.encrypted
+        ? extractBackupAnchorText(target.content, localOffset) || undefined
+        : target.readBackupAnchorText;
 
     const nextDocs = docsRef.current.map((d) =>
       d.id === docId
@@ -1876,6 +1934,7 @@ export default function App() {
             lastCharOffset: localOffset,
             lastScrollTop: localScrollTop,
             readAnchorText: localAnchor,
+            readBackupAnchorText: localBackupAnchor,
             lastReadAt: overrideTs,
             updatedAt: Math.max(d.updatedAt, overrideTs),
             progressOverrideAt: overrideTs,
@@ -1948,14 +2007,20 @@ export default function App() {
       if (doc.id !== docId) return doc;
       const existing = sanitizeNotesList(doc.notes) ?? [];
 
+      const safeOffset = Math.max(0, Math.round(payload.charOffset));
+      const computedBackupAnchor = doc.content
+        ? extractBackupAnchorText(doc.content, safeOffset) || undefined
+        : undefined;
+
       if (payload.noteId) {
         const idx = existing.findIndex((n) => n.id === payload.noteId);
         if (idx === -1) {
           if (!trimmed) return doc;
           const created: ReadingNote = {
             id: payload.noteId,
-            charOffset: Math.max(0, Math.round(payload.charOffset)),
+            charOffset: safeOffset,
             anchorText: payload.anchorText.trim(),
+            ...(computedBackupAnchor ? { backupAnchorText: computedBackupAnchor } : {}),
             content: trimmed,
             createdAt: now,
             updatedAt: now,
@@ -1977,9 +2042,19 @@ export default function App() {
           changed = true;
           return { ...doc, notes: sanitizeNotesList(nextNotes) };
         }
-        if (prevNote.content === trimmed && !prevNote.deleted) return doc;
+        const backfilledBackup =
+          prevNote.backupAnchorText ||
+          (doc.content ? extractBackupAnchorText(doc.content, prevNote.charOffset) || undefined : undefined);
+        if (
+          prevNote.content === trimmed &&
+          !prevNote.deleted &&
+          (prevNote.backupAnchorText || '') === (backfilledBackup || '')
+        ) {
+          return doc;
+        }
         const updated: ReadingNote = {
           ...prevNote,
+          ...(backfilledBackup ? { backupAnchorText: backfilledBackup } : {}),
           content: trimmed,
           updatedAt: now,
           deleted: undefined,
@@ -1994,8 +2069,9 @@ export default function App() {
       if (!trimmed) return doc;
       const created: ReadingNote = {
         id: `note-${now}-${Math.random().toString(36).slice(2, 8)}`,
-        charOffset: Math.max(0, Math.round(payload.charOffset)),
+        charOffset: safeOffset,
         anchorText: payload.anchorText.trim(),
+        ...(computedBackupAnchor ? { backupAnchorText: computedBackupAnchor } : {}),
         content: trimmed,
         createdAt: now,
         updatedAt: now,
@@ -2923,6 +2999,7 @@ export default function App() {
                     lastMode: curr.lastMode,
                     lastReadAt: curr.lastReadAt,
                     readAnchorText: curr.readAnchorText,
+                    readBackupAnchorText: curr.readBackupAnchorText,
                     progressOverrideAt: curr.progressOverrideAt,
                     pendingRemoteProgress: curr.pendingRemoteProgress,
                   };
@@ -3029,6 +3106,7 @@ export default function App() {
                         lastMode: next.lastMode,
                         lastReadAt: next.lastReadAt,
                         readAnchorText: next.readAnchorText ?? curr.readAnchorText,
+                        readBackupAnchorText: next.readBackupAnchorText ?? curr.readBackupAnchorText,
                         progressOverrideAt: next.progressOverrideAt ?? curr.progressOverrideAt,
                       }
                     : {}),
@@ -4342,9 +4420,15 @@ export default function App() {
         if (d.id !== docId) return d;
         const prevOffset = Math.max(0, Math.round(d.lastCharOffset ?? 0));
         const anchor = d.readAnchorText;
+        const backupAnchor = d.readBackupAnchorText;
         const relocated =
-          anchor && prevOffset > 0 && content
-            ? relocateCharOffsetByAnchor(content, prevOffset, anchor)
+          (anchor || backupAnchor || d.content) && prevOffset > 0 && content
+            ? relocateOffsetAfterContentEdit(content, prevOffset, {
+                prevContent: d.content || undefined,
+                primaryAnchor: anchor,
+                backupAnchor,
+                fallbackToBoundaryOnDelete: true,
+              })
             : null;
         const relocatedNotes =
           content && d.notes && d.notes.length > 0
@@ -4364,6 +4448,8 @@ export default function App() {
                 readProgress: relocated.progress,
                 lastScrollTop: 0,
                 readAnchorText: extractReadAnchorText(content, relocated.offset) || anchor,
+                readBackupAnchorText:
+                  extractBackupAnchorText(content, relocated.offset) || backupAnchor || undefined,
               }
             : {}),
         };

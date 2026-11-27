@@ -3,8 +3,11 @@ import { ArticleDoc, PendingRemoteProgress } from '../types';
 export const PROGRESS_DIFF_MIN_CHARS = 320;
 export const PROGRESS_DIFF_MIN_PERCENT = 1.5;
 const ANCHOR_DEFAULT_LEN = 36;
+const ANCHOR_RICH_LEN = 64;
 const ANCHOR_MIN_MATCH_LEN = 6;
 const ANCHOR_HALF_LEN = 16;
+export const BACKUP_ANCHOR_STEP = 120;
+const BACKUP_ANCHOR_DEFAULT_LEN = 48;
 
 export interface RemoteProgressInput {
   readProgress?: number;
@@ -13,6 +16,7 @@ export interface RemoteProgressInput {
   lastMode?: 'read' | 'edit';
   lastReadAt?: number | null;
   readAnchorText?: string;
+  readBackupAnchorText?: string;
   updatedAt: number;
 }
 
@@ -29,6 +33,7 @@ export interface ProgressReconcileResult {
   resolvedRemoteProgress: number;
   resolvedRemoteReadAt: number;
   resolvedRemoteAnchor?: string;
+  resolvedRemoteBackupAnchor?: string;
   pendingRemoteProgress?: PendingRemoteProgress | null;
   /** Suggested updated local sync baseline */
   nextBaseline?: {
@@ -97,6 +102,83 @@ export function extractReadAnchorText(
     .trim();
   if (!cleaned) return '';
   return cleaned.slice(0, maxLen).trim();
+}
+
+/**
+ * Extract a secondary backup anchor ~120 chars downstream of `charOffset`.
+ * Survives minor edits or front deletions that touch the exact anchored first line.
+ */
+export function extractBackupAnchorText(
+  content: string,
+  charOffset: number,
+  maxLen: number = BACKUP_ANCHOR_DEFAULT_LEN,
+  step: number = BACKUP_ANCHOR_STEP
+): string {
+  if (!content) return '';
+  const safeOffset = Math.max(0, Math.min(content.length, Math.round(charOffset || 0)));
+  const probeOffset = safeOffset + step;
+  if (probeOffset >= content.length - 12) return '';
+  return extractReadAnchorText(content, probeOffset, maxLen);
+}
+
+/**
+ * Estimate where `prevOffset` moved in `newContent` using fast common-prefix / common-suffix diffing.
+ * When front content is deleted or inserted before `prevOffset`, `expectedOffset` is exact to the character.
+ */
+export function estimateExpectedOffsetAfterEdit(
+  prevContent: string,
+  newContent: string,
+  prevOffset: number
+): { expectedOffset: number; deletedBoundaryOffset: number | null } {
+  const prevLen = prevContent.length;
+  const newLen = newContent.length;
+  const clampedPrev = Math.max(0, Math.min(prevLen, Math.round(prevOffset || 0)));
+  if (prevLen === 0 || newLen === 0) {
+    return { expectedOffset: 0, deletedBoundaryOffset: 0 };
+  }
+
+  const minLen = Math.min(prevLen, newLen);
+  let prefixLen = 0;
+  while (prefixLen < minLen && prevContent.charCodeAt(prefixLen) === newContent.charCodeAt(prefixLen)) {
+    prefixLen++;
+  }
+
+  let suffixLen = 0;
+  const maxSuffix = minLen - prefixLen;
+  while (
+    suffixLen < maxSuffix &&
+    prevContent.charCodeAt(prevLen - 1 - suffixLen) ===
+      newContent.charCodeAt(newLen - 1 - suffixLen)
+  ) {
+    suffixLen++;
+  }
+
+  // Case A: Edit happened strictly after prevOffset
+  if (clampedPrev <= prefixLen) {
+    return { expectedOffset: clampedPrev, deletedBoundaryOffset: null };
+  }
+
+  // Case B: Edit happened strictly before prevOffset (e.g. front deletion or insertion)
+  if (clampedPrev >= prevLen - suffixLen) {
+    const delta = newLen - prevLen;
+    return {
+      expectedOffset: Math.max(0, Math.min(newLen, clampedPrev + delta)),
+      deletedBoundaryOffset: null,
+    };
+  }
+
+  // Case C: prevOffset fell inside the edited/deleted span
+  const deletedSpanLen = Math.max(1, prevLen - prefixLen - suffixLen);
+  const insertedSpanLen = Math.max(0, newLen - prefixLen - suffixLen);
+  const relRatio = (clampedPrev - prefixLen) / deletedSpanLen;
+  const expectedOffset = Math.max(
+    0,
+    Math.min(newLen, Math.round(prefixLen + relRatio * insertedSpanLen))
+  );
+  return {
+    expectedOffset,
+    deletedBoundaryOffset: Math.min(newLen, prefixLen),
+  };
 }
 
 function findClosestOccurrence(haystack: string, needle: string, targetIndex: number): number {
@@ -268,7 +350,8 @@ function findProbeAcrossContent(
 export function relocateCharOffsetByAnchor(
   content: string,
   fallbackCharOffset: number,
-  anchorText?: string
+  anchorText?: string,
+  backupAnchorText?: string
 ): RelocatedOffsetResult {
   const len = content.length;
   const clampedFallback = Math.max(0, Math.min(len, Math.round(fallbackCharOffset || 0)));
@@ -284,6 +367,21 @@ export function relocateCharOffsetByAnchor(
   const mdAnchor = stripAnchorFormatting(normAnchor);
 
   if (normAnchor.length < ANCHOR_MIN_MATCH_LEN && mdAnchor.length < ANCHOR_MIN_MATCH_LEN) {
+    if (backupAnchorText && backupAnchorText.trim().length >= ANCHOR_MIN_MATCH_LEN) {
+      const backupRes = relocateCharOffsetByAnchor(
+        content,
+        Math.min(len, clampedFallback + BACKUP_ANCHOR_STEP),
+        backupAnchorText
+      );
+      if (backupRes.matched) {
+        const restored = Math.max(0, backupRes.offset - BACKUP_ANCHOR_STEP);
+        return {
+          offset: restored,
+          progress: estimateProgressFromOffset(len, restored),
+          matched: true,
+        };
+      }
+    }
     return {
       offset: clampedFallback,
       progress: estimateProgressFromOffset(len, clampedFallback),
@@ -407,9 +505,162 @@ export function relocateCharOffsetByAnchor(
     }
   }
 
+  if (backupAnchorText && backupAnchorText.trim().length >= ANCHOR_MIN_MATCH_LEN) {
+    const backupRes = relocateCharOffsetByAnchor(
+      content,
+      Math.min(len, clampedFallback + BACKUP_ANCHOR_STEP),
+      backupAnchorText
+    );
+    if (backupRes.matched) {
+      const restored = Math.max(0, backupRes.offset - BACKUP_ANCHOR_STEP);
+      return {
+        offset: restored,
+        progress: estimateProgressFromOffset(len, restored),
+        matched: true,
+      };
+    }
+  }
+
   return {
     offset: clampedFallback,
     progress: estimateProgressFromOffset(len, clampedFallback),
+    matched: false,
+  };
+}
+
+export interface RelocateAfterEditOptions {
+  prevContent?: string;
+  primaryAnchor?: string;
+  backupAnchor?: string;
+  /** When the anchored text itself was deleted, snap to the deletion boundary instead of keeping stale offset */
+  fallbackToBoundaryOnDelete?: boolean;
+}
+
+/**
+ * Unified multi-anchor + edit-shift relocation engine shared by reading progress and bookmarks.
+ *
+ * Strategy:
+ * 1. Estimate exact shifted `expectedOffset` via common prefix/suffix when `prevContent` is available,
+ *    so repeated phrases always disambiguate toward the real post-deletion position.
+ * 2. Try rich 64-char primary anchor extracted from `prevContent` (and stored `primaryAnchor` if distinct).
+ * 3. Try multi-point backup anchors (+80, +180, +360, -80 chars from `prevContent`, plus stored `backupAnchor`)
+ *    so even edits/deletions touching the exact anchored line still recover cleanly.
+ * 4. If all anchors were deleted, snap to the deletion boundary / `expectedOffset` rather than stale `prevOffset`.
+ */
+export function relocateOffsetAfterContentEdit(
+  newContent: string,
+  prevOffset: number,
+  options?: RelocateAfterEditOptions
+): RelocatedOffsetResult {
+  const newLen = newContent.length;
+  if (newLen === 0) {
+    return { offset: 0, progress: 0, matched: false };
+  }
+
+  const prevContent = options?.prevContent || '';
+  const storedPrimary = (options?.primaryAnchor || '').trim();
+  const storedBackup = (options?.backupAnchor || '').trim();
+  const safePrevOffset = Math.max(0, Math.round(prevOffset || 0));
+
+  const shiftInfo = prevContent
+    ? estimateExpectedOffsetAfterEdit(prevContent, newContent, safePrevOffset)
+    : {
+        expectedOffset: Math.max(0, Math.min(newLen, safePrevOffset)),
+        deletedBoundaryOffset: null as number | null,
+      };
+  const { expectedOffset, deletedBoundaryOffset } = shiftInfo;
+
+  // 1. Primary anchor: prefer a fresh 64-char extract from prevContent when available
+  const richPrevPrimary =
+    prevContent && safePrevOffset < prevContent.length
+      ? extractReadAnchorText(prevContent, safePrevOffset, ANCHOR_RICH_LEN)
+      : '';
+  const triedAnchors = new Set<string>();
+
+  const tryPrimary = (anchor: string): RelocatedOffsetResult | null => {
+    const clean = anchor.trim();
+    if (clean.length < ANCHOR_MIN_MATCH_LEN || triedAnchors.has(clean)) return null;
+    triedAnchors.add(clean);
+    const res = relocateCharOffsetByAnchor(newContent, expectedOffset, clean);
+    return res.matched ? res : null;
+  };
+
+  if (richPrevPrimary) {
+    const hit = tryPrimary(richPrevPrimary);
+    if (hit) return hit;
+  }
+  if (storedPrimary) {
+    const hit = tryPrimary(storedPrimary);
+    if (hit) return hit;
+  }
+
+  // 2. Multi-point backup anchors (forward +80/+180/+360, backward -80, and stored backup anchor)
+  const backupCandidates: Array<{ text: string; delta: number }> = [];
+  if (prevContent) {
+    for (const step of [80, 180, 360]) {
+      const probeStart = safePrevOffset + step;
+      if (probeStart < prevContent.length - 10) {
+        const txt = extractReadAnchorText(prevContent, probeStart, 56);
+        if (txt.length >= ANCHOR_MIN_MATCH_LEN) {
+          backupCandidates.push({ text: txt, delta: step });
+        }
+      }
+    }
+    if (safePrevOffset >= 80) {
+      const backStart = Math.max(0, safePrevOffset - 80);
+      const txt = extractReadAnchorText(prevContent, backStart, 56);
+      if (txt.length >= ANCHOR_MIN_MATCH_LEN) {
+        backupCandidates.push({ text: txt, delta: -(safePrevOffset - backStart) });
+      }
+    }
+  }
+  if (storedBackup.length >= ANCHOR_MIN_MATCH_LEN) {
+    backupCandidates.push({ text: storedBackup, delta: BACKUP_ANCHOR_STEP });
+  }
+
+  for (const cand of backupCandidates) {
+    if (triedAnchors.has(cand.text)) continue;
+    triedAnchors.add(cand.text);
+    const targetHint = Math.max(0, Math.min(newLen, expectedOffset + cand.delta));
+    const res = relocateCharOffsetByAnchor(newContent, targetHint, cand.text);
+    if (res.matched) {
+      let restored: number;
+      if (cand.delta < 0) {
+        // Backward anchor matched: advance forward to the original relative offset
+        restored = Math.min(newLen, res.offset - cand.delta);
+      } else if (deletedBoundaryOffset !== null && res.offset - cand.delta < deletedBoundaryOffset) {
+        // The anchored line itself was deleted: clamp to the deletion boundary / surviving start
+        restored = Math.min(res.offset, Math.max(0, deletedBoundaryOffset));
+      } else {
+        restored = Math.max(0, res.offset - cand.delta);
+      }
+      return {
+        offset: restored,
+        progress: estimateProgressFromOffset(newLen, restored),
+        matched: true,
+      };
+    }
+  }
+
+  // 3. Fallback when all anchors disappeared (e.g. entire region around reading spot was deleted)
+  if (prevContent) {
+    if (deletedBoundaryOffset !== null && options?.fallbackToBoundaryOnDelete !== false) {
+      return {
+        offset: deletedBoundaryOffset,
+        progress: estimateProgressFromOffset(newLen, deletedBoundaryOffset),
+        matched: true,
+      };
+    }
+    return {
+      offset: expectedOffset,
+      progress: estimateProgressFromOffset(newLen, expectedOffset),
+      matched: expectedOffset !== safePrevOffset,
+    };
+  }
+
+  return {
+    offset: expectedOffset,
+    progress: estimateProgressFromOffset(newLen, expectedOffset),
     matched: false,
   };
 }
@@ -502,11 +753,12 @@ export function reconcileReadingProgress(
   // Re-anchor remote position onto local body if available (handles external edits & cross-device diffs)
   let resolvedRemoteOffset = rawRemoteOffset;
   let resolvedRemoteProgress = rawRemoteProgress;
-  if (localDoc.content && remote.readAnchorText) {
+  if (localDoc.content && (remote.readAnchorText || remote.readBackupAnchorText)) {
     const relocated = relocateCharOffsetByAnchor(
       localDoc.content,
       rawRemoteOffset,
-      remote.readAnchorText
+      remote.readAnchorText,
+      remote.readBackupAnchorText
     );
     if (relocated.matched) {
       resolvedRemoteOffset = relocated.offset;
@@ -525,6 +777,11 @@ export function reconcileReadingProgress(
     remote.readAnchorText ||
     (localDoc.content && !localDoc.encrypted
       ? extractReadAnchorText(localDoc.content, resolvedRemoteOffset)
+      : undefined);
+  const resolvedRemoteBackupAnchor =
+    remote.readBackupAnchorText ||
+    (localDoc.content && !localDoc.encrypted
+      ? extractBackupAnchorText(localDoc.content, resolvedRemoteOffset) || undefined
       : undefined);
 
   const meaningfulDiff = isProgressMeaningfullyDifferent(
@@ -546,6 +803,7 @@ export function reconcileReadingProgress(
       resolvedRemoteProgress,
       resolvedRemoteReadAt: remoteTs,
       resolvedRemoteAnchor,
+      resolvedRemoteBackupAnchor,
       pendingRemoteProgress: null,
       nextBaseline: {
         charOffset: rawRemoteOffset > 0 || localOffset === 0 ? rawRemoteOffset : localOffset,
@@ -600,6 +858,7 @@ export function reconcileReadingProgress(
         resolvedRemoteProgress,
         resolvedRemoteReadAt: remoteTs,
         resolvedRemoteAnchor,
+        resolvedRemoteBackupAnchor,
         pendingRemoteProgress: null,
         nextBaseline: {
           charOffset: localOffset,
@@ -614,6 +873,7 @@ export function reconcileReadingProgress(
       resolvedRemoteProgress,
       resolvedRemoteReadAt: remoteTs,
       resolvedRemoteAnchor,
+      resolvedRemoteBackupAnchor,
       pendingRemoteProgress: null,
       nextBaseline: {
         charOffset: resolvedRemoteOffset,
@@ -633,6 +893,7 @@ export function reconcileReadingProgress(
         resolvedRemoteProgress,
         resolvedRemoteReadAt: remoteTs,
         resolvedRemoteAnchor,
+        resolvedRemoteBackupAnchor,
         pendingRemoteProgress: {
           readProgress: resolvedRemoteProgress,
           lastCharOffset: resolvedRemoteOffset,
@@ -640,6 +901,7 @@ export function reconcileReadingProgress(
           lastMode: remote.lastMode ?? 'read',
           lastReadAt: remoteTs,
           anchorText: resolvedRemoteAnchor,
+          backupAnchorText: resolvedRemoteBackupAnchor,
           source,
           detectedAt: Date.now(),
         },
@@ -651,6 +913,7 @@ export function reconcileReadingProgress(
       resolvedRemoteProgress,
       resolvedRemoteReadAt: remoteTs,
       resolvedRemoteAnchor,
+      resolvedRemoteBackupAnchor,
       pendingRemoteProgress: null,
       nextBaseline: {
         charOffset: localOffset,
@@ -668,6 +931,7 @@ export function reconcileReadingProgress(
       resolvedRemoteProgress,
       resolvedRemoteReadAt: remoteTs,
       resolvedRemoteAnchor,
+      resolvedRemoteBackupAnchor,
       pendingRemoteProgress: null,
       nextBaseline: {
         charOffset: localOffset,
@@ -689,6 +953,7 @@ export function reconcileReadingProgress(
       resolvedRemoteProgress,
       resolvedRemoteReadAt: remoteTs,
       resolvedRemoteAnchor,
+      resolvedRemoteBackupAnchor,
       pendingRemoteProgress: null,
       nextBaseline: {
         charOffset: localOffset,
@@ -707,6 +972,7 @@ export function reconcileReadingProgress(
     resolvedRemoteProgress,
     resolvedRemoteReadAt: remoteTs,
     resolvedRemoteAnchor,
+    resolvedRemoteBackupAnchor,
     pendingRemoteProgress: {
       readProgress: resolvedRemoteProgress,
       lastCharOffset: resolvedRemoteOffset,
@@ -714,6 +980,7 @@ export function reconcileReadingProgress(
       lastMode: remote.lastMode ?? 'read',
       lastReadAt: remoteTs,
       anchorText: resolvedRemoteAnchor,
+      backupAnchorText: resolvedRemoteBackupAnchor,
       source,
       detectedAt: Date.now(),
     },

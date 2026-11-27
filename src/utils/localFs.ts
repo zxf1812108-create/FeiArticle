@@ -2,7 +2,11 @@ import { Capacitor, PluginListenerHandle, registerPlugin } from '@capacitor/core
 import { ArticleDoc, FolderNode } from '../types';
 import { LocalStorageBackendMode, StorageDirectoryConfig } from './storage';
 import { extractExcerpt, getByteSize, sha256Hex } from './textParser';
-import { extractReadAnchorText, relocateCharOffsetByAnchor } from './progressSync';
+import {
+  extractBackupAnchorText,
+  extractReadAnchorText,
+  relocateOffsetAfterContentEdit,
+} from './progressSync';
 import { relocateNotesAfterContentEdit } from './notes';
 
 export interface FsBatchOp {
@@ -126,6 +130,7 @@ interface LocalFsIndexDocMeta {
   lastScrollTop: number;
   lastReadAt: number | null;
   readAnchorText?: string;
+  readBackupAnchorText?: string;
   lastSyncedCharOffset?: number;
   lastSyncedProgress?: number;
   lastSyncedReadAt?: number;
@@ -860,6 +865,7 @@ function buildDesiredWorkspaceLayout(
       lastScrollTop: d.lastScrollTop ?? 0,
       lastReadAt: d.lastReadAt ?? null,
       readAnchorText: d.readAnchorText,
+      readBackupAnchorText: d.readBackupAnchorText,
       lastSyncedCharOffset: d.lastSyncedCharOffset,
       lastSyncedProgress: d.lastSyncedProgress,
       lastSyncedReadAt: d.lastSyncedReadAt,
@@ -1161,6 +1167,25 @@ export async function scanAndMergeFromLocalFs(
     const excerpt = extractExcerpt(content);
     maxDocOrder += 1;
 
+    const indexedOffset = Math.max(0, Math.round(indexed?.meta.lastCharOffset ?? 0));
+    const indexedProgress = indexed?.meta.readProgress ?? 0;
+    const indexedHashChanged =
+      Boolean(indexed?.meta.contentHash) && indexed!.meta.contentHash !== hash;
+    const relocatedOnImport =
+      indexedHashChanged &&
+      content.length > 0 &&
+      (indexedOffset > 0 || indexedProgress > 0) &&
+      (indexed?.meta.readAnchorText || indexed?.meta.readBackupAnchorText)
+        ? relocateOffsetAfterContentEdit(content, indexedOffset, {
+            primaryAnchor: indexed?.meta.readAnchorText,
+            backupAnchor: indexed?.meta.readBackupAnchorText,
+          })
+        : null;
+    const finalImportOffset = relocatedOnImport?.matched ? relocatedOnImport.offset : indexedOffset;
+    const finalImportProgress = relocatedOnImport?.matched
+      ? relocatedOnImport.progress
+      : indexedProgress;
+
     const newDoc: ArticleDoc = {
       id: indexed?.id || `doc_disk_${now}_${importedDocCount}`,
       title,
@@ -1171,12 +1196,19 @@ export async function scanAndMergeFromLocalFs(
       excerpt,
       tags: [],
       starred: false,
-      readProgress: indexed?.meta.readProgress ?? 0,
+      readProgress: finalImportProgress,
       lastReadAt: indexed?.meta.lastReadAt ?? null,
       lastMode: 'read',
-      lastScrollTop: indexed?.meta.lastScrollTop ?? 0,
-      lastCharOffset: indexed?.meta.lastCharOffset ?? 0,
-      readAnchorText: indexed?.meta.readAnchorText,
+      lastScrollTop: relocatedOnImport?.matched ? 0 : (indexed?.meta.lastScrollTop ?? 0),
+      lastCharOffset: finalImportOffset,
+      readAnchorText:
+        (relocatedOnImport?.matched
+          ? extractReadAnchorText(content, finalImportOffset)
+          : undefined) || indexed?.meta.readAnchorText,
+      readBackupAnchorText:
+        (relocatedOnImport?.matched
+          ? extractBackupAnchorText(content, finalImportOffset) || undefined
+          : undefined) || indexed?.meta.readBackupAnchorText,
       lastSyncedCharOffset: indexed?.meta.lastSyncedCharOffset,
       lastSyncedProgress: indexed?.meta.lastSyncedProgress,
       lastSyncedReadAt: indexed?.meta.lastSyncedReadAt,
@@ -1412,6 +1444,9 @@ export function checkAndPullExternalLocalFsChanges(
         const anchorBeforeEdit =
           existingDoc.readAnchorText ||
           (prevContent && hasProgress ? extractReadAnchorText(prevContent, prevOffset) : '');
+        const backupAnchorBeforeEdit =
+          existingDoc.readBackupAnchorText ||
+          (prevContent && hasProgress ? extractBackupAnchorText(prevContent, prevOffset) : '');
 
         const hash = diskHashes.get(relKey) || (await sha256Hex(diskContent));
         existingDoc.content = diskContent;
@@ -1422,25 +1457,41 @@ export function checkAndPullExternalLocalFsChanges(
         existingDoc.syncStatus = 'dirty';
 
         if (hasProgress && diskContent.length > 0) {
-          const relocated = relocateCharOffsetByAnchor(diskContent, prevOffset, anchorBeforeEdit);
+          const relocated = relocateOffsetAfterContentEdit(diskContent, prevOffset, {
+            prevContent: prevContent || undefined,
+            primaryAnchor: anchorBeforeEdit || undefined,
+            backupAnchor: backupAnchorBeforeEdit || undefined,
+            fallbackToBoundaryOnDelete: true,
+          });
           existingDoc.lastCharOffset = relocated.offset;
           existingDoc.readProgress = relocated.progress;
           existingDoc.lastScrollTop = 0;
           existingDoc.readAnchorText =
             extractReadAnchorText(diskContent, relocated.offset) || anchorBeforeEdit || undefined;
+          existingDoc.readBackupAnchorText =
+            extractBackupAnchorText(diskContent, relocated.offset) ||
+            backupAnchorBeforeEdit ||
+            undefined;
+          if (relocated.offset !== prevOffset) {
+            existingDoc.lastReadAt = Math.max(now, (existingDoc.lastReadAt ?? 0) + 1);
+          }
         }
         if (existingDoc.pendingRemoteProgress && diskContent.length > 0) {
           const p = existingDoc.pendingRemoteProgress;
-          const relocatedPending = relocateCharOffsetByAnchor(
-            diskContent,
-            p.lastCharOffset,
-            p.anchorText
-          );
+          const relocatedPending = relocateOffsetAfterContentEdit(diskContent, p.lastCharOffset, {
+            prevContent: prevContent || undefined,
+            primaryAnchor: p.anchorText,
+            backupAnchor: p.backupAnchorText,
+            fallbackToBoundaryOnDelete: true,
+          });
           if (relocatedPending.matched) {
             existingDoc.pendingRemoteProgress = {
               ...p,
               lastCharOffset: relocatedPending.offset,
               readProgress: relocatedPending.progress,
+              anchorText: extractReadAnchorText(diskContent, relocatedPending.offset) || p.anchorText,
+              backupAnchorText:
+                extractBackupAnchorText(diskContent, relocatedPending.offset) || p.backupAnchorText,
             };
           }
         }
@@ -1506,6 +1557,27 @@ export function checkAndPullExternalLocalFsChanges(
       const hash = diskHashes.get(relKey) || (await sha256Hex(content));
       maxDocOrder += 1;
 
+      const indexedOffset = Math.max(0, Math.round(indexed?.meta.lastCharOffset ?? 0));
+      const indexedProgress = indexed?.meta.readProgress ?? 0;
+      const indexedHashChanged =
+        Boolean(indexed?.meta.contentHash) && indexed!.meta.contentHash !== hash;
+      const relocatedOnCreate =
+        indexedHashChanged &&
+        content.length > 0 &&
+        (indexedOffset > 0 || indexedProgress > 0) &&
+        (indexed?.meta.readAnchorText || indexed?.meta.readBackupAnchorText)
+          ? relocateOffsetAfterContentEdit(content, indexedOffset, {
+              primaryAnchor: indexed?.meta.readAnchorText,
+              backupAnchor: indexed?.meta.readBackupAnchorText,
+            })
+          : null;
+      const finalCreateOffset = relocatedOnCreate?.matched
+        ? relocatedOnCreate.offset
+        : indexedOffset;
+      const finalCreateProgress = relocatedOnCreate?.matched
+        ? relocatedOnCreate.progress
+        : indexedProgress;
+
       const created: ArticleDoc = {
         id:
           indexed && !docById.has(indexed.id)
@@ -1519,12 +1591,19 @@ export function checkAndPullExternalLocalFsChanges(
         excerpt: extractExcerpt(content),
         tags: [],
         starred: false,
-        readProgress: indexed?.meta.readProgress ?? 0,
+        readProgress: finalCreateProgress,
         lastReadAt: indexed?.meta.lastReadAt ?? null,
         lastMode: 'read',
-        lastScrollTop: indexed?.meta.lastScrollTop ?? 0,
-        lastCharOffset: indexed?.meta.lastCharOffset ?? 0,
-        readAnchorText: indexed?.meta.readAnchorText,
+        lastScrollTop: relocatedOnCreate?.matched ? 0 : (indexed?.meta.lastScrollTop ?? 0),
+        lastCharOffset: finalCreateOffset,
+        readAnchorText:
+          (relocatedOnCreate?.matched
+            ? extractReadAnchorText(content, finalCreateOffset)
+            : undefined) || indexed?.meta.readAnchorText,
+        readBackupAnchorText:
+          (relocatedOnCreate?.matched
+            ? extractBackupAnchorText(content, finalCreateOffset) || undefined
+            : undefined) || indexed?.meta.readBackupAnchorText,
         lastSyncedCharOffset: indexed?.meta.lastSyncedCharOffset,
         lastSyncedProgress: indexed?.meta.lastSyncedProgress,
         lastSyncedReadAt: indexed?.meta.lastSyncedReadAt,

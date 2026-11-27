@@ -33,10 +33,12 @@ import {
   sanitizeNotesList,
 } from './notes';
 import {
+  extractBackupAnchorText,
   extractReadAnchorText,
   isProgressMeaningfullyDifferent,
   reconcileReadingProgress,
   relocateCharOffsetByAnchor,
+  relocateOffsetAfterContentEdit,
 } from './progressSync';
 
 interface ProxyResponse {
@@ -1183,6 +1185,11 @@ export async function runAutoMetadataProgressSync(
           : localDoc.readAnchorText ||
             (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : undefined) ||
             undefined;
+        const localBackupAnchor = localDoc.encrypted
+          ? undefined
+          : localDoc.readBackupAnchorText ||
+            (localDoc.content ? extractBackupAnchorText(localDoc.content, localOffset) : undefined) ||
+            undefined;
         const syncedTs = Math.max(localDoc.lastReadAt ?? 0, localOverrideAt);
         nextRemoteEntry.readProgress = localDoc.readProgress;
         nextRemoteEntry.lastCharOffset = localOffset;
@@ -1190,10 +1197,12 @@ export async function runAutoMetadataProgressSync(
         nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
         nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? localOverrideAt;
         nextRemoteEntry.readAnchorText = localAnchor;
+        nextRemoteEntry.readBackupAnchorText = localBackupAnchor;
         nextRemoteEntry.progressOverrideAt = localOverrideAt;
         nextLocal = {
           ...nextLocal,
           readAnchorText: localDoc.readAnchorText || localAnchor,
+          readBackupAnchorText: localDoc.readBackupAnchorText || localBackupAnchor,
           lastSyncedCharOffset: localOffset,
           lastSyncedProgress: localDoc.readProgress,
           lastSyncedReadAt: syncedTs,
@@ -1204,8 +1213,13 @@ export async function runAutoMetadataProgressSync(
         // Another device explicitly resolved a conflict and pushed to cloud; adopt cleanly without re-prompting
         const rawRemoteOffset = Math.max(0, Math.round(remoteEntry.lastCharOffset ?? 0));
         const relocated =
-          nextLocal.content && remoteEntry.readAnchorText
-            ? relocateCharOffsetByAnchor(nextLocal.content, rawRemoteOffset, remoteEntry.readAnchorText)
+          nextLocal.content && (remoteEntry.readAnchorText || remoteEntry.readBackupAnchorText)
+            ? relocateCharOffsetByAnchor(
+                nextLocal.content,
+                rawRemoteOffset,
+                remoteEntry.readAnchorText,
+                remoteEntry.readBackupAnchorText
+              )
             : null;
         const pulledOffset = relocated?.matched ? relocated.offset : rawRemoteOffset;
         const pulledProgress =
@@ -1225,6 +1239,11 @@ export async function runAutoMetadataProgressSync(
             (nextLocal.content && !nextLocal.encrypted
               ? extractReadAnchorText(nextLocal.content, pulledOffset)
               : nextLocal.readAnchorText),
+          readBackupAnchorText:
+            remoteEntry.readBackupAnchorText ||
+            (nextLocal.content && !nextLocal.encrypted
+              ? extractBackupAnchorText(nextLocal.content, pulledOffset) || undefined
+              : nextLocal.readBackupAnchorText),
           lastSyncedCharOffset: pulledOffset,
           lastSyncedProgress: pulledProgress,
           lastSyncedReadAt: syncedTs,
@@ -1247,6 +1266,11 @@ export async function runAutoMetadataProgressSync(
             readAnchorText:
               progMerge.resolvedRemoteAnchor ||
               (nextLocal.content ? extractReadAnchorText(nextLocal.content, pulledOffset) : nextLocal.readAnchorText),
+            readBackupAnchorText:
+              progMerge.resolvedRemoteBackupAnchor ||
+              (nextLocal.content && !nextLocal.encrypted
+                ? extractBackupAnchorText(nextLocal.content, pulledOffset) || undefined
+                : nextLocal.readBackupAnchorText),
             lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? pulledOffset,
             lastSyncedProgress: progMerge.nextBaseline?.progress ?? progMerge.resolvedRemoteProgress,
             lastSyncedReadAt: progMerge.nextBaseline?.readAt ?? progMerge.resolvedRemoteReadAt,
@@ -1263,18 +1287,25 @@ export async function runAutoMetadataProgressSync(
             : localDoc.readAnchorText ||
               (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : undefined) ||
               undefined;
+          const localBackupAnchor = localDoc.encrypted
+            ? undefined
+            : localDoc.readBackupAnchorText ||
+              (localDoc.content ? extractBackupAnchorText(localDoc.content, localOffset) : undefined) ||
+              undefined;
           nextRemoteEntry.readProgress = localDoc.readProgress;
           nextRemoteEntry.lastCharOffset = localOffset;
           nextRemoteEntry.lastScrollTop = Math.max(0, Math.round(localDoc.lastScrollTop ?? 0));
           nextRemoteEntry.lastMode = localDoc.lastMode ?? 'read';
           nextRemoteEntry.lastReadAt = localDoc.lastReadAt ?? Date.now();
           nextRemoteEntry.readAnchorText = localAnchor;
+          nextRemoteEntry.readBackupAnchorText = localBackupAnchor;
           if (localOverrideAt > remoteOverrideAt) {
             nextRemoteEntry.progressOverrideAt = localOverrideAt;
           }
           nextLocal = {
             ...nextLocal,
             readAnchorText: localDoc.readAnchorText || localAnchor,
+            readBackupAnchorText: localDoc.readBackupAnchorText || localBackupAnchor,
             lastSyncedCharOffset: progMerge.nextBaseline?.charOffset ?? localOffset,
             lastSyncedProgress: progMerge.nextBaseline?.progress ?? localDoc.readProgress,
             lastSyncedReadAt: Math.max(
@@ -1332,6 +1363,11 @@ export async function runAutoMetadataProgressSync(
               nextRemoteEntry.readAnchorText =
                 localDoc.readAnchorText ||
                 (localDoc.content ? extractReadAnchorText(localDoc.content, localOffset) : nextRemoteEntry.readAnchorText);
+              nextRemoteEntry.readBackupAnchorText =
+                localDoc.readBackupAnchorText ||
+                (localDoc.content
+                  ? extractBackupAnchorText(localDoc.content, localOffset) || nextRemoteEntry.readBackupAnchorText
+                  : nextRemoteEntry.readBackupAnchorText);
             }
             needManifestPush = true;
           }
@@ -1454,12 +1490,23 @@ export async function runAutoMetadataProgressSync(
             }
             nextLocal = { ...nextLocal, lastSyncedContentHash: nextLocal.contentHash };
           } else {
-            const anchor = nextLocal.readAnchorText || remoteEntry.readAnchorText;
-            const relocated =
-              anchor && (nextLocal.lastCharOffset ?? 0) > 0
-                ? relocateCharOffsetByAnchor(downloaded.content, nextLocal.lastCharOffset ?? 0, anchor)
-                : null;
             const prevBody = nextLocal.content;
+            const anchor = nextLocal.readAnchorText || remoteEntry.readAnchorText;
+            const backupAnchor =
+              nextLocal.readBackupAnchorText || remoteEntry.readBackupAnchorText;
+            const relocated =
+              (anchor || backupAnchor || prevBody) && (nextLocal.lastCharOffset ?? 0) > 0
+                ? relocateOffsetAfterContentEdit(
+                    downloaded.content,
+                    nextLocal.lastCharOffset ?? 0,
+                    {
+                      prevContent: prevBody || undefined,
+                      primaryAnchor: anchor,
+                      backupAnchor,
+                      fallbackToBoundaryOnDelete: true,
+                    }
+                  )
+                : null;
             const relocatedNotes = relocateNotesAfterContentEdit(nextLocal.notes, downloaded.content, {
               prevContent: prevBody,
             });
@@ -1480,6 +1527,10 @@ export async function runAutoMetadataProgressSync(
                     readProgress: relocated.progress,
                     lastScrollTop: 0,
                     readAnchorText: extractReadAnchorText(downloaded.content, relocated.offset) || anchor,
+                    readBackupAnchorText:
+                      extractBackupAnchorText(downloaded.content, relocated.offset) ||
+                      backupAnchor ||
+                      undefined,
                   }
                 : {}),
             };
@@ -1521,12 +1572,19 @@ export async function runAutoMetadataProgressSync(
       ) {
         const downloaded = await downloadShortDocBody(remoteEntry);
         if (downloaded) {
-          const anchor = nextLocal.readAnchorText || remoteEntry.readAnchorText;
-          const relocated =
-            anchor && (nextLocal.lastCharOffset ?? 0) > 0
-              ? relocateCharOffsetByAnchor(downloaded.content, nextLocal.lastCharOffset ?? 0, anchor)
-              : null;
           const prevBody = nextLocal.content;
+          const anchor = nextLocal.readAnchorText || remoteEntry.readAnchorText;
+          const backupAnchor =
+            nextLocal.readBackupAnchorText || remoteEntry.readBackupAnchorText;
+          const relocated =
+            (anchor || backupAnchor || prevBody) && (nextLocal.lastCharOffset ?? 0) > 0
+              ? relocateOffsetAfterContentEdit(downloaded.content, nextLocal.lastCharOffset ?? 0, {
+                  prevContent: prevBody || undefined,
+                  primaryAnchor: anchor,
+                  backupAnchor,
+                  fallbackToBoundaryOnDelete: true,
+                })
+              : null;
           const relocatedNotes = relocateNotesAfterContentEdit(nextLocal.notes, downloaded.content, {
             prevContent: prevBody,
           });
@@ -1547,6 +1605,10 @@ export async function runAutoMetadataProgressSync(
                   readProgress: relocated.progress,
                   lastScrollTop: 0,
                   readAnchorText: extractReadAnchorText(downloaded.content, relocated.offset) || anchor,
+                  readBackupAnchorText:
+                    extractBackupAnchorText(downloaded.content, relocated.offset) ||
+                    backupAnchor ||
+                    undefined,
                 }
               : {}),
           };
@@ -1572,9 +1634,16 @@ export async function runAutoMetadataProgressSync(
         const downloaded = await downloadShortDocBody(remoteEntry);
         if (downloaded) {
           const anchor = nextLocal.readAnchorText || remoteEntry.readAnchorText;
+          const backupAnchor =
+            nextLocal.readBackupAnchorText || remoteEntry.readBackupAnchorText;
           const relocated =
-            anchor && (nextLocal.lastCharOffset ?? 0) > 0
-              ? relocateCharOffsetByAnchor(downloaded.content, nextLocal.lastCharOffset ?? 0, anchor)
+            (anchor || backupAnchor) && (nextLocal.lastCharOffset ?? 0) > 0
+              ? relocateCharOffsetByAnchor(
+                  downloaded.content,
+                  nextLocal.lastCharOffset ?? 0,
+                  anchor,
+                  backupAnchor
+                )
               : null;
           const relocatedNotes = relocateNotesAfterContentEdit(nextLocal.notes, downloaded.content);
           nextLocal = {
@@ -1594,6 +1663,10 @@ export async function runAutoMetadataProgressSync(
                   readProgress: relocated.progress,
                   lastScrollTop: 0,
                   readAnchorText: extractReadAnchorText(downloaded.content, relocated.offset) || anchor,
+                  readBackupAnchorText:
+                    extractBackupAnchorText(downloaded.content, relocated.offset) ||
+                    backupAnchor ||
+                    undefined,
                 }
               : {}),
           };
@@ -1682,8 +1755,13 @@ export async function runAutoMetadataProgressSync(
         if (downloaded) {
           const initialOffset = Math.max(0, Math.round(rEntry.lastCharOffset ?? 0));
           const relocated =
-            rEntry.readAnchorText && initialOffset > 0
-              ? relocateCharOffsetByAnchor(downloaded.content, initialOffset, rEntry.readAnchorText)
+            (rEntry.readAnchorText || rEntry.readBackupAnchorText) && initialOffset > 0
+              ? relocateCharOffsetByAnchor(
+                  downloaded.content,
+                  initialOffset,
+                  rEntry.readAnchorText,
+                  rEntry.readBackupAnchorText
+                )
               : null;
           const finalOffset = relocated?.matched ? relocated.offset : initialOffset;
           const finalProgress = relocated?.matched ? relocated.progress : (rEntry.readProgress ?? 0);
@@ -1705,6 +1783,11 @@ export async function runAutoMetadataProgressSync(
             readAnchorText:
               rEntry.readAnchorText ||
               (rEntry.encrypted ? undefined : extractReadAnchorText(downloaded.content, finalOffset) || undefined),
+            readBackupAnchorText:
+              rEntry.readBackupAnchorText ||
+              (rEntry.encrypted
+                ? undefined
+                : extractBackupAnchorText(downloaded.content, finalOffset) || undefined),
             lastSyncedCharOffset: finalOffset,
             lastSyncedProgress: finalProgress,
             lastSyncedReadAt: Math.max(rEntry.lastReadAt ?? 0, rEntry.progressOverrideAt ?? 0),
@@ -1756,6 +1839,7 @@ export async function runAutoMetadataProgressSync(
         lastScrollTop: rEntry.lastScrollTop ?? 0,
         lastCharOffset: rEntry.lastCharOffset ?? 0,
         readAnchorText: rEntry.encrypted ? undefined : rEntry.readAnchorText,
+        readBackupAnchorText: rEntry.encrypted ? undefined : rEntry.readBackupAnchorText,
         lastSyncedCharOffset: Math.max(0, Math.round(rEntry.lastCharOffset ?? 0)),
         lastSyncedProgress: rEntry.readProgress ?? 0,
         lastSyncedReadAt: Math.max(rEntry.lastReadAt ?? 0, rEntry.progressOverrideAt ?? 0),

@@ -778,7 +778,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const scrollRef = useRef<HTMLDivElement>(null);
     const articleRef = useRef<HTMLElement>(null);
 
-    const [content, setContent] = useState(doc.content);
+    const content = doc.content;
     const [fetching, setFetching] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
     const [articleOverflow, setArticleOverflow] = useState(false);
@@ -830,13 +830,20 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     const contentRef = useRef(content);
     contentRef.current = content;
+    const docRef = useRef(doc);
+    docRef.current = doc;
 
     const debounceScrollRef = useRef<number | null>(null);
     const pendingTypographyAnchorRef = useRef<PendingTypographyAnchor | null>(null);
     const typographyLockUntilRef = useRef(0);
     const lastProgrammaticScrollAtRef = useRef(0);
     const lastProgrammaticScrollTopRef = useRef(0);
-    const restoredDocIdRef = useRef<string | null>(null);
+    const contentVersionRef = useRef(0);
+    const prevDocIdentityRef = useRef<{ id: string; content: string }>({
+      id: doc.id,
+      content: doc.content,
+    });
+    const restoredDocKeyRef = useRef<string | null>(null);
     const hadSelectionOnDownRef = useRef(false);
     const lastPointerDownAtRef = useRef(0);
     const lastTouchStartAtRef = useRef(0);
@@ -1029,6 +1036,32 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const pendingWindowAnchorRef = useRef<{ chunkIdx: number; prevClientOffset: number } | null>(null);
     const prevLayoutMountedRangeRef = useRef<{ start: number; end: number } | null>(null);
 
+    // Synchronously invalidate restoration state on doc switch OR external content edit
+    // so zero stale frames or old scrollTop timers can corrupt the relocated offset.
+    if (
+      prevDocIdentityRef.current.id !== doc.id ||
+      prevDocIdentityRef.current.content !== doc.content
+    ) {
+      prevDocIdentityRef.current = { id: doc.id, content: doc.content };
+      contentVersionRef.current += 1;
+      restoredDocKeyRef.current = null;
+      pendingJumpRef.current = null;
+      pendingWindowAnchorRef.current = null;
+      prevLayoutMountedRangeRef.current = null;
+      measuredChunkHeightsRef.current = [];
+      pendingTypographyAnchorRef.current = null;
+      typographyLockUntilRef.current = 0;
+      if (debounceScrollRef.current) {
+        window.clearTimeout(debounceScrollRef.current);
+        debounceScrollRef.current = null;
+      }
+    }
+    const restoreKey = `${doc.id}|${contentVersionRef.current}`;
+    const restoreKeyRef = useRef(restoreKey);
+    restoreKeyRef.current = restoreKey;
+    const isRestoringViewport = () =>
+      restoredDocKeyRef.current !== restoreKeyRef.current || pendingJumpRef.current !== null;
+
     // Reset measured heights when document/typography/width changes
     const layoutKey = `${doc.id}|${content.length}|${fontSize}|${autoHyphenate ? '1' : '0'}|${Math.round(contentWidth)}`;
     const prevLayoutKeyRef = useRef(layoutKey);
@@ -1057,24 +1090,31 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const mountedRangeRef = useRef(mountedRange);
     mountedRangeRef.current = mountedRange;
     const prevChunkCountRef = useRef(chunkCount);
+    const prevRestoreKeyForWindowRef = useRef(restoreKey);
 
     useLayoutEffect(() => {
       const prev = prevChunkCountRef.current;
       prevChunkCountRef.current = chunkCount;
+      const restoreKeyChanged = prevRestoreKeyForWindowRef.current !== restoreKey;
+      prevRestoreKeyForWindowRef.current = restoreKey;
       if (!isVirtualized || chunkCount === 0) return;
-      if (prev === 0 || mountedRangeRef.current.start >= chunkCount) {
+      if (restoreKeyChanged || prev === 0 || mountedRangeRef.current.start >= chunkCount) {
         const next = computeInitialWindow();
-        mountedRangeRef.current = next;
-        setMountedRange(next);
+        if (next.start !== mountedRange.start || next.end !== mountedRange.end) {
+          mountedRangeRef.current = next;
+          setMountedRange(next);
+        }
       } else if (mountedRangeRef.current.end >= chunkCount) {
         const clamped = {
           start: Math.max(0, Math.min(mountedRangeRef.current.start, chunkCount - 1)),
           end: chunkCount - 1,
         };
-        mountedRangeRef.current = clamped;
-        setMountedRange(clamped);
+        if (clamped.start !== mountedRange.start || clamped.end !== mountedRange.end) {
+          mountedRangeRef.current = clamped;
+          setMountedRange(clamped);
+        }
       }
-    }, [isVirtualized, chunkCount]);
+    }, [isVirtualized, chunkCount, restoreKey]);
 
     const getChunkHeight = (chunkIdx: number): number => {
       const measured = measuredChunkHeightsRef.current[chunkIdx];
@@ -1416,6 +1456,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     const emitCurrentViewState = () => {
+      if (isRestoringViewport()) return;
       const el = scrollRef.current;
       const scrollTop = el?.scrollTop ?? 0;
       const charOffset = captureCurrentCharOffset();
@@ -1424,6 +1465,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     };
 
     const scheduleEmitViewState = (delayMs = 380) => {
+      if (isRestoringViewport()) return;
       if (debounceScrollRef.current) {
         window.clearTimeout(debounceScrollRef.current);
       }
@@ -1433,24 +1475,12 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       }, delayMs);
     };
 
-    // Sync local buffer when switching documents
+    // Reset transient UI state when switching documents
     useEffect(() => {
-      setContent(doc.content);
-      contentRef.current = doc.content;
       hadSelectionOnDownRef.current = false;
       lastReportedProgressRef.current = -1;
       lastReportedPageKeyRef.current = '';
       lastReportedVisibleNotesKeyRef.current = '';
-      restoredDocIdRef.current = null;
-      pendingJumpRef.current = null;
-      pendingWindowAnchorRef.current = null;
-      prevLayoutMountedRangeRef.current = null;
-      measuredChunkHeightsRef.current = [];
-      clearTypographyLock();
-      if (debounceScrollRef.current) {
-        window.clearTimeout(debounceScrollRef.current);
-        debounceScrollRef.current = null;
-      }
       setFetchError(null);
       setArticleOverflow(false);
       setShowOutline(false);
@@ -1460,15 +1490,6 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       setTopClipPx(0);
       setBottomClipPx(0);
     }, [doc.id]);
-
-    // Sync content when remote body arrives lazily or an external app edits the local file
-    useEffect(() => {
-      if (doc.content !== contentRef.current) {
-        setContent(doc.content);
-        contentRef.current = doc.content;
-        restoredDocIdRef.current = null;
-      }
-    }, [doc.content]);
 
     // Measure whether rendered document overflows the reading viewport
     const measureReadOverflow = () => {
@@ -1862,7 +1883,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
       // Self-healing guard: if viewport is still not covered by real mounted DOM (e.g. ultra-short chunks),
       // immediately expand/re-center the window so a blank spacer page can never persist
-      if (restoredDocIdRef.current === doc.id && el.clientHeight > 0) {
+      if (restoredDocKeyRef.current === restoreKey && el.clientHeight > 0) {
         const firstNode = chunkElMapRef.current.get(mountedRange.start);
         const lastNode = chunkElMapRef.current.get(mountedRange.end);
         if (firstNode && lastNode) {
@@ -1879,7 +1900,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         updateEdgeClips();
         reportReadProgress();
       }
-    }, [isVirtualized, mountedRange, fontSize, autoHyphenate, contentWidth, doc.id, content]);
+    }, [isVirtualized, mountedRange, fontSize, autoHyphenate, contentWidth, doc.id, content, restoreKey]);
 
     useLayoutEffect(() => {
       measureReadOverflow();
@@ -1901,7 +1922,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
             if (Math.abs(prev - nextW) <= 6) return prev;
             // Capture reading anchor before contentWidth resets virtual chunk heights so scroll never drifts
             if (
-              restoredDocIdRef.current === doc.id &&
+              restoredDocKeyRef.current === restoreKeyRef.current &&
               !pendingTypographyAnchorRef.current &&
               el.scrollTop > 10
             ) {
@@ -1960,9 +1981,16 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
 
     // Restore saved reading progress (preferring canonical synced charOffset over raw scrollTop)
     useLayoutEffect(() => {
-      if (restoredDocIdRef.current === doc.id) return;
+      if (restoredDocKeyRef.current === restoreKey) return;
+      if (
+        isVirtualized &&
+        (mountedRange.start !== mountedRangeRef.current.start ||
+          mountedRange.end !== mountedRangeRef.current.end)
+      ) {
+        return;
+      }
       if (measureReadOverflow()) return;
-      restoredDocIdRef.current = doc.id;
+      restoredDocKeyRef.current = restoreKey;
 
       const savedCharOffset =
         typeof doc.lastCharOffset === 'number' && Number.isFinite(doc.lastCharOffset)
@@ -1973,7 +2001,7 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         scrollReadToCharOffset(savedCharOffset);
         pendingTypographyAnchorRef.current = { kind: 'read', charOffset: savedCharOffset };
         typographyLockUntilRef.current = Date.now() + 1800;
-        reportReadProgress();
+        reportReadProgress(savedCharOffset);
         return;
       }
 
@@ -1981,12 +2009,22 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
       if (!targetEl) return;
       lastProgrammaticScrollAtRef.current = performance.now();
       targetEl.scrollTop = savedCharOffset === 0 ? 0 : (doc.lastScrollTop ?? 0);
+      lastProgrammaticScrollTopRef.current = targetEl.scrollTop;
       if (isVirtualized) {
         syncMountedWindowToScroll(targetEl.scrollTop, targetEl.clientHeight);
       }
       updateEdgeClips();
       reportReadProgress();
-    }, [doc.id, doc.lastCharOffset, doc.lastScrollTop, articleOverflow, isVirtualized]);
+    }, [
+      restoreKey,
+      doc.id,
+      doc.lastCharOffset,
+      doc.lastScrollTop,
+      articleOverflow,
+      isVirtualized,
+      mountedRange.start,
+      mountedRange.end,
+    ]);
 
     // Persist reading progress immediately when app is backgrounded or closed
     useEffect(() => {
@@ -2044,6 +2082,19 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
         if (debounceScrollRef.current) {
           window.clearTimeout(debounceScrollRef.current);
           debounceScrollRef.current = null;
+        }
+        if (isRestoringViewport()) {
+          const curDoc = docRef.current;
+          const safeOffset = Math.max(
+            0,
+            Math.min(contentRef.current.length, Math.round(curDoc.lastCharOffset ?? 0))
+          );
+          return {
+            mode: 'read',
+            scrollTop: Math.max(0, Math.round(curDoc.lastScrollTop ?? 0)),
+            charOffset: safeOffset,
+            readProgress: curDoc.readProgress ?? computeReadProgress(safeOffset),
+          };
         }
         const activeEl = scrollRef.current;
         const charOffset = captureCurrentCharOffset();
@@ -2111,6 +2162,9 @@ export const MinimalDocView = forwardRef<MinimalDocViewHandle, MinimalDocViewPro
     const handleScroll = () => {
       const el = scrollRef.current;
       if (!el) return;
+      if (isRestoringViewport()) {
+        return;
+      }
       if (isVirtualized) {
         syncMountedWindowToScroll(el.scrollTop, el.clientHeight);
       }
