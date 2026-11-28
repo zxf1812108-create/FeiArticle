@@ -5237,7 +5237,7 @@ public class LanWebDavPlugin extends Plugin {
         }
 
         onWriteStart();
-        int statusCode;
+        int statusCode = 500;
         LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().lock();
         try {
             NodeMeta existing = statNode(ctx, relPath);
@@ -5277,7 +5277,7 @@ public class LanWebDavPlugin extends Plugin {
         }
 
         onWriteStart();
-        int statusCode;
+        int statusCode = 500;
         LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().lock();
         try {
             NodeMeta existing = statNode(ctx, relPath);
@@ -5346,7 +5346,7 @@ public class LanWebDavPlugin extends Plugin {
         boolean overwrite = overwriteHeader == null || !"F".equalsIgnoreCase(overwriteHeader.trim());
 
         onWriteStart();
-        int statusCode;
+        int statusCode = 500;
         RenamePair renameRecord = null;
         LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().lock();
         try {
