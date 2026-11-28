@@ -97,6 +97,9 @@ if (fs.existsSync(manifestPath)) {
     '<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />',
     '<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />',
     '<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />',
+    '<uses-permission android:name="android.permission.WAKE_LOCK" />',
+    '<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />',
+    '<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />',
     '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
     '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />',
     '<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />',
@@ -120,6 +123,15 @@ if (fs.existsSync(manifestPath)) {
       /<application\b/,
       '<application\n        android:usesCleartextTraffic="true"'
     );
+  }
+  if (!manifest.includes('LanWebDavKeepAliveService')) {
+    const serviceTag =
+      '        <service\n' +
+      '            android:name=".LanWebDavKeepAliveService"\n' +
+      '            android:exported="false"\n' +
+      '            android:foregroundServiceType="dataSync"\n' +
+      '            android:stopWithTask="true" />\n    </application>';
+    manifest = manifest.replace(/<\/application>/, serviceTag);
   }
   fs.writeFileSync(manifestPath, manifest, 'utf8');
 }
@@ -948,6 +960,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.json.JSONObject;
 
 @CapacitorPlugin(
@@ -963,11 +976,12 @@ import org.json.JSONObject;
     }
 )
 public class LocalStoragePlugin extends Plugin {
-    private static final String PREFS_NAME = "feiartical_local_fs_prefs";
-    private static final String KEY_MODE = "mode";
-    private static final String KEY_TREE_URI = "tree_uri";
-    private static final String KEY_FOLDER_PATH = "folder_path";
-    private static final String INDEX_FILE_NAME = ".feiartical-index.json";
+    static final String PREFS_NAME = "feiartical_local_fs_prefs";
+    static final String KEY_MODE = "mode";
+    static final String KEY_TREE_URI = "tree_uri";
+    static final String KEY_FOLDER_PATH = "folder_path";
+    static final String INDEX_FILE_NAME = ".feiartical-index.json";
+    public static final ReentrantReadWriteLock WORKSPACE_IO_LOCK = new ReentrantReadWriteLock();
     private static final long MAX_SCAN_FILE_BYTES = 15L * 1024L * 1024L;
     private static final long MAX_BINARY_FILE_BYTES = 25L * 1024L * 1024L;
 
@@ -1334,6 +1348,7 @@ public class LocalStoragePlugin extends Plugin {
         final String treeUri = prefs.getString(KEY_TREE_URI, "");
 
         executor.execute(() -> {
+            WORKSPACE_IO_LOCK.writeLock().lock();
             try {
                 int applied = 0;
                 if ("saf".equals(mode)) {
@@ -1445,6 +1460,8 @@ public class LocalStoragePlugin extends Plugin {
                 err.put("ok", false);
                 err.put("error", e.getMessage() != null ? e.getMessage() : "写入本地文件失败");
                 call.resolve(err);
+            } finally {
+                WORKSPACE_IO_LOCK.writeLock().unlock();
             }
         });
     }
@@ -1457,6 +1474,7 @@ public class LocalStoragePlugin extends Plugin {
         final String treeUri = prefs.getString(KEY_TREE_URI, "");
 
         executor.execute(() -> {
+            WORKSPACE_IO_LOCK.readLock().lock();
             try {
                 if (mode.isEmpty()) {
                     JSObject err = new JSObject();
@@ -1479,6 +1497,8 @@ public class LocalStoragePlugin extends Plugin {
                 JSObject err = new JSObject();
                 err.put("ok", false);
                 call.resolve(err);
+            } finally {
+                WORKSPACE_IO_LOCK.readLock().unlock();
             }
         });
     }
@@ -1557,6 +1577,7 @@ public class LocalStoragePlugin extends Plugin {
         final String treeUri = prefs.getString(KEY_TREE_URI, "");
 
         executor.execute(() -> {
+            WORKSPACE_IO_LOCK.readLock().lock();
             try {
                 JSArray foldersArr = new JSArray();
                 JSArray filesArr = new JSArray();
@@ -1713,6 +1734,8 @@ public class LocalStoragePlugin extends Plugin {
                 err.put("ok", false);
                 err.put("error", e.getMessage() != null ? e.getMessage() : "扫描本地文件夹失败");
                 call.resolve(err);
+            } finally {
+                WORKSPACE_IO_LOCK.readLock().unlock();
             }
         });
     }
@@ -2124,13 +2147,44 @@ public class LocalStoragePlugin extends Plugin {
         return false;
     }
 
-    private static boolean isReservedMediaDir(String name) {
+    static boolean isReservedMediaDir(String name) {
         if (name == null) return false;
         return "images".equalsIgnoreCase(name) || "assets".equalsIgnoreCase(name);
     }
 
+    static boolean isIgnoredTempFileName(String fileName) {
+        if (fileName == null) return true;
+        String trimmed = fileName.trim();
+        if (trimmed.isEmpty()) return true;
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (trimmed.startsWith(".") || trimmed.startsWith("~$") || trimmed.startsWith("~")) {
+            return true;
+        }
+        if (
+            "desktop.ini".equals(lower) ||
+            "thumbs.db".equals(lower) ||
+            ".ds_store".equals(lower) ||
+            "4913".equals(lower)
+        ) {
+            return true;
+        }
+        return (
+            lower.endsWith(".tmp") ||
+            lower.endsWith(".temp") ||
+            lower.endsWith(".swp") ||
+            lower.endsWith(".swo") ||
+            lower.endsWith(".swx") ||
+            lower.endsWith(".bak") ||
+            lower.endsWith(".orig") ||
+            lower.endsWith(".part") ||
+            lower.endsWith(".crdownload") ||
+            lower.endsWith(".wbk") ||
+            lower.endsWith("~")
+        );
+    }
+
     private static String detectDocFormat(String fileName) {
-        if (fileName == null || fileName.startsWith(".")) return null;
+        if (isIgnoredTempFileName(fileName)) return null;
         String lower = fileName.toLowerCase(Locale.ROOT);
         if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "md";
         if (lower.endsWith(".txt")) return "txt";
@@ -2617,6 +2671,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(WebDavPlugin.class);
         registerPlugin(LanServerPlugin.class);
+        registerPlugin(LanWebDavPlugin.class);
         registerPlugin(WifiSyncPlugin.class);
         registerPlugin(ReaderNativePlugin.class);
         registerPlugin(LocalStoragePlugin.class);
@@ -4231,11 +4286,2409 @@ public class WifiSyncPlugin extends Plugin {
 }
 `;
 
+  const lanWebDavKeepAliveServiceJava = `package com.feiartical.app;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.net.wifi.WifiManager;
+import android.os.Build;
+import android.os.IBinder;
+import android.os.PowerManager;
+
+public class LanWebDavKeepAliveService extends Service {
+    private static final String CHANNEL_ID = "feiartical_lan_webdav_channel";
+    private static final int NOTIFICATION_ID = 8898;
+    public static final String EXTRA_URL = "webdav_url";
+
+    private WifiManager.WifiLock wifiLock;
+    private PowerManager.WakeLock wakeLock;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        try {
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                int lockMode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                    ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                wifiLock = wm.createWifiLock(lockMode, "FeiArtical:LanWebDavWifiLock");
+                wifiLock.setReferenceCounted(false);
+                wifiLock.acquire();
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FeiArtical:LanWebDavWakeLock");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire(4L * 60L * 60L * 1000L);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        String url = intent != null ? intent.getStringExtra(EXTRA_URL) : null;
+        try {
+            ensureNotificationChannel();
+            Notification notification = buildNotification(url);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } catch (Exception ignored) {
+        }
+        return START_NOT_STICKY;
+    }
+
+    private void ensureNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null && nm.getNotificationChannel(CHANNEL_ID) == null) {
+                NotificationChannel ch = new NotificationChannel(
+                    CHANNEL_ID,
+                    "局域网网络磁盘",
+                    NotificationManager.IMPORTANCE_LOW
+                );
+                ch.setDescription("保持局域网 WebDAV 网络磁盘服务稳定在线");
+                ch.setShowBadge(false);
+                nm.createNotificationChannel(ch);
+            }
+        }
+    }
+
+    private Notification buildNotification(String url) {
+        Intent launch = new Intent(this, MainActivity.class);
+        launch.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            piFlags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        PendingIntent pi = PendingIntent.getActivity(this, 0, launch, piFlags);
+
+        String contentText = (url != null && !url.isEmpty())
+            ? ("网络磁盘运行中：" + url)
+            : "局域网网络磁盘运行中";
+
+        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+            ? new Notification.Builder(this, CHANNEL_ID)
+            : new Notification.Builder(this);
+
+        builder
+            .setContentTitle("飞文局域网网络磁盘")
+            .setContentText(contentText)
+            .setSmallIcon(getApplicationInfo().icon)
+            .setContentIntent(pi)
+            .setOngoing(true);
+
+        return builder.build();
+    }
+
+    @Override
+    public void onDestroy() {
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE);
+            } else {
+                stopForeground(true);
+            }
+        } catch (Exception ignored) {
+        }
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+}
+`;
+
+  const lanWebDavPluginJava = `package com.feiartical.app;
+
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import androidx.documentfile.provider.DocumentFile;
+import com.getcapacitor.JSArray;
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TimeZone;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+@CapacitorPlugin(name = "LanWebDavNative")
+public class LanWebDavPlugin extends Plugin {
+    private static final int DEFAULT_PORT = 8898;
+    private static final int MAX_PORT_TRIES = 10;
+    private static final long MAX_PUT_BYTES = 25L * 1024L * 1024L;
+    private static final int SOCKET_TIMEOUT_MS = 30000;
+    private static final int MAX_KEEP_ALIVE_REQS = 50;
+    private static final long LOCK_TIMEOUT_MS = 10L * 60L * 1000L;
+    private static final long WRITE_DEBOUNCE_MS = 1200L;
+    private static final long UNLOCK_FLUSH_DELAY_MS = 350L;
+
+    private static final Pattern PROP_TAG_PATTERN = Pattern.compile(
+        "<(?:[a-zA-Z0-9_-]+:)?([A-Za-z0-9_-]+)(?:\\\\s[^>]*)?/?>"
+    );
+    private static final Pattern WIN32_MODIFIED_PATTERN = Pattern.compile(
+        "<[^>]*Win32LastModifiedTime[^>]*>([^<]+)</[^>]*Win32LastModifiedTime>",
+        Pattern.CASE_INSENSITIVE
+    );
+
+    private volatile boolean running = false;
+    private volatile ServerSocket serverSocket;
+    private volatile int activePort = DEFAULT_PORT;
+    private volatile String activeIp = "";
+    private volatile String activeBasePath = "dav";
+    private volatile String activeUrl = "";
+
+    private final Set<String> hiddenRelPaths = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private final Map<String, LockEntry> activeLocks = new ConcurrentHashMap<>();
+    private final AtomicInteger inFlightWrites = new AtomicInteger(0);
+    private final AtomicLong lastWriteAt = new AtomicLong(0L);
+
+    private final Object changeBufferLock = new Object();
+    private final List<RenamePair> pendingRenames = new ArrayList<>();
+    private final Set<String> pendingTouchedPaths = new LinkedHashSet<>();
+    private boolean hasPendingMutation = false;
+
+    private ExecutorService acceptExecutor;
+    private ExecutorService workerExecutor;
+    private ScheduledExecutorService debounceScheduler;
+    private ScheduledFuture<?> pendingNotifyFuture;
+
+    private static class LockEntry {
+        final String token;
+        final String relPath;
+        final String owner;
+        volatile long expiresAt;
+
+        LockEntry(String token, String relPath, String owner, long expiresAt) {
+            this.token = token;
+            this.relPath = relPath;
+            this.owner = owner;
+            this.expiresAt = expiresAt;
+        }
+    }
+
+    private static class RenamePair {
+        final String from;
+        final String to;
+
+        RenamePair(String from, String to) {
+            this.from = from;
+            this.to = to;
+        }
+    }
+
+    private static class StorageContext {
+        final String mode;
+        final File pathRoot;
+        final String pathRootCanonical;
+        final DocumentFile safRoot;
+
+        StorageContext(String mode, File pathRoot, String pathRootCanonical, DocumentFile safRoot) {
+            this.mode = mode;
+            this.pathRoot = pathRoot;
+            this.pathRootCanonical = pathRootCanonical;
+            this.safRoot = safRoot;
+        }
+
+        boolean isPath() {
+            return "path".equals(mode) && pathRoot != null && pathRootCanonical != null;
+        }
+
+        boolean isSaf() {
+            return "saf".equals(mode) && safRoot != null;
+        }
+    }
+
+    private static class NodeMeta {
+        final String relPath;
+        final String name;
+        final boolean isDir;
+        final long size;
+        final long lastModified;
+
+        NodeMeta(String relPath, String name, boolean isDir, long size, long lastModified) {
+            this.relPath = relPath;
+            this.name = name;
+            this.isDir = isDir;
+            this.size = size;
+            this.lastModified = lastModified;
+        }
+    }
+
+    @PluginMethod
+    public synchronized void start(PluginCall call) {
+        int requestedPort = call.getInt("port", DEFAULT_PORT);
+        String rawBasePath = call.getString("basePath", "");
+        String cleanBase = sanitizeBasePath(rawBasePath);
+        if (cleanBase.isEmpty()) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            err.put("running", false);
+            err.put("error", "自定义路径不能为空");
+            call.resolve(err);
+            return;
+        }
+
+        applyHiddenPathsArray(call.getArray("hiddenPaths"));
+
+        StorageContext ctx = resolveStorageContext();
+        if (ctx == null) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            err.put("running", false);
+            err.put("error", "请先在设置中绑定并授权手机本地文档目录");
+            call.resolve(err);
+            return;
+        }
+
+        String ip = resolveLanIpv4();
+        if (ip == null || ip.isEmpty()) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            err.put("running", false);
+            err.put("error", "未检测到局域网 Wi-Fi 地址，请确认手机已连接 Wi-Fi");
+            call.resolve(err);
+            return;
+        }
+
+        if (running && serverSocket != null && !serverSocket.isClosed() && cleanBase.equals(activeBasePath)) {
+            activeIp = ip;
+            activeUrl = "http://" + activeIp + ":" + activePort + "/" + activeBasePath + "/";
+            JSObject ok = new JSObject();
+            ok.put("ok", true);
+            ok.put("running", true);
+            ok.put("url", activeUrl);
+            ok.put("ip", activeIp);
+            ok.put("port", activePort);
+            ok.put("basePath", activeBasePath);
+            call.resolve(ok);
+            return;
+        }
+
+        stopInternal();
+
+        ServerSocket bound = null;
+        int chosenPort = requestedPort;
+        for (int i = 0; i < MAX_PORT_TRIES; i++) {
+            int candidate = requestedPort + i;
+            try {
+                ServerSocket ss = new ServerSocket(candidate);
+                ss.setReuseAddress(true);
+                bound = ss;
+                chosenPort = candidate;
+                break;
+            } catch (IOException ignored) {
+            }
+        }
+
+        if (bound == null) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            err.put("running", false);
+            err.put("error", "局域网 WebDAV 端口均被占用，请稍后重试");
+            call.resolve(err);
+            return;
+        }
+
+        this.serverSocket = bound;
+        this.activePort = chosenPort;
+        this.activeIp = ip;
+        this.activeBasePath = cleanBase;
+        this.activeUrl = "http://" + activeIp + ":" + activePort + "/" + activeBasePath + "/";
+        this.running = true;
+
+        this.acceptExecutor = Executors.newSingleThreadExecutor();
+        this.workerExecutor = Executors.newCachedThreadPool();
+        this.debounceScheduler = Executors.newSingleThreadScheduledExecutor();
+
+        final ServerSocket ssRef = bound;
+        this.acceptExecutor.execute(() -> acceptLoop(ssRef));
+        startKeepAliveService(this.activeUrl);
+
+        JSObject ok = new JSObject();
+        ok.put("ok", true);
+        ok.put("running", true);
+        ok.put("url", activeUrl);
+        ok.put("ip", activeIp);
+        ok.put("port", activePort);
+        ok.put("basePath", activeBasePath);
+        call.resolve(ok);
+    }
+
+    @PluginMethod
+    public synchronized void stop(PluginCall call) {
+        stopInternal();
+        JSObject ok = new JSObject();
+        ok.put("ok", true);
+        call.resolve(ok);
+    }
+
+    @PluginMethod
+    public void updateHiddenPaths(PluginCall call) {
+        applyHiddenPathsArray(call.getArray("hiddenPaths"));
+        JSObject ok = new JSObject();
+        ok.put("ok", true);
+        call.resolve(ok);
+    }
+
+    @PluginMethod
+    public void getStatus(PluginCall call) {
+        pruneExpiredLocks();
+        JSObject res = new JSObject();
+        res.put("running", running);
+        res.put("url", running ? activeUrl : "");
+        res.put("ip", running ? activeIp : "");
+        res.put("port", running ? activePort : 0);
+        res.put("basePath", running ? activeBasePath : "");
+        res.put("writeBusy", inFlightWrites.get() > 0 || (System.currentTimeMillis() - lastWriteAt.get() < 1600L));
+        res.put("lastWriteAt", lastWriteAt.get());
+        res.put("activeLocks", activeLocks.size());
+        call.resolve(res);
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        stopInternal();
+        super.handleOnDestroy();
+    }
+
+    private void applyHiddenPathsArray(JSArray arr) {
+        hiddenRelPaths.clear();
+        if (arr == null) return;
+        for (int i = 0; i < arr.length(); i++) {
+            String raw = arr.optString(i, "");
+            String norm = normalizeRelPathStrict(raw);
+            if (norm != null && !norm.isEmpty()) {
+                hiddenRelPaths.add(norm.toLowerCase(Locale.ROOT));
+            }
+        }
+    }
+
+    private synchronized void stopInternal() {
+        running = false;
+        activeUrl = "";
+        activeLocks.clear();
+        synchronized (changeBufferLock) {
+            if (pendingNotifyFuture != null) {
+                pendingNotifyFuture.cancel(false);
+                pendingNotifyFuture = null;
+            }
+            pendingRenames.clear();
+            pendingTouchedPaths.clear();
+            hasPendingMutation = false;
+        }
+        if (serverSocket != null) {
+            try {
+                serverSocket.close();
+            } catch (IOException ignored) {
+            }
+            serverSocket = null;
+        }
+        if (acceptExecutor != null) {
+            acceptExecutor.shutdownNow();
+            acceptExecutor = null;
+        }
+        if (workerExecutor != null) {
+            workerExecutor.shutdownNow();
+            workerExecutor = null;
+        }
+        if (debounceScheduler != null) {
+            debounceScheduler.shutdownNow();
+            debounceScheduler = null;
+        }
+        stopKeepAliveService();
+    }
+
+    private void startKeepAliveService(String url) {
+        try {
+            Context ctx = getContext();
+            if (ctx == null) return;
+            Intent intent = new Intent(ctx, LanWebDavKeepAliveService.class);
+            intent.putExtra(LanWebDavKeepAliveService.EXTRA_URL, url);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(intent);
+            } else {
+                ctx.startService(intent);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void stopKeepAliveService() {
+        try {
+            Context ctx = getContext();
+            if (ctx == null) return;
+            Intent intent = new Intent(ctx, LanWebDavKeepAliveService.class);
+            ctx.stopService(intent);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void acceptLoop(ServerSocket ss) {
+        while (running && !ss.isClosed()) {
+            try {
+                final Socket client = ss.accept();
+                if (!running) {
+                    closeQuietly(client);
+                    break;
+                }
+                ExecutorService pool = workerExecutor;
+                if (pool != null && !pool.isShutdown()) {
+                    pool.execute(() -> handleClientConnection(client));
+                } else {
+                    closeQuietly(client);
+                }
+            } catch (IOException e) {
+                if (!running) break;
+            }
+        }
+    }
+
+    private void handleClientConnection(Socket socket) {
+        try {
+            socket.setSoTimeout(SOCKET_TIMEOUT_MS);
+            socket.setTcpNoDelay(true);
+
+            InetAddress remoteAddr = socket.getInetAddress();
+            if (!isAllowedLanAddress(remoteAddr)) {
+                OutputStream out = socket.getOutputStream();
+                writeSimpleResponse(out, 403, "Forbidden", "LAN only", false, null);
+                return;
+            }
+
+            BufferedInputStream in = new BufferedInputStream(socket.getInputStream(), 16384);
+            OutputStream out = socket.getOutputStream();
+
+            int reqCount = 0;
+            while (running && reqCount < MAX_KEEP_ALIVE_REQS) {
+                String headerBlock = readHeaderBlock(in);
+                if (headerBlock == null || headerBlock.trim().isEmpty()) {
+                    break;
+                }
+                reqCount++;
+
+                String[] lines = headerBlock.split("\\r\\n");
+                if (lines.length == 0) break;
+                String[] reqParts = lines[0].split(" ");
+                if (reqParts.length < 2) {
+                    writeSimpleResponse(out, 400, "Bad Request", "Malformed request", false, null);
+                    break;
+                }
+
+                String method = reqParts[0].trim().toUpperCase(Locale.ROOT);
+                String rawTarget = reqParts[1].trim();
+                String httpVersion = reqParts.length >= 3 ? reqParts[2].trim().toUpperCase(Locale.ROOT) : "HTTP/1.1";
+
+                Map<String, String> headers = new HashMap<>();
+                for (int i = 1; i < lines.length; i++) {
+                    int colon = lines[i].indexOf(':');
+                    if (colon > 0) {
+                        String k = lines[i].substring(0, colon).trim().toLowerCase(Locale.ROOT);
+                        String v = lines[i].substring(colon + 1).trim();
+                        headers.put(k, v);
+                    }
+                }
+
+                String connHeader = headers.get("connection");
+                boolean keepAlive = "HTTP/1.1".equals(httpVersion)
+                    ? (connHeader == null || !connHeader.toLowerCase(Locale.ROOT).contains("close"))
+                    : (connHeader != null && connHeader.toLowerCase(Locale.ROOT).contains("keep-alive"));
+
+                String expect = headers.get("expect");
+                if (expect != null && expect.toLowerCase(Locale.ROOT).contains("100-continue")) {
+                    out.write("HTTP/1.1 100 Continue\\r\\n\\r\\n".getBytes(StandardCharsets.US_ASCII));
+                    out.flush();
+                }
+
+                boolean canKeepAlive = dispatchRequest(method, rawTarget, headers, in, out, keepAlive);
+                if (!canKeepAlive || !keepAlive) {
+                    break;
+                }
+            }
+        } catch (SocketTimeoutException ignored) {
+        } catch (Exception ignored) {
+        } finally {
+            closeQuietly(socket);
+        }
+    }
+
+    private boolean dispatchRequest(
+        String method,
+        String rawTarget,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive
+    ) throws IOException {
+        // Strip scheme/host if absolute-URI was sent
+        String pathOnly = rawTarget;
+        if (pathOnly.startsWith("http://") || pathOnly.startsWith("https://")) {
+            int slashIdx = pathOnly.indexOf('/', pathOnly.indexOf("://") + 3);
+            pathOnly = slashIdx >= 0 ? pathOnly.substring(slashIdx) : "/";
+        }
+        int qIdx = pathOnly.indexOf('?');
+        if (qIdx >= 0) {
+            pathOnly = pathOnly.substring(0, qIdx);
+        }
+
+        // Allow Windows Mini-Redirector root OPTIONS probe without exposing path or listing
+        if ("OPTIONS".equals(method) && ("/".equals(pathOnly) || "*".equals(pathOnly))) {
+            drainSmallRequestBody(headers, in);
+            Map<String, String> extra = new HashMap<>();
+            extra.put("DAV", "1, 2");
+            extra.put("MS-Author-Via", "DAV");
+            extra.put("Allow", "OPTIONS");
+            writeBytesResponse(out, 200, "OK", "text/plain; charset=utf-8", new byte[0], keepAlive, extra);
+            return true;
+        }
+
+        String relPath = extractRelPathFromUrlPath(pathOnly);
+        if (relPath == null) {
+            boolean drained = drainRequestBodySafely(headers, in);
+            writeSimpleResponse(out, 404, "Not Found", "Not Found", keepAlive && drained, null);
+            return drained;
+        }
+
+        if ("OPTIONS".equals(method)) {
+            drainSmallRequestBody(headers, in);
+            Map<String, String> extra = new HashMap<>();
+            extra.put("DAV", "1, 2");
+            extra.put("MS-Author-Via", "DAV");
+            extra.put(
+                "Allow",
+                "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK"
+            );
+            writeBytesResponse(out, 200, "OK", "text/plain; charset=utf-8", new byte[0], keepAlive, extra);
+            return true;
+        }
+
+        if (isForbiddenInternalPath(relPath)) {
+            boolean drained = drainRequestBodySafely(headers, in);
+            writeSimpleResponse(out, 403, "Forbidden", "Forbidden", keepAlive && drained, null);
+            return drained;
+        }
+
+        if (isExplorerJunkPath(relPath)) {
+            boolean drained = drainRequestBodySafely(headers, in);
+            int code = ("PUT".equals(method) || "MKCOL".equals(method)) ? 403 : 404;
+            String reason = code == 403 ? "Forbidden" : "Not Found";
+            writeSimpleResponse(out, code, reason, reason, keepAlive && drained, null);
+            return drained;
+        }
+
+        StorageContext ctx = resolveStorageContext();
+        if (ctx == null) {
+            boolean drained = drainRequestBodySafely(headers, in);
+            writeSimpleResponse(out, 503, "Service Unavailable", "Local storage not ready", keepAlive && drained, null);
+            return drained;
+        }
+
+        switch (method) {
+            case "PROPFIND":
+                return handlePropfind(ctx, relPath, headers, in, out, keepAlive);
+            case "GET":
+                return handleGetOrHead(ctx, relPath, headers, in, out, keepAlive, false);
+            case "HEAD":
+                return handleGetOrHead(ctx, relPath, headers, in, out, keepAlive, true);
+            case "PUT":
+                return handlePut(ctx, relPath, headers, in, out, keepAlive);
+            case "MKCOL":
+                return handleMkcol(ctx, relPath, headers, in, out, keepAlive);
+            case "DELETE":
+                return handleDelete(ctx, relPath, headers, in, out, keepAlive);
+            case "MOVE":
+                return handleMoveOrCopy(ctx, relPath, headers, in, out, keepAlive, true);
+            case "COPY":
+                return handleMoveOrCopy(ctx, relPath, headers, in, out, keepAlive, false);
+            case "LOCK":
+                return handleLock(ctx, relPath, headers, in, out, keepAlive);
+            case "UNLOCK":
+                return handleUnlock(relPath, headers, in, out, keepAlive);
+            case "PROPPATCH":
+                return handleProppatch(ctx, relPath, headers, in, out, keepAlive);
+            default: {
+                boolean drained = drainRequestBodySafely(headers, in);
+                writeSimpleResponse(out, 405, "Method Not Allowed", "Method Not Allowed", keepAlive && drained, null);
+                return drained;
+            }
+        }
+    }
+
+    private boolean handlePropfind(
+        StorageContext ctx,
+        String relPath,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive
+    ) throws IOException {
+        drainSmallRequestBody(headers, in);
+        String depthHeader = headers.get("depth");
+        int depth = 1;
+        if ("0".equals(depthHeader)) {
+            depth = 0;
+        } else if ("1".equals(depthHeader)) {
+            depth = 1;
+        } else if ("infinity".equalsIgnoreCase(depthHeader)) {
+            depth = 1;
+        }
+
+        List<NodeMeta> items = new ArrayList<>();
+        LocalStoragePlugin.WORKSPACE_IO_LOCK.readLock().lock();
+        try {
+            NodeMeta target = statNode(ctx, relPath);
+            if (target == null) {
+                writeSimpleResponse(out, 404, "Not Found", "Not Found", keepAlive, null);
+                return true;
+            }
+            items.add(target);
+            if (target.isDir && depth >= 1) {
+                List<NodeMeta> children = listVisibleChildren(ctx, relPath);
+                items.addAll(children);
+            }
+        } finally {
+            LocalStoragePlugin.WORKSPACE_IO_LOCK.readLock().unlock();
+        }
+
+        pruneExpiredLocks();
+        StringBuilder xml = new StringBuilder(1024);
+        xml.append("<?xml version=\\"1.0\\" encoding=\\"utf-8\\"?>\\n");
+        xml.append("<D:multistatus xmlns:D=\\"DAV:\\">\\n");
+        for (NodeMeta node : items) {
+            appendPropfindResponse(xml, node);
+        }
+        xml.append("</D:multistatus>");
+        byte[] body = xml.toString().getBytes(StandardCharsets.UTF_8);
+        writeBytesResponse(out, 207, "Multi-Status", "application/xml; charset=utf-8", body, keepAlive, null);
+        return true;
+    }
+
+    private void appendPropfindResponse(StringBuilder xml, NodeMeta node) {
+        String href = buildDavHref(node.relPath, node.isDir);
+        String displayName = node.relPath.isEmpty() ? activeBasePath : node.name;
+        String lastModHttp = formatHttpDate(node.lastModified);
+        String creationIso = formatIsoDate(node.lastModified);
+        String etag = computeEtag(node);
+
+        xml.append("  <D:response>\\n");
+        xml.append("    <D:href>").append(xmlEscape(href)).append("</D:href>\\n");
+        xml.append("    <D:propstat>\\n");
+        xml.append("      <D:prop>\\n");
+        xml.append("        <D:displayname>").append(xmlEscape(displayName)).append("</D:displayname>\\n");
+        xml.append("        <D:creationdate>").append(creationIso).append("</D:creationdate>\\n");
+        xml.append("        <D:getlastmodified>").append(lastModHttp).append("</D:getlastmodified>\\n");
+        xml.append("        <D:getetag>").append(xmlEscape(etag)).append("</D:getetag>\\n");
+        if (node.isDir) {
+            xml.append("        <D:resourcetype><D:collection/></D:resourcetype>\\n");
+        } else {
+            xml.append("        <D:resourcetype/>\\n");
+            xml.append("        <D:getcontentlength>").append(Math.max(0L, node.size)).append("</D:getcontentlength>\\n");
+            xml.append("        <D:getcontenttype>").append(xmlEscape(guessContentType(node.name))).append("</D:getcontenttype>\\n");
+        }
+        xml.append("        <D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>\\n");
+
+        LockEntry lock = findLockForPath(node.relPath);
+        if (lock != null) {
+            xml.append("        <D:lockdiscovery>").append(buildActiveLockXml(lock)).append("</D:lockdiscovery>\\n");
+        } else {
+            xml.append("        <D:lockdiscovery/>\\n");
+        }
+
+        xml.append("      </D:prop>\\n");
+        xml.append("      <D:status>HTTP/1.1 200 OK</D:status>\\n");
+        xml.append("    </D:propstat>\\n");
+        xml.append("  </D:response>\\n");
+    }
+
+    private boolean handleGetOrHead(
+        StorageContext ctx,
+        String relPath,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive,
+        boolean headOnly
+    ) throws IOException {
+        drainSmallRequestBody(headers, in);
+        byte[] fileBytes = null;
+        NodeMeta meta = null;
+
+        LocalStoragePlugin.WORKSPACE_IO_LOCK.readLock().lock();
+        try {
+            meta = statNode(ctx, relPath);
+            if (meta == null) {
+                writeSimpleResponse(out, 404, "Not Found", "Not Found", keepAlive, null);
+                return true;
+            }
+            if (meta.isDir) {
+                byte[] html = ("<html><body><h3>FeiArtical LAN WebDAV</h3></body></html>").getBytes(StandardCharsets.UTF_8);
+                Map<String, String> extra = new HashMap<>();
+                extra.put("Last-Modified", formatHttpDate(meta.lastModified));
+                extra.put("ETag", computeEtag(meta));
+                writeBytesResponse(
+                    out,
+                    200,
+                    "OK",
+                    "text/html; charset=utf-8",
+                    headOnly ? new byte[0] : html,
+                    keepAlive,
+                    extra,
+                    html.length
+                );
+                return true;
+            }
+            if (!headOnly) {
+                fileBytes = readNodeBytes(ctx, relPath);
+                if (fileBytes == null) {
+                    writeSimpleResponse(out, 404, "Not Found", "Not Found", keepAlive, null);
+                    return true;
+                }
+            }
+        } finally {
+            LocalStoragePlugin.WORKSPACE_IO_LOCK.readLock().unlock();
+        }
+
+        long totalLen = headOnly ? Math.max(0L, meta.size) : fileBytes.length;
+        String contentType = guessContentType(meta.name);
+        Map<String, String> extra = new HashMap<>();
+        extra.put("Accept-Ranges", "bytes");
+        extra.put("Last-Modified", formatHttpDate(meta.lastModified));
+        extra.put("ETag", computeEtag(meta));
+
+        String rangeHeader = headers.get("range");
+        if (!headOnly && rangeHeader != null && rangeHeader.toLowerCase(Locale.ROOT).startsWith("bytes=") && totalLen > 0) {
+            long[] range = parseByteRange(rangeHeader.substring(6).trim(), totalLen);
+            if (range == null) {
+                extra.put("Content-Range", "bytes */" + totalLen);
+                writeBytesResponse(out, 416, "Range Not Satisfiable", "text/plain", new byte[0], keepAlive, extra);
+                return true;
+            }
+            int start = (int) range[0];
+            int end = (int) range[1];
+            int sliceLen = end - start + 1;
+            byte[] slice = new byte[sliceLen];
+            System.arraycopy(fileBytes, start, slice, 0, sliceLen);
+            extra.put("Content-Range", "bytes " + start + "-" + end + "/" + totalLen);
+            writeBytesResponse(out, 206, "Partial Content", contentType, slice, keepAlive, extra);
+            return true;
+        }
+
+        writeBytesResponse(
+            out,
+            200,
+            "OK",
+            contentType,
+            headOnly ? new byte[0] : fileBytes,
+            keepAlive,
+            extra,
+            totalLen
+        );
+        return true;
+    }
+
+    private boolean handlePut(
+        StorageContext ctx,
+        String relPath,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive
+    ) throws IOException {
+        if (relPath.isEmpty() || getPathDepth(relPath) > 2) {
+            boolean drained = drainRequestBodySafely(headers, in);
+            writeSimpleResponse(out, 403, "Forbidden", "Only root and single-level folders are supported", keepAlive && drained, null);
+            return drained;
+        }
+
+        // Stream request body to a temp cache file BEFORE acquiring WORKSPACE_IO_LOCK
+        File tempFile = File.createTempFile("fei_dav_put_", ".tmp", getContext().getCacheDir());
+        boolean streamOk = false;
+        try {
+            long written = readRequestBodyToFile(headers, in, tempFile, MAX_PUT_BYTES);
+            if (written < 0) {
+                writeSimpleResponse(out, 413, "Payload Too Large", "File exceeds 25MB limit", false, null);
+                return false;
+            }
+            streamOk = true;
+
+            onWriteStart();
+            boolean existedBefore;
+            NodeMeta updatedMeta;
+            LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().lock();
+            try {
+                NodeMeta existing = statNode(ctx, relPath);
+                if (existing != null && existing.isDir) {
+                    writeSimpleResponse(out, 405, "Method Not Allowed", "Cannot overwrite directory", keepAlive, null);
+                    return true;
+                }
+                existedBefore = existing != null;
+                boolean ok = writeNodeFromTempFile(ctx, relPath, tempFile);
+                if (!ok) {
+                    writeSimpleResponse(out, 409, "Conflict", "Parent directory missing or write failed", keepAlive, null);
+                    return true;
+                }
+                updatedMeta = statNode(ctx, relPath);
+            } finally {
+                LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().unlock();
+                onWriteFinish(relPath, null);
+            }
+
+            Map<String, String> extra = new HashMap<>();
+            if (updatedMeta != null) {
+                extra.put("ETag", computeEtag(updatedMeta));
+                extra.put("Last-Modified", formatHttpDate(updatedMeta.lastModified));
+            }
+            if (existedBefore) {
+                writeBytesResponse(out, 204, "No Content", "text/plain", new byte[0], keepAlive, extra);
+            } else {
+                writeBytesResponse(out, 201, "Created", "text/plain", new byte[0], keepAlive, extra);
+            }
+            return true;
+        } catch (IOException e) {
+            if (!streamOk) return false;
+            writeSimpleResponse(out, 500, "Internal Server Error", "Write failed", false, null);
+            return false;
+        } finally {
+            tempFile.delete();
+        }
+    }
+
+    private boolean handleMkcol(
+        StorageContext ctx,
+        String relPath,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive
+    ) throws IOException {
+        boolean drained = drainRequestBodySafely(headers, in);
+        if (relPath.isEmpty() || getPathDepth(relPath) != 1 || LocalStoragePlugin.isReservedMediaDir(relPath)) {
+            writeSimpleResponse(out, 403, "Forbidden", "Only single-level folders are supported", keepAlive && drained, null);
+            return drained;
+        }
+
+        onWriteStart();
+        int statusCode;
+        LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().lock();
+        try {
+            NodeMeta existing = statNode(ctx, relPath);
+            if (existing != null) {
+                statusCode = 405;
+            } else {
+                boolean created = createTopLevelDirectory(ctx, relPath);
+                statusCode = created ? 201 : 409;
+            }
+        } finally {
+            LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().unlock();
+            onWriteFinish(statusCode == 201 ? relPath : null, null);
+        }
+
+        if (statusCode == 201) {
+            writeBytesResponse(out, 201, "Created", "text/plain", new byte[0], keepAlive && drained, null);
+        } else if (statusCode == 405) {
+            writeSimpleResponse(out, 405, "Method Not Allowed", "Already exists", keepAlive && drained, null);
+        } else {
+            writeSimpleResponse(out, 409, "Conflict", "Could not create folder", keepAlive && drained, null);
+        }
+        return drained;
+    }
+
+    private boolean handleDelete(
+        StorageContext ctx,
+        String relPath,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive
+    ) throws IOException {
+        drainSmallRequestBody(headers, in);
+        if (relPath.isEmpty()) {
+            writeSimpleResponse(out, 403, "Forbidden", "Cannot delete root", keepAlive, null);
+            return true;
+        }
+
+        onWriteStart();
+        int statusCode;
+        LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().lock();
+        try {
+            NodeMeta existing = statNode(ctx, relPath);
+            if (existing == null) {
+                statusCode = 404;
+            } else {
+                boolean deleted = deleteNodeRecursive(ctx, relPath);
+                statusCode = deleted ? 204 : 500;
+            }
+        } finally {
+            LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().unlock();
+            onWriteFinish(statusCode == 204 ? relPath : null, null);
+        }
+
+        if (statusCode == 204) {
+            removeLocksForPathPrefix(relPath);
+            writeBytesResponse(out, 204, "No Content", "text/plain", new byte[0], keepAlive, null);
+        } else if (statusCode == 404) {
+            writeSimpleResponse(out, 404, "Not Found", "Not Found", keepAlive, null);
+        } else {
+            writeSimpleResponse(out, 500, "Internal Server Error", "Delete failed", keepAlive, null);
+        }
+        return true;
+    }
+
+    private boolean handleMoveOrCopy(
+        StorageContext ctx,
+        String relPath,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive,
+        boolean isMove
+    ) throws IOException {
+        drainSmallRequestBody(headers, in);
+        String destHeader = headers.get("destination");
+        if (destHeader == null || destHeader.trim().isEmpty()) {
+            writeSimpleResponse(out, 400, "Bad Request", "Missing Destination", keepAlive, null);
+            return true;
+        }
+        String destPathPart = destHeader.trim();
+        if (destPathPart.startsWith("http://") || destPathPart.startsWith("https://")) {
+            int slashIdx = destPathPart.indexOf('/', destPathPart.indexOf("://") + 3);
+            destPathPart = slashIdx >= 0 ? destPathPart.substring(slashIdx) : "/";
+        }
+        int qIdx = destPathPart.indexOf('?');
+        if (qIdx >= 0) {
+            destPathPart = destPathPart.substring(0, qIdx);
+        }
+
+        String destRel = extractRelPathFromUrlPath(destPathPart);
+        if (destRel == null || destRel.isEmpty()) {
+            writeSimpleResponse(out, 403, "Forbidden", "Invalid destination", keepAlive, null);
+            return true;
+        }
+        if (isForbiddenInternalPath(destRel) || isExplorerJunkPath(destRel)) {
+            writeSimpleResponse(out, 403, "Forbidden", "Destination forbidden", keepAlive, null);
+            return true;
+        }
+        if (relPath.equals(destRel)) {
+            writeSimpleResponse(out, 403, "Forbidden", "Source and destination identical", keepAlive, null);
+            return true;
+        }
+
+        String overwriteHeader = headers.get("overwrite");
+        boolean overwrite = overwriteHeader == null || !"F".equalsIgnoreCase(overwriteHeader.trim());
+
+        onWriteStart();
+        int statusCode;
+        RenamePair renameRecord = null;
+        LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().lock();
+        try {
+            NodeMeta srcMeta = statNode(ctx, relPath);
+            if (srcMeta == null) {
+                statusCode = 404;
+            } else if (srcMeta.isDir && getPathDepth(destRel) != 1) {
+                statusCode = 403;
+            } else if (!srcMeta.isDir && getPathDepth(destRel) > 2) {
+                statusCode = 403;
+            } else {
+                NodeMeta dstMeta = statNode(ctx, destRel);
+                if (dstMeta != null && !overwrite) {
+                    statusCode = 412;
+                } else {
+                    boolean existedDst = dstMeta != null;
+                    boolean ok = isMove
+                        ? moveNode(ctx, relPath, destRel, srcMeta.isDir, existedDst)
+                        : copyNode(ctx, relPath, destRel, srcMeta.isDir, existedDst);
+                    if (!ok) {
+                        statusCode = 409;
+                    } else {
+                        statusCode = existedDst ? 204 : 201;
+                        if (isMove && !isTempFilePath(relPath) && !isTempFilePath(destRel)) {
+                            renameRecord = new RenamePair(relPath, destRel);
+                        }
+                    }
+                }
+            }
+        } finally {
+            LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().unlock();
+            onWriteFinish((statusCode == 201 || statusCode == 204) ? destRel : null, renameRecord);
+        }
+
+        if (statusCode == 201) {
+            writeBytesResponse(out, 201, "Created", "text/plain", new byte[0], keepAlive, null);
+        } else if (statusCode == 204) {
+            writeBytesResponse(out, 204, "No Content", "text/plain", new byte[0], keepAlive, null);
+        } else if (statusCode == 404) {
+            writeSimpleResponse(out, 404, "Not Found", "Not Found", keepAlive, null);
+        } else if (statusCode == 412) {
+            writeSimpleResponse(out, 412, "Precondition Failed", "Destination exists", keepAlive, null);
+        } else if (statusCode == 403) {
+            writeSimpleResponse(out, 403, "Forbidden", "Only single-level folders are supported", keepAlive, null);
+        } else {
+            writeSimpleResponse(out, 409, "Conflict", "Move/Copy failed", keepAlive, null);
+        }
+        return true;
+    }
+
+    private boolean handleLock(
+        StorageContext ctx,
+        String relPath,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive
+    ) throws IOException {
+        String bodyStr = readSmallBodyUtf8(headers, in);
+        pruneExpiredLocks();
+
+        String ifHeader = headers.get("if");
+        LockEntry entry = null;
+
+        // Lock refresh via If header
+        if ((bodyStr == null || bodyStr.trim().isEmpty()) && ifHeader != null) {
+            for (LockEntry existing : activeLocks.values()) {
+                if (ifHeader.contains(existing.token)) {
+                    existing.expiresAt = System.currentTimeMillis() + LOCK_TIMEOUT_MS;
+                    entry = existing;
+                    break;
+                }
+            }
+        }
+
+        if (entry == null) {
+            // RFC 4918: LOCK on unmapped resource creates an empty file
+            if (!relPath.isEmpty() && getPathDepth(relPath) <= 2) {
+                LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().lock();
+                try {
+                    if (statNode(ctx, relPath) == null) {
+                        File emptyTmp = File.createTempFile("fei_dav_lock_", ".tmp", getContext().getCacheDir());
+                        try {
+                            writeNodeFromTempFile(ctx, relPath, emptyTmp);
+                        } finally {
+                            emptyTmp.delete();
+                        }
+                    }
+                } finally {
+                    LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().unlock();
+                }
+            }
+
+            String token = "opaquelocktoken:" + UUID.randomUUID().toString();
+            String owner = extractLockOwner(bodyStr);
+            entry = new LockEntry(token, relPath, owner, System.currentTimeMillis() + LOCK_TIMEOUT_MS);
+            activeLocks.put(token, entry);
+        }
+
+        String xml =
+            "<?xml version=\\"1.0\\" encoding=\\"utf-8\\"?>\\n" +
+            "<D:prop xmlns:D=\\"DAV:\\">\\n" +
+            "  <D:lockdiscovery>" + buildActiveLockXml(entry) + "</D:lockdiscovery>\\n" +
+            "</D:prop>";
+        Map<String, String> extra = new HashMap<>();
+        extra.put("Lock-Token", "<" + entry.token + ">");
+        writeBytesResponse(
+            out,
+            200,
+            "OK",
+            "application/xml; charset=utf-8",
+            xml.getBytes(StandardCharsets.UTF_8),
+            keepAlive,
+            extra
+        );
+        return true;
+    }
+
+    private boolean handleUnlock(
+        String relPath,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive
+    ) throws IOException {
+        drainSmallRequestBody(headers, in);
+        String lockToken = headers.get("lock-token");
+        if (lockToken != null) {
+            String cleaned = lockToken.trim();
+            if (cleaned.startsWith("<") && cleaned.endsWith(">")) {
+                cleaned = cleaned.substring(1, cleaned.length() - 1).trim();
+            }
+            activeLocks.remove(cleaned);
+        }
+        scheduleQuickChangeFlushIfDirty();
+        writeBytesResponse(out, 204, "No Content", "text/plain", new byte[0], keepAlive, null);
+        return true;
+    }
+
+    private boolean handleProppatch(
+        StorageContext ctx,
+        String relPath,
+        Map<String, String> headers,
+        InputStream in,
+        OutputStream out,
+        boolean keepAlive
+    ) throws IOException {
+        String bodyStr = readSmallBodyUtf8(headers, in);
+
+        // Best-effort preserve Windows Win32LastModifiedTime in path mode
+        if (ctx.isPath() && bodyStr != null && !bodyStr.isEmpty()) {
+            Matcher m = WIN32_MODIFIED_PATTERN.matcher(bodyStr);
+            if (m.find()) {
+                long ts = parseHttpDateSafe(m.group(1).trim());
+                if (ts > 0) {
+                    LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().lock();
+                    try {
+                        File f = resolveSafePathFile(ctx, relPath);
+                        if (f != null && f.exists()) {
+                            f.setLastModified(ts);
+                        }
+                    } finally {
+                        LocalStoragePlugin.WORKSPACE_IO_LOCK.writeLock().unlock();
+                    }
+                }
+            }
+        }
+
+        // Echo accepted property names in 207 Multi-Status so Windows Explorer succeeds cleanly
+        Set<String> propNames = new LinkedHashSet<>();
+        if (bodyStr != null) {
+            Matcher tm = PROP_TAG_PATTERN.matcher(bodyStr);
+            while (tm.find()) {
+                String tag = tm.group(1);
+                if (tag == null) continue;
+                String lower = tag.toLowerCase(Locale.ROOT);
+                if (
+                    "propertyupdate".equals(lower) ||
+                    "set".equals(lower) ||
+                    "remove".equals(lower) ||
+                    "prop".equals(lower) ||
+                    "xml".equals(lower)
+                ) {
+                    continue;
+                }
+                propNames.add(tag);
+            }
+        }
+        if (propNames.isEmpty()) {
+            propNames.add("Win32LastModifiedTime");
+        }
+
+        String href = buildDavHref(relPath, false);
+        StringBuilder xml = new StringBuilder(512);
+        xml.append("<?xml version=\\"1.0\\" encoding=\\"utf-8\\"?>\\n");
+        xml.append("<D:multistatus xmlns:D=\\"DAV:\\" xmlns:Z=\\"urn:schemas-microsoft-com:\\">\\n");
+        xml.append("  <D:response>\\n");
+        xml.append("    <D:href>").append(xmlEscape(href)).append("</D:href>\\n");
+        xml.append("    <D:propstat>\\n");
+        xml.append("      <D:prop>\\n");
+        for (String name : propNames) {
+            if (name.startsWith("Win32")) {
+                xml.append("        <Z:").append(name).append("/>\\n");
+            } else {
+                xml.append("        <D:").append(name).append("/>\\n");
+            }
+        }
+        xml.append("      </D:prop>\\n");
+        xml.append("      <D:status>HTTP/1.1 200 OK</D:status>\\n");
+        xml.append("    </D:propstat>\\n");
+        xml.append("  </D:response>\\n");
+        xml.append("</D:multistatus>");
+
+        writeBytesResponse(
+            out,
+            207,
+            "Multi-Status",
+            "application/xml; charset=utf-8",
+            xml.toString().getBytes(StandardCharsets.UTF_8),
+            keepAlive,
+            null
+        );
+        return true;
+    }
+
+    // ==================== Write Activity & Change Debounce ====================
+
+    private void onWriteStart() {
+        inFlightWrites.incrementAndGet();
+        lastWriteAt.set(System.currentTimeMillis());
+        emitActivityEvent(true);
+    }
+
+    private void onWriteFinish(String touchedPath, RenamePair rename) {
+        int remaining = Math.max(0, inFlightWrites.decrementAndGet());
+        lastWriteAt.set(System.currentTimeMillis());
+
+        boolean realMutation = false;
+        if (rename != null) {
+            realMutation = true;
+        } else if (touchedPath != null && !touchedPath.isEmpty() && !isTempFilePath(touchedPath)) {
+            realMutation = true;
+        }
+
+        if (realMutation) {
+            synchronized (changeBufferLock) {
+                hasPendingMutation = true;
+                if (rename != null) {
+                    pendingRenames.add(rename);
+                }
+                if (touchedPath != null && !touchedPath.isEmpty()) {
+                    pendingTouchedPaths.add(touchedPath);
+                }
+                scheduleDebouncedEmitLocked(WRITE_DEBOUNCE_MS);
+            }
+        }
+        if (remaining == 0) {
+            emitActivityEvent(false);
+        }
+    }
+
+    private void scheduleQuickChangeFlushIfDirty() {
+        synchronized (changeBufferLock) {
+            if (hasPendingMutation) {
+                scheduleDebouncedEmitLocked(UNLOCK_FLUSH_DELAY_MS);
+            }
+        }
+    }
+
+    private void scheduleDebouncedEmitLocked(long delayMs) {
+        if (pendingNotifyFuture != null) {
+            pendingNotifyFuture.cancel(false);
+            pendingNotifyFuture = null;
+        }
+        ScheduledExecutorService sched = debounceScheduler;
+        if (sched == null || sched.isShutdown()) return;
+        pendingNotifyFuture = sched.schedule(this::flushPendingChangesEvent, delayMs, TimeUnit.MILLISECONDS);
+    }
+
+    private void flushPendingChangesEvent() {
+        if (!running) return;
+        if (inFlightWrites.get() > 0) {
+            synchronized (changeBufferLock) {
+                scheduleDebouncedEmitLocked(WRITE_DEBOUNCE_MS);
+            }
+            return;
+        }
+        List<RenamePair> renamesCopy;
+        List<String> touchedCopy;
+        synchronized (changeBufferLock) {
+            if (!hasPendingMutation) return;
+            renamesCopy = new ArrayList<>(pendingRenames);
+            touchedCopy = new ArrayList<>(pendingTouchedPaths);
+            pendingRenames.clear();
+            pendingTouchedPaths.clear();
+            hasPendingMutation = false;
+            pendingNotifyFuture = null;
+        }
+
+        JSObject payload = new JSObject();
+        payload.put("changedAt", System.currentTimeMillis());
+        JSArray renamesArr = new JSArray();
+        for (RenamePair r : renamesCopy) {
+            JSObject obj = new JSObject();
+            obj.put("from", r.from);
+            obj.put("to", r.to);
+            renamesArr.put(obj);
+        }
+        payload.put("renames", renamesArr);
+        JSArray touchedArr = new JSArray();
+        for (String p : touchedCopy) {
+            touchedArr.put(p);
+        }
+        payload.put("touchedPaths", touchedArr);
+        notifyListeners("webdavChanged", payload);
+    }
+
+    private void emitActivityEvent(boolean busy) {
+        JSObject payload = new JSObject();
+        payload.put("writeBusy", busy);
+        payload.put("activeLocks", activeLocks.size());
+        payload.put("lastWriteAt", lastWriteAt.get());
+        notifyListeners("webdavActivity", payload);
+    }
+
+    // ==================== Storage Abstraction (Path + SAF) ====================
+
+    private StorageContext resolveStorageContext() {
+        Context ctx = getContext();
+        if (ctx == null) return null;
+        SharedPreferences prefs = ctx.getSharedPreferences(LocalStoragePlugin.PREFS_NAME, Context.MODE_PRIVATE);
+        String mode = prefs.getString(LocalStoragePlugin.KEY_MODE, "");
+        String folderPath = prefs.getString(LocalStoragePlugin.KEY_FOLDER_PATH, "");
+        String treeUriStr = prefs.getString(LocalStoragePlugin.KEY_TREE_URI, "");
+
+        if ("saf".equals(mode) && treeUriStr != null && !treeUriStr.isEmpty()) {
+            try {
+                Uri uri = Uri.parse(treeUriStr);
+                DocumentFile root = DocumentFile.fromTreeUri(ctx, uri);
+                if (root != null && root.exists() && root.canWrite()) {
+                    return new StorageContext("saf", null, null, root);
+                }
+            } catch (Exception ignored) {
+            }
+            return null;
+        }
+        if ("path".equals(mode) && folderPath != null && !folderPath.isEmpty()) {
+            try {
+                File root = resolvePathRoot(folderPath);
+                if (!root.exists()) {
+                    root.mkdirs();
+                }
+                if (root.exists() && root.isDirectory()) {
+                    return new StorageContext("path", root, root.getCanonicalPath(), null);
+                }
+            } catch (Exception ignored) {
+            }
+            return null;
+        }
+        return null;
+    }
+
+    private File resolvePathRoot(String relPath) {
+        String clean = normalizeRelPathStrict(relPath);
+        if (clean == null || clean.isEmpty()) {
+            clean = "Documents/FeiArtical";
+        }
+        File extRoot = Environment.getExternalStorageDirectory();
+        return new File(extRoot, clean);
+    }
+
+    private File resolveSafePathFile(StorageContext ctx, String relPath) {
+        if (!ctx.isPath()) return null;
+        try {
+            File target = relPath.isEmpty() ? ctx.pathRoot : new File(ctx.pathRoot, relPath);
+            String canonical = target.getCanonicalPath();
+            if (
+                canonical.equals(ctx.pathRootCanonical) ||
+                canonical.startsWith(ctx.pathRootCanonical + File.separator)
+            ) {
+                return target;
+            }
+        } catch (IOException ignored) {
+        }
+        return null;
+    }
+
+    private DocumentFile findSafNode(DocumentFile root, String relPath) {
+        if (relPath == null || relPath.isEmpty()) return root;
+        String[] parts = relPath.split("/");
+        DocumentFile current = root;
+        for (String seg : parts) {
+            if (seg.isEmpty()) continue;
+            DocumentFile next = current.findFile(seg);
+            if (next == null) return null;
+            current = next;
+        }
+        return current;
+    }
+
+    private NodeMeta statNode(StorageContext ctx, String relPath) {
+        if (ctx.isPath()) {
+            File f = resolveSafePathFile(ctx, relPath);
+            if (f == null || !f.exists()) return null;
+            long lm = f.lastModified();
+            if (lm <= 0) lm = System.currentTimeMillis();
+            return new NodeMeta(relPath, relPath.isEmpty() ? activeBasePath : f.getName(), f.isDirectory(), f.isFile() ? f.length() : 0L, lm);
+        }
+        if (ctx.isSaf()) {
+            DocumentFile df = findSafNode(ctx.safRoot, relPath);
+            if (df == null || !df.exists()) return null;
+            long lm = df.lastModified();
+            if (lm <= 0) lm = System.currentTimeMillis();
+            String name = relPath.isEmpty() ? activeBasePath : (df.getName() != null ? df.getName() : extractFileName(relPath));
+            return new NodeMeta(relPath, name, df.isDirectory(), df.isFile() ? df.length() : 0L, lm);
+        }
+        return null;
+    }
+
+    private List<NodeMeta> listVisibleChildren(StorageContext ctx, String dirRelPath) {
+        List<NodeMeta> result = new ArrayList<>();
+        if (ctx.isPath()) {
+            File dir = resolveSafePathFile(ctx, dirRelPath);
+            if (dir == null || !dir.isDirectory()) return result;
+            File[] children = dir.listFiles();
+            if (children == null) return result;
+            for (File child : children) {
+                String name = child.getName();
+                if (name == null || name.isEmpty()) continue;
+                String childRel = dirRelPath.isEmpty() ? name : (dirRelPath + "/" + name);
+                if (shouldHideInListing(childRel, name, child.isDirectory())) continue;
+                // Do not expose nested folders beyond depth 1
+                if (child.isDirectory() && !dirRelPath.isEmpty()) continue;
+                long lm = child.lastModified();
+                if (lm <= 0) lm = System.currentTimeMillis();
+                result.add(new NodeMeta(childRel, name, child.isDirectory(), child.isFile() ? child.length() : 0L, lm));
+            }
+        } else if (ctx.isSaf()) {
+            DocumentFile dir = findSafNode(ctx.safRoot, dirRelPath);
+            if (dir == null || !dir.isDirectory()) return result;
+            DocumentFile[] children = dir.listFiles();
+            if (children == null) return result;
+            for (DocumentFile child : children) {
+                String name = child.getName();
+                if (name == null || name.isEmpty()) continue;
+                String childRel = dirRelPath.isEmpty() ? name : (dirRelPath + "/" + name);
+                if (shouldHideInListing(childRel, name, child.isDirectory())) continue;
+                if (child.isDirectory() && !dirRelPath.isEmpty()) continue;
+                long lm = child.lastModified();
+                if (lm <= 0) lm = System.currentTimeMillis();
+                result.add(new NodeMeta(childRel, name, child.isDirectory(), child.isFile() ? child.length() : 0L, lm));
+            }
+        }
+        return result;
+    }
+
+    private byte[] readNodeBytes(StorageContext ctx, String relPath) {
+        if (ctx.isPath()) {
+            File f = resolveSafePathFile(ctx, relPath);
+            if (f == null || !f.isFile()) return null;
+            try (InputStream is = new FileInputStream(f)) {
+                return readAllBytes(is);
+            } catch (IOException e) {
+                return null;
+            }
+        }
+        if (ctx.isSaf()) {
+            DocumentFile df = findSafNode(ctx.safRoot, relPath);
+            if (df == null || !df.isFile()) return null;
+            try (InputStream is = getContext().getContentResolver().openInputStream(df.getUri())) {
+                if (is == null) return null;
+                return readAllBytes(is);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private boolean writeNodeFromTempFile(StorageContext ctx, String relPath, File tempFile) {
+        if (ctx.isPath()) {
+            File target = resolveSafePathFile(ctx, relPath);
+            if (target == null) return false;
+            File parent = target.getParentFile();
+            if (parent == null || !parent.exists() || !parent.isDirectory()) {
+                return false;
+            }
+            try (
+                InputStream is = new FileInputStream(tempFile);
+                OutputStream os = new FileOutputStream(target, false)
+            ) {
+                copyStream(is, os);
+                os.flush();
+                return true;
+            } catch (IOException e) {
+                return false;
+            }
+        }
+        if (ctx.isSaf()) {
+            int slash = relPath.lastIndexOf('/');
+            String dirPart = slash >= 0 ? relPath.substring(0, slash) : "";
+            String fileName = slash >= 0 ? relPath.substring(slash + 1) : relPath;
+            DocumentFile parent = findSafNode(ctx.safRoot, dirPart);
+            if (parent == null || !parent.isDirectory()) return false;
+
+            DocumentFile target = parent.findFile(fileName);
+            if (target == null) {
+                // application/octet-stream preserves exact .md / .txt filename without SAF appending .txt
+                target = parent.createFile("application/octet-stream", fileName);
+                if (target == null) {
+                    target = parent.createFile("text/plain", fileName);
+                }
+            }
+            if (target == null) return false;
+
+            OutputStream os = null;
+            try (InputStream is = new FileInputStream(tempFile)) {
+                try {
+                    os = getContext().getContentResolver().openOutputStream(target.getUri(), "wt");
+                } catch (IllegalArgumentException e) {
+                    try {
+                        os = getContext().getContentResolver().openOutputStream(target.getUri(), "rwt");
+                    } catch (IllegalArgumentException e2) {
+                        os = getContext().getContentResolver().openOutputStream(target.getUri(), "w");
+                    }
+                }
+                if (os == null) return false;
+                copyStream(is, os);
+                os.flush();
+                return true;
+            } catch (Exception e) {
+                return false;
+            } finally {
+                closeQuietly(os);
+            }
+        }
+        return false;
+    }
+
+    private boolean createTopLevelDirectory(StorageContext ctx, String dirName) {
+        if (ctx.isPath()) {
+            File dir = resolveSafePathFile(ctx, dirName);
+            if (dir == null) return false;
+            return dir.mkdir();
+        }
+        if (ctx.isSaf()) {
+            DocumentFile created = ctx.safRoot.createDirectory(dirName);
+            return created != null && created.isDirectory();
+        }
+        return false;
+    }
+
+    private boolean deleteNodeRecursive(StorageContext ctx, String relPath) {
+        if (ctx.isPath()) {
+            File target = resolveSafePathFile(ctx, relPath);
+            if (target == null || !target.exists()) return false;
+            return deleteFileRecursive(target);
+        }
+        if (ctx.isSaf()) {
+            DocumentFile target = findSafNode(ctx.safRoot, relPath);
+            if (target == null || !target.exists()) return false;
+            return target.delete();
+        }
+        return false;
+    }
+
+    private boolean deleteFileRecursive(File f) {
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) {
+                    if (!deleteFileRecursive(c)) return false;
+                }
+            }
+        }
+        return f.delete();
+    }
+
+    private boolean moveNode(StorageContext ctx, String srcRel, String dstRel, boolean isDir, boolean existedDst) {
+        if (ctx.isPath()) {
+            File src = resolveSafePathFile(ctx, srcRel);
+            File dst = resolveSafePathFile(ctx, dstRel);
+            if (src == null || dst == null || !src.exists()) return false;
+            File dstParent = dst.getParentFile();
+            if (dstParent == null || !dstParent.exists() || !dstParent.isDirectory()) return false;
+            if (existedDst && dst.exists()) {
+                deleteFileRecursive(dst);
+            }
+            if (src.renameTo(dst)) return true;
+            if (copyFileRecursive(src, dst)) {
+                deleteFileRecursive(src);
+                return true;
+            }
+            return false;
+        }
+        if (ctx.isSaf()) {
+            DocumentFile src = findSafNode(ctx.safRoot, srcRel);
+            if (src == null || !src.exists()) return false;
+
+            String srcParentRel = extractParentRel(srcRel);
+            String dstParentRel = extractParentRel(dstRel);
+            String dstName = extractFileName(dstRel);
+
+            if (existedDst) {
+                DocumentFile oldDst = findSafNode(ctx.safRoot, dstRel);
+                if (oldDst != null) {
+                    oldDst.delete();
+                }
+            }
+
+            // Same-directory rename (works for both files and top-level folders!)
+            if (srcParentRel.equals(dstParentRel)) {
+                return src.renameTo(dstName);
+            }
+
+            // Cross-folder file move: copy bytes then delete source
+            if (!isDir) {
+                if (!copySafFile(ctx, src, dstRel)) return false;
+                src.delete();
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    private boolean copyNode(StorageContext ctx, String srcRel, String dstRel, boolean isDir, boolean existedDst) {
+        if (ctx.isPath()) {
+            File src = resolveSafePathFile(ctx, srcRel);
+            File dst = resolveSafePathFile(ctx, dstRel);
+            if (src == null || dst == null || !src.exists()) return false;
+            File dstParent = dst.getParentFile();
+            if (dstParent == null || !dstParent.exists() || !dstParent.isDirectory()) return false;
+            if (existedDst && dst.exists()) {
+                deleteFileRecursive(dst);
+            }
+            return copyFileRecursive(src, dst);
+        }
+        if (ctx.isSaf()) {
+            DocumentFile src = findSafNode(ctx.safRoot, srcRel);
+            if (src == null || !src.exists()) return false;
+            if (existedDst) {
+                DocumentFile oldDst = findSafNode(ctx.safRoot, dstRel);
+                if (oldDst != null) oldDst.delete();
+            }
+            if (!isDir) {
+                return copySafFile(ctx, src, dstRel);
+            }
+            DocumentFile newDir = ctx.safRoot.createDirectory(dstRel);
+            if (newDir == null) return false;
+            DocumentFile[] children = src.listFiles();
+            if (children != null) {
+                for (DocumentFile c : children) {
+                    if (c.isFile() && c.getName() != null) {
+                        copySafFile(ctx, c, dstRel + "/" + c.getName());
+                    }
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private boolean copyFileRecursive(File src, File dst) {
+        if (src.isDirectory()) {
+            if (!dst.exists() && !dst.mkdirs()) return false;
+            File[] children = src.listFiles();
+            if (children != null) {
+                for (File c : children) {
+                    if (!copyFileRecursive(c, new File(dst, c.getName()))) return false;
+                }
+            }
+            return true;
+        }
+        try (
+            InputStream is = new FileInputStream(src);
+            OutputStream os = new FileOutputStream(dst, false)
+        ) {
+            copyStream(is, os);
+            os.flush();
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private boolean copySafFile(StorageContext ctx, DocumentFile src, String dstRel) {
+        File tmp = null;
+        try {
+            tmp = File.createTempFile("fei_dav_cp_", ".tmp", getContext().getCacheDir());
+            try (
+                InputStream is = getContext().getContentResolver().openInputStream(src.getUri());
+                OutputStream os = new FileOutputStream(tmp, false)
+            ) {
+                if (is == null) return false;
+                copyStream(is, os);
+                os.flush();
+            }
+            return writeNodeFromTempFile(ctx, dstRel, tmp);
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (tmp != null) tmp.delete();
+        }
+    }
+
+    // ==================== Path, Filter & Security Helpers ====================
+
+    private String extractRelPathFromUrlPath(String urlPath) {
+        if (urlPath == null || !urlPath.startsWith("/")) return null;
+        String basePrefix = "/" + activeBasePath;
+        String remainder;
+        if (urlPath.equals(basePrefix) || urlPath.equals(basePrefix + "/")) {
+            remainder = "";
+        } else if (urlPath.startsWith(basePrefix + "/")) {
+            remainder = urlPath.substring(basePrefix.length() + 1);
+        } else {
+            return null;
+        }
+        if (remainder.isEmpty()) return "";
+        String[] rawSegments = remainder.split("/");
+        StringBuilder sb = new StringBuilder();
+        for (String rawSeg : rawSegments) {
+            if (rawSeg.isEmpty()) continue;
+            String decoded = percentDecodeUtf8(rawSeg);
+            if (decoded == null) return null;
+            if (
+                decoded.isEmpty() ||
+                ".".equals(decoded) ||
+                "..".equals(decoded) ||
+                decoded.indexOf('/') >= 0 ||
+                decoded.indexOf('\\\\') >= 0 ||
+                decoded.indexOf('\\0') >= 0
+            ) {
+                return null;
+            }
+            if (sb.length() > 0) sb.append('/');
+            sb.append(decoded);
+        }
+        return sb.toString();
+    }
+
+    private boolean isForbiddenInternalPath(String relPath) {
+        if (relPath == null || relPath.isEmpty()) return false;
+        String lower = relPath.toLowerCase(Locale.ROOT);
+        if (hiddenRelPaths.contains(lower)) return true;
+        String firstSeg = relPath.contains("/") ? relPath.substring(0, relPath.indexOf('/')) : relPath;
+        if (LocalStoragePlugin.INDEX_FILE_NAME.equalsIgnoreCase(firstSeg)) return true;
+        if (LocalStoragePlugin.isReservedMediaDir(firstSeg)) return true;
+        return false;
+    }
+
+    private boolean isExplorerJunkPath(String relPath) {
+        if (relPath == null || relPath.isEmpty()) return false;
+        String fileName = extractFileName(relPath).toLowerCase(Locale.ROOT);
+        return (
+            "desktop.ini".equals(fileName) ||
+            "thumbs.db".equals(fileName) ||
+            ".ds_store".equals(fileName) ||
+            fileName.startsWith("._")
+        );
+    }
+
+    private boolean isTempFilePath(String relPath) {
+        if (relPath == null || relPath.isEmpty()) return false;
+        return LocalStoragePlugin.isIgnoredTempFileName(extractFileName(relPath));
+    }
+
+    private boolean shouldHideInListing(String childRel, String name, boolean isDir) {
+        if (name.startsWith(".")) return true;
+        if (isForbiddenInternalPath(childRel)) return true;
+        if (isExplorerJunkPath(childRel)) return true;
+        if (!isDir && LocalStoragePlugin.isIgnoredTempFileName(name)) return true;
+        return false;
+    }
+
+    private static int getPathDepth(String relPath) {
+        if (relPath == null || relPath.isEmpty()) return 0;
+        int depth = 1;
+        for (int i = 0; i < relPath.length(); i++) {
+            if (relPath.charAt(i) == '/') depth++;
+        }
+        return depth;
+    }
+
+    private static String extractParentRel(String relPath) {
+        int slash = relPath.lastIndexOf('/');
+        return slash >= 0 ? relPath.substring(0, slash) : "";
+    }
+
+    private static String extractFileName(String relPath) {
+        int slash = relPath.lastIndexOf('/');
+        return slash >= 0 ? relPath.substring(slash + 1) : relPath;
+    }
+
+    private static String normalizeRelPathStrict(String raw) {
+        if (raw == null) return "";
+        String cleaned = raw.replace('\\\\', '/').trim();
+        String[] parts = cleaned.split("/");
+        StringBuilder sb = new StringBuilder();
+        for (String p : parts) {
+            String seg = p.trim();
+            if (seg.isEmpty() || ".".equals(seg)) continue;
+            if ("..".equals(seg)) return null;
+            if (sb.length() > 0) sb.append('/');
+            sb.append(seg);
+        }
+        return sb.toString();
+    }
+
+    private static String sanitizeBasePath(String raw) {
+        if (raw == null) return "";
+        String cleaned = raw.trim().replaceAll("^/+|/+$", "");
+        cleaned = cleaned.replaceAll("[^a-zA-Z0-9_-]+", "-");
+        cleaned = cleaned.replaceAll("-+", "-").replaceAll("^-+|-+$", "");
+        if (cleaned.length() > 32) {
+            cleaned = cleaned.substring(0, 32);
+        }
+        return cleaned;
+    }
+
+    private static boolean isAllowedLanAddress(InetAddress addr) {
+        if (addr == null) return false;
+        if (addr.isLoopbackAddress() || addr.isSiteLocalAddress() || addr.isLinkLocalAddress()) {
+            return true;
+        }
+        byte[] raw = addr.getAddress();
+        if (raw != null && raw.length == 16) {
+            int first = raw[0] & 0xFF;
+            if ((first & 0xFE) == 0xFC) return true; // IPv6 ULA fc00::/7
+        }
+        return false;
+    }
+
+    // ==================== Lock & XML Formatting Helpers ====================
+
+    private void pruneExpiredLocks() {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, LockEntry> e : activeLocks.entrySet()) {
+            if (e.getValue().expiresAt < now) {
+                activeLocks.remove(e.getKey());
+            }
+        }
+    }
+
+    private LockEntry findLockForPath(String relPath) {
+        for (LockEntry e : activeLocks.values()) {
+            if (relPath.equals(e.relPath)) return e;
+        }
+        return null;
+    }
+
+    private void removeLocksForPathPrefix(String relPath) {
+        for (Map.Entry<String, LockEntry> e : activeLocks.entrySet()) {
+            String p = e.getValue().relPath;
+            if (p.equals(relPath) || p.startsWith(relPath + "/")) {
+                activeLocks.remove(e.getKey());
+            }
+        }
+    }
+
+    private String buildActiveLockXml(LockEntry entry) {
+        return
+            "<D:activelock>" +
+            "<D:locktype><D:write/></D:locktype>" +
+            "<D:lockscope><D:exclusive/></D:lockscope>" +
+            "<D:depth>0</D:depth>" +
+            "<D:owner>" + xmlEscape(entry.owner) + "</D:owner>" +
+            "<D:timeout>Second-600</D:timeout>" +
+            "<D:locktoken><D:href>" + xmlEscape(entry.token) + "</D:href></D:locktoken>" +
+            "</D:activelock>";
+    }
+
+    private static String extractLockOwner(String body) {
+        if (body == null || body.isEmpty()) return "FeiArticalClient";
+        int s = body.indexOf("<D:owner>");
+        int e = body.indexOf("</D:owner>");
+        if (s >= 0 && e > s) {
+            String inner = body.substring(s + 9, e).replaceAll("<[^>]+>", "").trim();
+            if (!inner.isEmpty()) return inner;
+        }
+        return "FeiArticalClient";
+    }
+
+    private String buildDavHref(String relPath, boolean isDir) {
+        StringBuilder sb = new StringBuilder();
+        sb.append('/').append(percentEncodeSegment(activeBasePath));
+        if (relPath != null && !relPath.isEmpty()) {
+            String[] parts = relPath.split("/");
+            for (String seg : parts) {
+                if (seg.isEmpty()) continue;
+                sb.append('/').append(percentEncodeSegment(seg));
+            }
+        }
+        if (isDir) {
+            sb.append('/');
+        }
+        return sb.toString();
+    }
+
+    private static String percentEncodeSegment(String seg) {
+        byte[] bytes = seg.getBytes(StandardCharsets.UTF_8);
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        final char[] hex = "0123456789ABCDEF".toCharArray();
+        for (byte b : bytes) {
+            int c = b & 0xFF;
+            if (
+                (c >= 'a' && c <= 'z') ||
+                (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') ||
+                c == '-' || c == '_' || c == '.' || c == '~'
+            ) {
+                sb.append((char) c);
+            } else {
+                sb.append('%');
+                sb.append(hex[(c >> 4) & 0x0F]);
+                sb.append(hex[c & 0x0F]);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String percentDecodeUtf8(String encoded) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(encoded.length());
+        for (int i = 0; i < encoded.length(); i++) {
+            char c = encoded.charAt(i);
+            if (c == '%') {
+                if (i + 2 >= encoded.length()) return null;
+                int hi = Character.digit(encoded.charAt(i + 1), 16);
+                int lo = Character.digit(encoded.charAt(i + 2), 16);
+                if (hi < 0 || lo < 0) return null;
+                baos.write((hi << 4) | lo);
+                i += 2;
+            } else {
+                byte[] utf8 = String.valueOf(c).getBytes(StandardCharsets.UTF_8);
+                baos.write(utf8, 0, utf8.length);
+            }
+        }
+        return new String(baos.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    private static String xmlEscape(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '&': sb.append("&amp;"); break;
+                case '<': sb.append("&lt;"); break;
+                case '>': sb.append("&gt;"); break;
+                case '"': sb.append("&quot;"); break;
+                case '\\'': sb.append("&apos;"); break;
+                default: sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String computeEtag(NodeMeta node) {
+        return "\\"" + Long.toHexString(node.size) + "-" + Long.toHexString(node.lastModified) + "\\"";
+    }
+
+    private static String formatHttpDate(long millis) {
+        SimpleDateFormat sdf = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US);
+        sdf.setTimeZone(TimeZone.getTimeZone("GMT"));
+        return sdf.format(new Date(millis));
+    }
+
+    private static long parseHttpDateSafe(String s) {
+        if (s == null || s.isEmpty()) return -1L;
+        String[] patterns = new String[] {
+            "EEE, dd MMM yyyy HH:mm:ss zzz",
+            "EEE, dd MMM yyyy HH:mm:ss 'GMT'",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        };
+        for (String p : patterns) {
+            try {
+                SimpleDateFormat sdf = new SimpleDateFormat(p, Locale.US);
+                sdf.setTimeZone(TimeZone.getTimeZone("GMT"));
+                Date d = sdf.parse(s);
+                if (d != null) return d.getTime();
+            } catch (Exception ignored) {
+            }
+        }
+        return -1L;
+    }
+
+    private static String formatIsoDate(long millis) {
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
+        sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return sdf.format(new Date(millis));
+    }
+
+    private static String guessContentType(String fileName) {
+        String lower = fileName != null ? fileName.toLowerCase(Locale.ROOT) : "";
+        if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "text/markdown; charset=utf-8";
+        if (lower.endsWith(".txt")) return "text/plain; charset=utf-8";
+        if (lower.endsWith(".json")) return "application/json; charset=utf-8";
+        if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html; charset=utf-8";
+        if (lower.endsWith(".xml")) return "application/xml; charset=utf-8";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".gif")) return "image/gif";
+        if (lower.endsWith(".webp")) return "image/webp";
+        return "application/octet-stream";
+    }
+
+    private static long[] parseByteRange(String spec, long totalLen) {
+        if (spec.contains(",")) return null;
+        int dash = spec.indexOf('-');
+        if (dash < 0) return null;
+        String startStr = spec.substring(0, dash).trim();
+        String endStr = spec.substring(dash + 1).trim();
+        try {
+            long start;
+            long end;
+            if (startStr.isEmpty()) {
+                long suffixLen = Long.parseLong(endStr);
+                if (suffixLen <= 0) return null;
+                start = Math.max(0L, totalLen - suffixLen);
+                end = totalLen - 1;
+            } else {
+                start = Long.parseLong(startStr);
+                end = endStr.isEmpty() ? (totalLen - 1) : Math.min(Long.parseLong(endStr), totalLen - 1);
+            }
+            if (start < 0 || start > end || start >= totalLen) return null;
+            return new long[] { start, end };
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    // ==================== HTTP I/O Helpers ====================
+
+    private static String readHeaderBlock(InputStream in) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int state = 0;
+        int b;
+        while ((b = in.read()) != -1) {
+            baos.write(b);
+            if (baos.size() > 65536) return null;
+            if (state == 0 && b == '\\r') state = 1;
+            else if (state == 1 && b == '\\n') state = 2;
+            else if (state == 2 && b == '\\r') state = 3;
+            else if (state == 3 && b == '\\n') break;
+            else state = (b == '\\r') ? 1 : 0;
+        }
+        if (baos.size() == 0) return null;
+        return baos.toString(StandardCharsets.UTF_8.name());
+    }
+
+    private static String readLineAscii(InputStream in) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int prev = -1;
+        int b;
+        while ((b = in.read()) != -1) {
+            if (b == '\\n') {
+                break;
+            }
+            if (prev == '\\r') {
+                baos.write('\\r');
+            }
+            if (b != '\\r') {
+                baos.write(b);
+            }
+            prev = b;
+            if (baos.size() > 8192) throw new IOException("Chunk line too long");
+        }
+        return baos.toString(StandardCharsets.US_ASCII.name());
+    }
+
+    private static long readRequestBodyToFile(
+        Map<String, String> headers,
+        InputStream in,
+        File target,
+        long maxBytes
+    ) throws IOException {
+        String te = headers.get("transfer-encoding");
+        boolean isChunked = te != null && te.toLowerCase(Locale.ROOT).contains("chunked");
+        long total = 0L;
+
+        try (OutputStream fos = new FileOutputStream(target, false)) {
+            if (isChunked) {
+                byte[] buf = new byte[16384];
+                while (true) {
+                    String sizeLine = readLineAscii(in).trim();
+                    int semi = sizeLine.indexOf(';');
+                    if (semi >= 0) sizeLine = sizeLine.substring(0, semi).trim();
+                    if (sizeLine.isEmpty()) continue;
+                    int chunkSize;
+                    try {
+                        chunkSize = Integer.parseInt(sizeLine, 16);
+                    } catch (NumberFormatException e) {
+                        throw new IOException("Invalid chunk size");
+                    }
+                    if (chunkSize == 0) {
+                        // Consume trailing headers until empty line
+                        while (true) {
+                            String trailer = readLineAscii(in);
+                            if (trailer == null || trailer.isEmpty()) break;
+                        }
+                        break;
+                    }
+                    int remaining = chunkSize;
+                    while (remaining > 0) {
+                        int n = in.read(buf, 0, Math.min(buf.length, remaining));
+                        if (n < 0) throw new IOException("Unexpected EOF in chunk");
+                        total += n;
+                        if (total > maxBytes) return -1L;
+                        fos.write(buf, 0, n);
+                        remaining -= n;
+                    }
+                    // Consume CRLF after chunk
+                    readLineAscii(in);
+                }
+            } else {
+                long contentLength = parseContentLength(headers);
+                if (contentLength > maxBytes) return -1L;
+                if (contentLength > 0) {
+                    byte[] buf = new byte[16384];
+                    long remaining = contentLength;
+                    while (remaining > 0) {
+                        int n = in.read(buf, 0, (int) Math.min(buf.length, remaining));
+                        if (n < 0) throw new IOException("Unexpected EOF");
+                        fos.write(buf, 0, n);
+                        remaining -= n;
+                        total += n;
+                    }
+                }
+            }
+            fos.flush();
+        }
+        return total;
+    }
+
+    private static String readSmallBodyUtf8(Map<String, String> headers, InputStream in) throws IOException {
+        String te = headers.get("transfer-encoding");
+        boolean isChunked = te != null && te.toLowerCase(Locale.ROOT).contains("chunked");
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        if (isChunked) {
+            byte[] buf = new byte[4096];
+            long total = 0L;
+            while (true) {
+                String sizeLine = readLineAscii(in).trim();
+                int semi = sizeLine.indexOf(';');
+                if (semi >= 0) sizeLine = sizeLine.substring(0, semi).trim();
+                if (sizeLine.isEmpty()) continue;
+                int chunkSize = Integer.parseInt(sizeLine, 16);
+                if (chunkSize == 0) {
+                    while (true) {
+                        String t = readLineAscii(in);
+                        if (t == null || t.isEmpty()) break;
+                    }
+                    break;
+                }
+                int rem = chunkSize;
+                while (rem > 0) {
+                    int n = in.read(buf, 0, Math.min(buf.length, rem));
+                    if (n < 0) break;
+                    if (total < 131072L) {
+                        baos.write(buf, 0, n);
+                    }
+                    total += n;
+                    rem -= n;
+                }
+                readLineAscii(in);
+            }
+            return baos.toString(StandardCharsets.UTF_8.name());
+        }
+        long len = parseContentLength(headers);
+        if (len <= 0) return "";
+        long cap = Math.min(len, 131072L);
+        byte[] buf = new byte[4096];
+        long rem = len;
+        while (rem > 0) {
+            int n = in.read(buf, 0, (int) Math.min(buf.length, rem));
+            if (n < 0) break;
+            if (baos.size() < cap) {
+                baos.write(buf, 0, (int) Math.min(n, cap - baos.size()));
+            }
+            rem -= n;
+        }
+        return baos.toString(StandardCharsets.UTF_8.name());
+    }
+
+    private static void drainSmallRequestBody(Map<String, String> headers, InputStream in) throws IOException {
+        readSmallBodyUtf8(headers, in);
+    }
+
+    private static boolean drainRequestBodySafely(Map<String, String> headers, InputStream in) {
+        try {
+            String te = headers.get("transfer-encoding");
+            if (te != null && te.toLowerCase(Locale.ROOT).contains("chunked")) {
+                return false;
+            }
+            long len = parseContentLength(headers);
+            if (len <= 0) return true;
+            if (len > 65536L) return false;
+            byte[] buf = new byte[4096];
+            long rem = len;
+            while (rem > 0) {
+                int n = in.read(buf, 0, (int) Math.min(buf.length, rem));
+                if (n < 0) return false;
+                rem -= n;
+            }
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static long parseContentLength(Map<String, String> headers) {
+        String cl = headers.get("content-length");
+        if (cl == null) return 0L;
+        try {
+            return Long.parseLong(cl.trim());
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    private static void writeSimpleResponse(
+        OutputStream out,
+        int code,
+        String reason,
+        String msg,
+        boolean keepAlive,
+        Map<String, String> extraHeaders
+    ) throws IOException {
+        byte[] body = msg != null ? msg.getBytes(StandardCharsets.UTF_8) : new byte[0];
+        writeBytesResponse(out, code, reason, "text/plain; charset=utf-8", body, keepAlive, extraHeaders);
+    }
+
+    private static void writeBytesResponse(
+        OutputStream out,
+        int code,
+        String reason,
+        String contentType,
+        byte[] body,
+        boolean keepAlive,
+        Map<String, String> extraHeaders
+    ) throws IOException {
+        writeBytesResponse(out, code, reason, contentType, body, keepAlive, extraHeaders, body.length);
+    }
+
+    private static void writeBytesResponse(
+        OutputStream out,
+        int code,
+        String reason,
+        String contentType,
+        byte[] body,
+        boolean keepAlive,
+        Map<String, String> extraHeaders,
+        long contentLengthOverride
+    ) throws IOException {
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("HTTP/1.1 ").append(code).append(' ').append(reason).append("\\r\\n");
+        sb.append("Date: ").append(formatHttpDate(System.currentTimeMillis())).append("\\r\\n");
+        sb.append("Server: FeiArtical-WebDAV/1.0\\r\\n");
+        if (code != 204 && contentType != null) {
+            sb.append("Content-Type: ").append(contentType).append("\\r\\n");
+        }
+        if (code != 204) {
+            sb.append("Content-Length: ").append(Math.max(0L, contentLengthOverride)).append("\\r\\n");
+        }
+        if (extraHeaders != null) {
+            for (Map.Entry<String, String> e : extraHeaders.entrySet()) {
+                sb.append(e.getKey()).append(": ").append(e.getValue()).append("\\r\\n");
+            }
+        }
+        sb.append("Connection: ").append(keepAlive ? "keep-alive" : "close").append("\\r\\n\\r\\n");
+        out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+        if (body != null && body.length > 0 && code != 204) {
+            out.write(body);
+        }
+        out.flush();
+    }
+
+    private static void copyStream(InputStream is, OutputStream os) throws IOException {
+        byte[] buf = new byte[16384];
+        int n;
+        while ((n = is.read(buf)) != -1) {
+            os.write(buf, 0, n);
+        }
+    }
+
+    private static byte[] readAllBytes(InputStream is) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buf = new byte[16384];
+        int n;
+        while ((n = is.read(buf)) != -1) {
+            baos.write(buf, 0, n);
+        }
+        return baos.toByteArray();
+    }
+
+    private static void closeQuietly(Socket s) {
+        if (s != null) {
+            try { s.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    private static void closeQuietly(OutputStream os) {
+        if (os != null) {
+            try { os.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    private static String resolveLanIpv4() {
+        String fallback = null;
+        try {
+            Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
+            if (ifaces == null) return null;
+            for (NetworkInterface nif : Collections.list(ifaces)) {
+                if (!nif.isUp() || nif.isLoopback()) continue;
+                String name = nif.getName().toLowerCase(Locale.ROOT);
+                for (InetAddress addr : Collections.list(nif.getInetAddresses())) {
+                    if (addr.isLoopbackAddress() || !(addr instanceof Inet4Address)) continue;
+                    String ip = addr.getHostAddress();
+                    if (ip == null) continue;
+                    if (name.startsWith("wlan") || name.startsWith("eth") || name.startsWith("ap")) {
+                        return ip;
+                    }
+                    if (fallback == null) {
+                        fallback = ip;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return fallback;
+    }
+}
+`;
+
   fs.writeFileSync(path.join(javaPkgDir, 'WebDavPlugin.java'), webDavPluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'LanServerPlugin.java'), lanServerPluginJava, 'utf8');
+  fs.writeFileSync(path.join(javaPkgDir, 'LanWebDavKeepAliveService.java'), lanWebDavKeepAliveServiceJava, 'utf8');
+  fs.writeFileSync(path.join(javaPkgDir, 'LanWebDavPlugin.java'), lanWebDavPluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'WifiSyncPlugin.java'), wifiSyncPluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'ReaderNativePlugin.java'), readerNativePluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'LocalStoragePlugin.java'), localStoragePluginJava, 'utf8');
   fs.writeFileSync(path.join(javaPkgDir, 'MainActivity.java'), mainActivityJava, 'utf8');
-  console.log(`Installed native WebDavPlugin, LanServerPlugin, WifiSyncPlugin, ReaderNativePlugin, LocalStoragePlugin & MainActivity into ${javaPkgDir}`);
+  console.log(`Installed native WebDavPlugin, LanServerPlugin, LanWebDavPlugin, WifiSyncPlugin, ReaderNativePlugin, LocalStoragePlugin & MainActivity into ${javaPkgDir}`);
 }

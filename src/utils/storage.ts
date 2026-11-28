@@ -27,6 +27,7 @@ const KEYS = {
   TREE_TOOLBAR_ORDER_LEGACY: 'feiartical_tree_toolbar_order_v1',
   TREE_TOOLBAR_ORDER: 'feiartical_tree_toolbar_order_v2',
   DOC_TOOLBAR_ORDER: 'feiartical_doc_toolbar_order_v1',
+  LAN_WEBDAV: 'feiartical_lan_webdav_v1',
 };
 
 export type LocalStorageBackendMode = 'saf' | 'path' | 'web-fs' | 'browser-only';
@@ -379,5 +380,63 @@ export function saveDocToolbarOrder(order: DocToolbarIconId[]): void {
   }
 }
 
+export interface LanWebDavConfig {
+  customPath: string;
+}
 
+const LAN_WEBDAV_SLUG_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
+export function sanitizeLanWebDavPath(raw: string): string {
+  const cleaned = String(raw || '')
+    .trim()
+    .replace(/^\/+|\/+$/g, '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  return cleaned;
+}
+
+export function generateDefaultLanWebDavPath(): string {
+  const chars: string[] = [];
+  const len = 4;
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const buf = new Uint8Array(len);
+    crypto.getRandomValues(buf);
+    for (let i = 0; i < len; i++) {
+      chars.push(LAN_WEBDAV_SLUG_ALPHABET[buf[i] % LAN_WEBDAV_SLUG_ALPHABET.length]);
+    }
+  } else {
+    for (let i = 0; i < len; i++) {
+      chars.push(
+        LAN_WEBDAV_SLUG_ALPHABET[Math.floor(Math.random() * LAN_WEBDAV_SLUG_ALPHABET.length)]
+      );
+    }
+  }
+  return `dav-${chars.join('')}`;
+}
+
+export function loadLanWebDavConfig(): LanWebDavConfig {
+  const raw = safeParse<Partial<LanWebDavConfig> | null>(
+    localStorage.getItem(KEYS.LAN_WEBDAV),
+    null
+  );
+  const existing = raw?.customPath ? sanitizeLanWebDavPath(raw.customPath) : '';
+  if (existing) {
+    return { customPath: existing };
+  }
+  const generated: LanWebDavConfig = { customPath: generateDefaultLanWebDavPath() };
+  saveLanWebDavConfig(generated);
+  return generated;
+}
+
+export function saveLanWebDavConfig(config: LanWebDavConfig): LanWebDavConfig {
+  const cleaned = sanitizeLanWebDavPath(config.customPath) || generateDefaultLanWebDavPath();
+  const normalized: LanWebDavConfig = { customPath: cleaned };
+  try {
+    localStorage.setItem(KEYS.LAN_WEBDAV, JSON.stringify(normalized));
+  } catch {
+    // ignore storage quota errors
+  }
+  return normalized;
+}

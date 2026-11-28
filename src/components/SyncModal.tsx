@@ -9,8 +9,10 @@ import {
   FileCode2,
   Folder,
   GripVertical,
+  HardDrive,
   Moon,
   Music2,
+  RefreshCw,
   Square,
   Sun,
   Trash2,
@@ -18,8 +20,16 @@ import {
   X,
 } from 'lucide-react';
 import { MdictDictionarySummary, WebDavConfig, WhistleSensitivity } from '../types';
+import {
+  buildWindowsMountCommand,
+  buildWindowsUnmountCommand,
+} from '../utils/lanWebdav';
 import { stripDictExt } from '../utils/mdictStorage';
-import { AppThemeMode } from '../utils/storage';
+import {
+  AppThemeMode,
+  generateDefaultLanWebDavPath,
+  sanitizeLanWebDavPath,
+} from '../utils/storage';
 import { DEFAULT_JIANGUOYUN_URL, normalizeWebDavBaseUrl } from '../utils/webdavSync';
 import { formatMicErrorMessage, WhistleDetector } from '../utils/whistleDetector';
 
@@ -36,6 +46,15 @@ interface SyncModalProps {
   lanLoading: boolean;
   onToggleLan: (next: boolean) => void;
   onCopyLanUrl: (url: string) => void;
+  lanWebDavRunning: boolean;
+  lanWebDavUrl: string;
+  lanWebDavLoading: boolean;
+  lanWebDavPath: string;
+  lanWebDavSupported: boolean;
+  localFsReady: boolean;
+  onToggleLanWebDav: (next: boolean) => void;
+  onUpdateLanWebDavPath: (nextPath: string) => void;
+  onCopyLanWebDavText: (text: string, toastMsg: string) => void;
   dictionaries: MdictDictionarySummary[];
   activeDictId: string | null;
   onImportDictFiles: (files: FileList) => Promise<void>;
@@ -60,6 +79,15 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   lanLoading,
   onToggleLan,
   onCopyLanUrl,
+  lanWebDavRunning,
+  lanWebDavUrl,
+  lanWebDavLoading,
+  lanWebDavPath,
+  lanWebDavSupported,
+  localFsReady,
+  onToggleLanWebDav,
+  onUpdateLanWebDavPath,
+  onCopyLanWebDavText,
   dictionaries,
   activeDictId,
   onImportDictFiles,
@@ -84,6 +112,33 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const [showEncPassword, setShowEncPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [webDavPathDraft, setWebDavPathDraft] = useState(lanWebDavPath);
+  const [webDavPathError, setWebDavPathError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setWebDavPathDraft(lanWebDavPath);
+  }, [lanWebDavPath]);
+
+  const handleCommitWebDavPath = () => {
+    const cleaned = sanitizeLanWebDavPath(webDavPathDraft);
+    if (!cleaned) {
+      setWebDavPathError('路径仅支持字母、数字、短横线或下划线');
+      setWebDavPathDraft(lanWebDavPath);
+      return;
+    }
+    setWebDavPathError(null);
+    setWebDavPathDraft(cleaned);
+    if (cleaned !== lanWebDavPath) {
+      onUpdateLanWebDavPath(cleaned);
+    }
+  };
+
+  const handleRandomizeWebDavPath = () => {
+    const next = generateDefaultLanWebDavPath();
+    setWebDavPathError(null);
+    setWebDavPathDraft(next);
+    onUpdateLanWebDavPath(next);
+  };
 
   const dictFileInputRef = useRef<HTMLInputElement>(null);
   const dictCssInputRef = useRef<HTMLInputElement>(null);
@@ -592,6 +647,391 @@ export const SyncModal: React.FC<SyncModalProps> = ({
             </div>
           </section>
 
+          {/* 区域：局域网网络磁盘（WebDAV 映射为 Windows 网络驱动器） */}
+          <section className="space-y-2">
+            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] divide-y divide-[var(--fei-border)] overflow-hidden">
+              <div className="flex items-center justify-between gap-3 px-3.5 h-11">
+                <div className="flex items-center gap-2 min-w-0">
+                  <HardDrive
+                    className="w-4 h-4 text-[var(--fei-text-muted)] shrink-0"
+                    strokeWidth={1.75}
+                  />
+                  <span className="text-[13.5px] font-medium text-[var(--fei-text-primary)] truncate">
+                    局域网网络磁盘
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={lanWebDavRunning}
+                  aria-label="切换局域网网络磁盘"
+                  disabled={lanWebDavLoading}
+                  onClick={() => onToggleLanWebDav(!lanWebDavRunning)}
+                  className={`relative inline-flex h-[22px] w-[40px] shrink-0 items-center rounded-full border transition-colors duration-150 disabled:opacity-50 cursor-pointer ${
+                    lanWebDavRunning
+                      ? 'bg-[var(--fei-switch-track-on)] border-[var(--fei-switch-track-on)]'
+                      : 'bg-[var(--fei-switch-track-off)] border-[var(--fei-border-strong)]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-[16px] w-[16px] rounded-full transition-transform duration-150 ${
+                      lanWebDavRunning
+                        ? 'translate-x-[20px] bg-[var(--fei-switch-thumb-on)]'
+                        : 'translate-x-[2px] bg-[var(--fei-switch-thumb-off)]'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* 自定义固定路径 */}
+              <div className="px-3.5 py-2.5 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-[12.5px] text-[var(--fei-text-muted)] shrink-0">
+                    路径
+                  </span>
+                  <div className="flex-1 min-w-0 flex items-center rounded-lg border border-[var(--fei-border)] bg-[var(--fei-bg-surface)] px-2 h-8">
+                    <span className="text-[12.5px] font-code text-[var(--fei-text-muted)] select-none">
+                      /
+                    </span>
+                    <input
+                      type="text"
+                      value={webDavPathDraft}
+                      onChange={(e) => {
+                        setWebDavPathDraft(e.target.value);
+                        if (webDavPathError) setWebDavPathError(null);
+                      }}
+                      onBlur={handleCommitWebDavPath}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleCommitWebDavPath();
+                        }
+                      }}
+                      placeholder="dav-xxxx"
+                      maxLength={32}
+                      spellCheck={false}
+                      autoComplete="off"
+                      aria-label="自定义网络磁盘路径"
+                      className="flex-1 min-w-0 bg-transparent px-1 text-[12.5px] font-code text-[var(--fei-text-primary)] placeholder:text-[var(--fei-text-muted)] outline-none"
+                    />
+                    <span className="text-[12.5px] font-code text-[var(--fei-text-muted)] select-none">
+                      /
+                    </span>
+                  </div>
+                  {sanitizeLanWebDavPath(webDavPathDraft) &&
+                  sanitizeLanWebDavPath(webDavPathDraft) !== lanWebDavPath ? (
+                    <button
+                      type="button"
+                      onClick={handleCommitWebDavPath}
+                      className="h-8 px-2.5 rounded-lg border border-[var(--fei-border-strong)] text-[12px] text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors cursor-pointer"
+                    >
+                      应用
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleRandomizeWebDavPath}
+                      title="重新生成随机路径"
+                      aria-label="重新生成随机路径"
+                      className="h-8 w-8 rounded-lg border border-[var(--fei-border)] inline-flex items-center justify-center text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" strokeWidth={1.75} />
+                    </button>
+                  )}
+                </div>
+                {webDavPathError ? (
+                  <p className="text-[11.5px] text-[var(--fei-text-primary)]">
+                    {webDavPathError}
+                  </p>
+                ) : (
+                  <p className="text-[11.5px] leading-relaxed text-[var(--fei-text-muted)]">
+                    固定路径可让 Windows 记住映射盘符（如 W:），仅限同一局域网设备访问
+                  </p>
+                )}
+              </div>
+
+              {/* 运行中：WebDAV 地址、Windows 映射命令与指引 */}
+              {lanWebDavRunning && lanWebDavUrl && (
+                <div className="px-3.5 py-2.5 space-y-2.5">
+                  <div className="space-y-1">
+                    <div className="text-[11.5px] text-[var(--fei-text-muted)]">
+                      网络磁盘地址（WebDAV）
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12.5px] font-code text-[var(--fei-text-primary)] truncate select-all">
+                        {lanWebDavUrl}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onCopyLanWebDavText(lanWebDavUrl, '已复制网络磁盘地址')}
+                        aria-label="复制网络磁盘地址"
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[12px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors cursor-pointer"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>复制</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1 pt-1.5 border-t border-[var(--fei-border)]">
+                    <div className="text-[11.5px] text-[var(--fei-text-muted)]">
+                      Windows 一键映射命令（CMD / PowerShell）
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11.5px] font-code text-[var(--fei-text-primary)] truncate select-all">
+                        {buildWindowsMountCommand(lanWebDavUrl, 'W:')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onCopyLanWebDavText(
+                            buildWindowsMountCommand(lanWebDavUrl, 'W:'),
+                            '已复制 Windows 映射命令'
+                          )
+                        }
+                        aria-label="复制 Windows 映射命令"
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[12px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors cursor-pointer"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>复制</span>
+                      </button>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-[var(--fei-text-muted)]">
+                      或打开「此电脑」→「映射网络驱动器」选择 W: 并粘贴上方地址；断开映射命令：
+                      <span className="font-code select-all">
+                        {' '}
+                        {buildWindowsUnmountCommand('W:')}
+                      </span>
+                    </p>
+                  </div>
+
+                  <p className="text-[11px] leading-relaxed text-[var(--fei-text-muted)] pt-1 border-t border-[var(--fei-border)]">
+                    支持在电脑端直接编辑、新建、删除、重命名与移动；仅支持单层文件夹，加密文档在电脑端自动隐藏
+                  </p>
+                </div>
+              )}
+
+              {!lanWebDavRunning && (!lanWebDavSupported || !localFsReady) && (
+                <div className="px-3.5 py-2">
+                  <p className="text-[11.5px] leading-relaxed text-[var(--fei-text-muted)]">
+                    {!lanWebDavSupported
+                      ? '需在 Android 手机端开启，开启后可在 Windows 资源管理器中映射为网络磁盘（如 W:）'
+                      : '开启前请先在下方绑定并授权本地文档目录'}
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* 区域：电脑直连（同飞记局域网直连） */}
+          <section className="space-y-2">
+            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] divide-y divide-[var(--fei-border)] overflow-hidden">
+              <div className="flex items-center justify-between gap-3 px-3.5 h-11">
+                <span className="text-[13.5px] font-medium text-[var(--fei-text-primary)]">
+                  电脑直连
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={lanRunning}
+                  aria-label="切换电脑直连"
+                  disabled={lanLoading}
+                  onClick={() => onToggleLan(!lanRunning)}
+                  className={`relative inline-flex h-[22px] w-[40px] shrink-0 items-center rounded-full border transition-colors duration-150 disabled:opacity-50 cursor-pointer ${
+                    lanRunning
+                      ? 'bg-[var(--fei-switch-track-on)] border-[var(--fei-switch-track-on)]'
+                      : 'bg-[var(--fei-switch-track-off)] border-[var(--fei-border-strong)]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-[16px] w-[16px] rounded-full transition-transform duration-150 ${
+                      lanRunning
+                        ? 'translate-x-[20px] bg-[var(--fei-switch-thumb-on)]'
+                        : 'translate-x-[2px] bg-[var(--fei-switch-thumb-off)]'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {lanRunning && lanUrl && (
+                <div className="px-3.5 py-2.5 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12.5px] font-code text-[var(--fei-text-primary)] truncate select-all">
+                      {lanUrl}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onCopyLanUrl(lanUrl)}
+                      aria-label="复制直连地址"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[12px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>复制</span>
+                    </button>
+                  </div>
+                  <p className="text-[11.5px] leading-relaxed text-[var(--fei-text-muted)]">
+                    手机与电脑连入同一 Wi-Fi，在电脑浏览器打开上方地址即可管理文档或传书
+                    {config.encryptionPassword ? '（需输入加密密码验证）' : ''}
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* 区域：离线词典（导入与切换 .mdx 词库及配套 .css 样式） */}
+          <section className="space-y-2">
+            <div className="flex items-center justify-between gap-2 px-0.5">
+              <h3 className="text-[13.5px] font-medium text-[var(--fei-text-primary)]">
+                词典
+              </h3>
+              <input
+                ref={dictFileInputRef}
+                type="file"
+                multiple
+                onChange={handleDictFileChange}
+                className="hidden"
+              />
+              <input
+                ref={dictCssInputRef}
+                type="file"
+                onChange={handleDictCssFileChange}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => dictFileInputRef.current?.click()}
+                disabled={dictImporting}
+                className="h-7 px-2.5 rounded-lg inline-flex items-center gap-1 text-[12px] font-medium border border-[var(--fei-border)] bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] disabled:opacity-60 transition-colors whitespace-nowrap"
+              >
+                <Upload className="w-3.5 h-3.5" strokeWidth={1.75} />
+                <span>{dictImporting ? '解析中…' : '导入词库'}</span>
+              </button>
+            </div>
+
+            {dictErrorMsg && (
+              <div className="px-3 py-2 rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[12px] text-[var(--fei-text-primary)] leading-relaxed">
+                {dictErrorMsg}
+              </div>
+            )}
+
+            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] overflow-hidden">
+              {dictionaries.length === 0 ? (
+                <div className="px-3.5 py-3 text-[12px] leading-relaxed text-[var(--fei-text-muted)]">
+                  暂未导入词典，支持导入 .mdx 词库及配套 .css 样式文件
+                </div>
+              ) : (
+                <div
+                  ref={dictListRef}
+                  className="max-h-[200px] overflow-y-auto divide-y divide-[var(--fei-border)]"
+                >
+                  {dictionaries.map((dict) => {
+                    const isActive = dict.id === activeDictId;
+                    const isBusy = busyDictId === dict.id;
+                    const isDraggingThis = draggingDictId === dict.id;
+                    const canReorder = dictionaries.length > 1;
+                    const displayName = stripDictExt(dict.fileName) || dict.title;
+                    return (
+                      <div
+                        key={dict.id}
+                        ref={(el) => {
+                          dictRowRefs.current.set(dict.id, el);
+                        }}
+                        onPointerDown={(e) => handleDictRowPointerDown(e, dict.id, false)}
+                        onClick={() => {
+                          if (suppressDictClickRef.current) return;
+                          onSelectDict(dict.id);
+                        }}
+                        title={canReorder ? '点击设为优先词典，拖动可调整词典顺序' : undefined}
+                        className={`flex items-center gap-2 px-3 py-2 min-h-[42px] cursor-pointer select-none transition-colors ${
+                          isDraggingThis
+                            ? 'bg-[var(--fei-bg-selected)] ring-1 ring-inset ring-[var(--fei-border-strong)] opacity-90 relative z-10'
+                            : isActive
+                              ? 'bg-[var(--fei-bg-selected)]'
+                              : 'hover:bg-[var(--fei-bg-hover)]'
+                        }`}
+                      >
+                        {canReorder && (
+                          <div
+                            role="presentation"
+                            onPointerDown={(e) => {
+                              e.stopPropagation();
+                              handleDictRowPointerDown(e, dict.id, true);
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            title="拖动调整词典顺序"
+                            aria-hidden="true"
+                            className="w-5 h-7 -ml-1.5 inline-flex items-center justify-center text-[var(--fei-text-muted)]/75 hover:text-[var(--fei-text-primary)] cursor-grab active:cursor-grabbing touch-none shrink-0"
+                          >
+                            <GripVertical className="w-3.5 h-3.5" strokeWidth={1.8} />
+                          </div>
+                        )}
+
+                        <div className="w-4 h-4 flex items-center justify-center shrink-0 text-[var(--fei-text-primary)]">
+                          {isActive ? (
+                            <Check className="w-3.5 h-3.5" strokeWidth={2} />
+                          ) : (
+                            <BookA
+                              className="w-3.5 h-3.5 text-[var(--fei-text-muted)]"
+                              strokeWidth={1.65}
+                            />
+                          )}
+                        </div>
+
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[13px] font-medium text-[var(--fei-text-primary)] truncate">
+                            {displayName}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-0.5 shrink-0">
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              pendingCssDictIdRef.current = dict.id;
+                              dictCssInputRef.current?.click();
+                            }}
+                            title={dict.cssFileName ? '替换配套 .css 样式' : '导入配套 .css 样式'}
+                            aria-label={`为 ${displayName} 导入样式`}
+                            className="h-7 px-1.5 inline-flex items-center gap-1 rounded-lg text-[11.5px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors disabled:opacity-50"
+                          >
+                            <FileCode2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                            <span>{dict.cssFileName ? '换样式' : '样式'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              setBusyDictId(dict.id);
+                              setDictErrorMsg(null);
+                              try {
+                                await onDeleteDict(dict.id);
+                              } catch (err) {
+                                setDictErrorMsg(
+                                  err instanceof Error ? err.message : '删除词典失败'
+                                );
+                              } finally {
+                                setBusyDictId(null);
+                              }
+                            }}
+                            title="移除词库"
+                            aria-label={`移除词库 ${displayName}`}
+                            className="w-7 h-7 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0 disabled:opacity-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+
           {/* 区域一：同步设置 */}
           <section className="space-y-2">
             <h3 className="px-0.5 text-[13.5px] font-medium text-[var(--fei-text-primary)]">
@@ -770,61 +1210,6 @@ export const SyncModal: React.FC<SyncModalProps> = ({
             )}
           </section>
 
-          {/* 区域三：电脑直连（同飞记局域网直连） */}
-          <section className="space-y-2">
-            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] divide-y divide-[var(--fei-border)] overflow-hidden">
-              <div className="flex items-center justify-between gap-3 px-3.5 h-11">
-                <span className="text-[13.5px] font-medium text-[var(--fei-text-primary)]">
-                  电脑直连
-                </span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={lanRunning}
-                  aria-label="切换电脑直连"
-                  disabled={lanLoading}
-                  onClick={() => onToggleLan(!lanRunning)}
-                  className={`relative inline-flex h-[22px] w-[40px] shrink-0 items-center rounded-full border transition-colors duration-150 disabled:opacity-50 cursor-pointer ${
-                    lanRunning
-                      ? 'bg-[var(--fei-switch-track-on)] border-[var(--fei-switch-track-on)]'
-                      : 'bg-[var(--fei-switch-track-off)] border-[var(--fei-border-strong)]'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-[16px] w-[16px] rounded-full transition-transform duration-150 ${
-                      lanRunning
-                        ? 'translate-x-[20px] bg-[var(--fei-switch-thumb-on)]'
-                        : 'translate-x-[2px] bg-[var(--fei-switch-thumb-off)]'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              {lanRunning && lanUrl && (
-                <div className="px-3.5 py-2.5 space-y-1.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[12.5px] font-code text-[var(--fei-text-primary)] truncate select-all">
-                      {lanUrl}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => onCopyLanUrl(lanUrl)}
-                      aria-label="复制直连地址"
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[12px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] shrink-0 transition-colors"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>复制</span>
-                    </button>
-                  </div>
-                  <p className="text-[11.5px] leading-relaxed text-[var(--fei-text-muted)]">
-                    手机与电脑连入同一 Wi-Fi，在电脑浏览器打开上方地址即可管理文档或传书
-                    {config.encryptionPassword ? '（需输入加密密码验证）' : ''}
-                  </p>
-                </div>
-              )}
-            </div>
-          </section>
-
           {/* 区域四：本地存储目录 */}
           <section className="space-y-2">
             <h3 className="text-[13.5px] font-medium text-[var(--fei-text-primary)] px-0.5">
@@ -844,160 +1229,6 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               >
                 更改
               </button>
-            </div>
-          </section>
-
-          {/* 区域五：离线词典（导入与切换 .mdx 词库及配套 .css 样式） */}
-          <section className="space-y-2">
-            <div className="flex items-center justify-between gap-2 px-0.5">
-              <h3 className="text-[13.5px] font-medium text-[var(--fei-text-primary)]">
-                词典
-              </h3>
-              <input
-                ref={dictFileInputRef}
-                type="file"
-                multiple
-                onChange={handleDictFileChange}
-                className="hidden"
-              />
-              <input
-                ref={dictCssInputRef}
-                type="file"
-                onChange={handleDictCssFileChange}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => dictFileInputRef.current?.click()}
-                disabled={dictImporting}
-                className="h-7 px-2.5 rounded-lg inline-flex items-center gap-1 text-[12px] font-medium border border-[var(--fei-border)] bg-[var(--fei-bg-subtle)] text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-selected)] disabled:opacity-60 transition-colors whitespace-nowrap"
-              >
-                <Upload className="w-3.5 h-3.5" strokeWidth={1.75} />
-                <span>{dictImporting ? '解析中…' : '导入词库'}</span>
-              </button>
-            </div>
-
-            {dictErrorMsg && (
-              <div className="px-3 py-2 rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] text-[12px] text-[var(--fei-text-primary)] leading-relaxed">
-                {dictErrorMsg}
-              </div>
-            )}
-
-            <div className="rounded-xl bg-[var(--fei-bg-subtle)] border border-[var(--fei-border)] overflow-hidden">
-              {dictionaries.length === 0 ? (
-                <div className="px-3.5 py-3 text-[12px] leading-relaxed text-[var(--fei-text-muted)]">
-                  暂未导入词典，支持导入 .mdx 词库及配套 .css 样式文件
-                </div>
-              ) : (
-                <div
-                  ref={dictListRef}
-                  className="max-h-[200px] overflow-y-auto divide-y divide-[var(--fei-border)]"
-                >
-                  {dictionaries.map((dict) => {
-                    const isActive = dict.id === activeDictId;
-                    const isBusy = busyDictId === dict.id;
-                    const isDraggingThis = draggingDictId === dict.id;
-                    const canReorder = dictionaries.length > 1;
-                    const displayName = stripDictExt(dict.fileName) || dict.title;
-                    return (
-                      <div
-                        key={dict.id}
-                        ref={(el) => {
-                          dictRowRefs.current.set(dict.id, el);
-                        }}
-                        onPointerDown={(e) => handleDictRowPointerDown(e, dict.id, false)}
-                        onClick={() => {
-                          if (suppressDictClickRef.current) return;
-                          onSelectDict(dict.id);
-                        }}
-                        title={canReorder ? '点击设为优先词典，拖动可调整词典顺序' : undefined}
-                        className={`flex items-center gap-2 px-3 py-2 min-h-[42px] cursor-pointer select-none transition-colors ${
-                          isDraggingThis
-                            ? 'bg-[var(--fei-bg-selected)] ring-1 ring-inset ring-[var(--fei-border-strong)] opacity-90 relative z-10'
-                            : isActive
-                              ? 'bg-[var(--fei-bg-selected)]'
-                              : 'hover:bg-[var(--fei-bg-hover)]'
-                        }`}
-                      >
-                        {canReorder && (
-                          <div
-                            role="presentation"
-                            onPointerDown={(e) => {
-                              e.stopPropagation();
-                              handleDictRowPointerDown(e, dict.id, true);
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            title="拖动调整词典顺序"
-                            aria-hidden="true"
-                            className="w-5 h-7 -ml-1.5 inline-flex items-center justify-center text-[var(--fei-text-muted)]/75 hover:text-[var(--fei-text-primary)] cursor-grab active:cursor-grabbing touch-none shrink-0"
-                          >
-                            <GripVertical className="w-3.5 h-3.5" strokeWidth={1.8} />
-                          </div>
-                        )}
-
-                        <div className="w-4 h-4 flex items-center justify-center shrink-0 text-[var(--fei-text-primary)]">
-                          {isActive ? (
-                            <Check className="w-3.5 h-3.5" strokeWidth={2} />
-                          ) : (
-                            <BookA
-                              className="w-3.5 h-3.5 text-[var(--fei-text-muted)]"
-                              strokeWidth={1.65}
-                            />
-                          )}
-                        </div>
-
-                        <div className="flex-1 min-w-0">
-                          <div className="text-[13px] font-medium text-[var(--fei-text-primary)] truncate">
-                            {displayName}
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-0.5 shrink-0">
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              pendingCssDictIdRef.current = dict.id;
-                              dictCssInputRef.current?.click();
-                            }}
-                            title={dict.cssFileName ? '替换配套 .css 样式' : '导入配套 .css 样式'}
-                            aria-label={`为 ${displayName} 导入样式`}
-                            className="h-7 px-1.5 inline-flex items-center gap-1 rounded-lg text-[11.5px] text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors disabled:opacity-50"
-                          >
-                            <FileCode2 className="w-3.5 h-3.5" strokeWidth={1.75} />
-                            <span>{dict.cssFileName ? '换样式' : '样式'}</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              setBusyDictId(dict.id);
-                              setDictErrorMsg(null);
-                              try {
-                                await onDeleteDict(dict.id);
-                              } catch (err) {
-                                setDictErrorMsg(
-                                  err instanceof Error ? err.message : '删除词典失败'
-                                );
-                              } finally {
-                                setBusyDictId(null);
-                              }
-                            }}
-                            title="移除词库"
-                            aria-label={`移除词库 ${displayName}`}
-                            className="w-7 h-7 inline-flex items-center justify-center rounded-lg text-[var(--fei-text-muted)] hover:text-[var(--fei-text-primary)] hover:bg-[var(--fei-bg-hover)] transition-colors shrink-0 disabled:opacity-50"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
             </div>
           </section>
 

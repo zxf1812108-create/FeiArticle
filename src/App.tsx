@@ -38,6 +38,7 @@ import { SyncModal } from './components/SyncModal';
 import { TrashModal } from './components/TrashModal';
 import {
   checkAndPullExternalLocalFsChanges,
+  getEncryptedDocRelPaths,
   resetLocalFsSyncManifest,
   saveLocalImageFiles,
   scanAndMergeFromLocalFs,
@@ -83,6 +84,7 @@ import {
   loadDocToolbarOrder,
   loadFolders,
   loadFoldersDirty,
+  loadLanWebDavConfig,
   loadLastOpenedDocId,
   loadPurgedSyncRecords,
   loadQuotaStats,
@@ -92,6 +94,7 @@ import {
   loadTreeToolbarOrder,
   loadTreeViewState,
   loadWebDavConfig,
+  LanWebDavConfig,
   MAX_DOC_FONT_SIZE,
   MIN_DOC_FONT_SIZE,
   saveActiveMdictId,
@@ -99,6 +102,7 @@ import {
   saveDocToolbarOrder,
   saveFolders,
   saveFoldersDirty,
+  saveLanWebDavConfig,
   saveLastOpenedDocId,
   savePurgedSyncRecords,
   saveQuotaStats,
@@ -152,6 +156,15 @@ import {
   stopLanDirectServer,
   subscribeLanDirectActions,
 } from './utils/lanDirect';
+import {
+  isLanWebDavNativeAvailable,
+  isLanWebDavWriteBusyNow,
+  LanWebDavRenameRecord,
+  startLanWebDavServer,
+  stopLanWebDavServer,
+  subscribeLanWebDavChanges,
+  updateLanWebDavHiddenPaths,
+} from './utils/lanWebdav';
 import { formatMicErrorMessage, WhistleDetector } from './utils/whistleDetector';
 import {
   extractBackupAnchorText,
@@ -347,6 +360,16 @@ export default function App() {
   const [lanRunning, setLanRunning] = useState(false);
   const [lanUrl, setLanUrl] = useState('');
   const [lanLoading, setLanLoading] = useState(false);
+  const [lanWebDavConfig, setLanWebDavConfig] = useState<LanWebDavConfig>(() =>
+    loadLanWebDavConfig()
+  );
+  const lanWebDavConfigRef = useRef(lanWebDavConfig);
+  lanWebDavConfigRef.current = lanWebDavConfig;
+  const [lanWebDavRunning, setLanWebDavRunning] = useState(false);
+  const lanWebDavRunningRef = useRef(lanWebDavRunning);
+  lanWebDavRunningRef.current = lanWebDavRunning;
+  const [lanWebDavUrl, setLanWebDavUrl] = useState('');
+  const [lanWebDavLoading, setLanWebDavLoading] = useState(false);
   const [wifiServerInfo, setWifiServerInfo] = useState<WifiServerInfo | null>(null);
   const [wifiPeers, setWifiPeers] = useState<WifiPeer[]>([]);
   const wifiPeersRef = useRef<WifiPeer[]>([]);
@@ -556,11 +579,18 @@ export default function App() {
   );
 
   // Pull external edits / new files / renames / deletions from the bound phone/local folder
-  const pullExternalLocalChanges = async (options?: { forceScan?: boolean; silent?: boolean }) => {
+  const pullExternalLocalChanges = async (options?: {
+    forceScan?: boolean;
+    silent?: boolean;
+    externalRenames?: LanWebDavRenameRecord[];
+    fromWebDav?: boolean;
+  }) => {
     if (isPullingLocalFsRef.current) return;
     if (!storageDirRef.current.initialized) return;
     // Wait until any debounced in-app write has flushed first so we never race our own edits
     if (localFsTimerRef.current !== null && !options?.forceScan) return;
+    // Pause background disk scans while PC WebDAV client is actively saving files
+    if (!options?.forceScan && !options?.fromWebDav && isLanWebDavWriteBusyNow()) return;
 
     isPullingLocalFsRef.current = true;
     try {
@@ -571,6 +601,7 @@ export default function App() {
         {
           protectedDocId: null,
           forceScan: options?.forceScan,
+          externalRenames: options?.externalRenames,
         }
       );
 
@@ -580,7 +611,7 @@ export default function App() {
         setFolders(res.folders);
         setDocs(res.docs);
         setFoldersDirty(true);
-        markAutoCatalogDirty();
+        markAutoCatalogDirty(true, options?.fromWebDav ? 9000 : undefined);
 
         if (!options?.silent) {
           const parts: string[] = [];
@@ -589,7 +620,11 @@ export default function App() {
           if (res.renamedCount > 0) parts.push(`重命名 ${res.renamedCount} 篇`);
           if (res.removedCount > 0) parts.push(`移入回收站 ${res.removedCount} 篇`);
           if (parts.length > 0) {
-            showToast(`已同步本地变更（${parts.join('，')}）`);
+            showToast(
+              options?.fromWebDav
+                ? `已同步网络磁盘变更（${parts.join('，')}）`
+                : `已同步本地变更（${parts.join('，')}）`
+            );
           }
         }
       }
@@ -656,10 +691,11 @@ export default function App() {
     if (localFsTimerRef.current !== null) {
       window.clearTimeout(localFsTimerRef.current);
     }
+    const delayMs = lanWebDavRunningRef.current && isLanWebDavWriteBusyNow() ? 1600 : 280;
     localFsTimerRef.current = window.setTimeout(() => {
       localFsTimerRef.current = null;
       void syncWorkspaceToLocalFs(foldersRef.current, docsRef.current, storageDirRef.current);
-    }, 280);
+    }, delayMs);
     return () => {
       if (localFsTimerRef.current !== null) {
         window.clearTimeout(localFsTimerRef.current);
@@ -761,12 +797,32 @@ export default function App() {
     pushLanDirectState(activeFolders, docs);
   }, [lanRunning, activeFolders, docs]);
 
-  // Stop LAN server on unmount
+  // Stop LAN servers on unmount
   useEffect(() => {
     return () => {
       stopLanDirectServer();
+      void stopLanWebDavServer();
     };
   }, []);
+
+  // Keep LAN WebDAV hidden encrypted document paths in sync while active
+  useEffect(() => {
+    if (!lanWebDavRunning) return;
+    const hiddenPaths = getEncryptedDocRelPaths(folders, docs);
+    void updateLanWebDavHiddenPaths(hiddenPaths);
+  }, [lanWebDavRunning, folders, docs]);
+
+  // Receive debounced file/folder mutations & MOVE renames from LAN WebDAV network drive
+  useEffect(() => {
+    if (!lanWebDavRunning) return;
+    return subscribeLanWebDavChanges(true, (event) => {
+      void pullExternalLocalChanges({
+        forceScan: true,
+        externalRenames: event.renames,
+        fromWebDav: true,
+      });
+    });
+  }, [lanWebDavRunning]);
 
   // Receive live edits / imports from PC browser while 电脑直连 is enabled
   useEffect(() => {
@@ -2817,13 +2873,13 @@ export default function App() {
     }
   };
 
-  const handleCopyLanUrl = async (url: string) => {
+  const copyTextToClipboard = async (text: string, successMsg: string) => {
     try {
       if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(url);
+        await navigator.clipboard.writeText(text);
       } else {
         const ta = document.createElement('textarea');
-        ta.value = url;
+        ta.value = text;
         ta.style.position = 'fixed';
         ta.style.opacity = '0';
         document.body.appendChild(ta);
@@ -2831,9 +2887,83 @@ export default function App() {
         document.execCommand('copy');
         document.body.removeChild(ta);
       }
-      showToast('已复制直连地址');
+      showToast(successMsg);
     } catch {
-      showToast('请长按地址手动复制');
+      showToast('请长按内容手动复制');
+    }
+  };
+
+  const handleCopyLanUrl = async (url: string) => {
+    await copyTextToClipboard(url, '已复制直连地址');
+  };
+
+  const handleToggleLanWebDav = async (next: boolean) => {
+    setLanWebDavLoading(true);
+    try {
+      if (next) {
+        if (!isLanWebDavNativeAvailable()) {
+          showToast('局域网网络磁盘仅支持在 Android 手机端使用');
+          return;
+        }
+        if (!storageDirRef.current.initialized || !localFsReady) {
+          showToast('请先在下方绑定并授权本地文档目录');
+          return;
+        }
+        // Ensure latest in-app workspace files are flushed to local disk before serving
+        if (localFsTimerRef.current !== null) {
+          window.clearTimeout(localFsTimerRef.current);
+          localFsTimerRef.current = null;
+        }
+        await syncWorkspaceToLocalFs(foldersRef.current, docsRef.current, storageDirRef.current);
+
+        const hiddenPaths = getEncryptedDocRelPaths(foldersRef.current, docsRef.current);
+        const res = await startLanWebDavServer({
+          basePath: lanWebDavConfigRef.current.customPath,
+          hiddenPaths,
+        });
+        setLanWebDavRunning(res.running);
+        setLanWebDavUrl(res.url);
+        if (res.running && res.url) {
+          showToast('局域网网络磁盘已开启');
+        }
+      } else {
+        await stopLanWebDavServer();
+        setLanWebDavRunning(false);
+        setLanWebDavUrl('');
+        showToast('局域网网络磁盘已关闭');
+      }
+    } catch (err) {
+      setLanWebDavRunning(false);
+      setLanWebDavUrl('');
+      showToast(err instanceof Error ? err.message : '开启局域网网络磁盘失败');
+    } finally {
+      setLanWebDavLoading(false);
+    }
+  };
+
+  const handleUpdateLanWebDavPath = async (nextPath: string) => {
+    const saved = saveLanWebDavConfig({ customPath: nextPath });
+    setLanWebDavConfig(saved);
+    lanWebDavConfigRef.current = saved;
+
+    if (lanWebDavRunningRef.current && isLanWebDavNativeAvailable()) {
+      setLanWebDavLoading(true);
+      try {
+        const hiddenPaths = getEncryptedDocRelPaths(foldersRef.current, docsRef.current);
+        const res = await startLanWebDavServer({
+          basePath: saved.customPath,
+          hiddenPaths,
+        });
+        setLanWebDavRunning(res.running);
+        setLanWebDavUrl(res.url);
+        showToast(`网络磁盘路径已更新为 /${saved.customPath}/`);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : '更新网络磁盘路径失败');
+      } finally {
+        setLanWebDavLoading(false);
+      }
+    } else {
+      showToast(`已保存路径 /${saved.customPath}/`);
     }
   };
 
@@ -3261,7 +3391,7 @@ export default function App() {
   const scheduleAutoProgressSyncRef = useRef(scheduleAutoProgressSync);
   scheduleAutoProgressSyncRef.current = scheduleAutoProgressSync;
 
-  const markAutoCatalogDirty = (triggerDebounce = true) => {
+  const markAutoCatalogDirty = (triggerDebounce = true, customDelayMs?: number) => {
     autoCatalogDirtyRef.current = true;
     autoMutationSeqRef.current++;
     if (!triggerDebounce) return;
@@ -3270,13 +3400,15 @@ export default function App() {
     if (autoCatalogDebounceTimerRef.current !== null) {
       window.clearTimeout(autoCatalogDebounceTimerRef.current);
     }
+    const delayMs =
+      customDelayMs ?? (lanWebDavRunningRef.current ? 9000 : AUTO_CATALOG_DEBOUNCE_MS);
     autoCatalogDebounceTimerRef.current = window.setTimeout(() => {
       autoCatalogDebounceTimerRef.current = null;
       if (autoCatalogDirtyRef.current || autoProgressDirtyRef.current) {
         clearAutoProgressDebounceTimer();
         void runSilentAutoSyncRef.current({ bypassThrottle: true });
       }
-    }, AUTO_CATALOG_DEBOUNCE_MS);
+    }, delayMs);
   };
 
   // Auto-sync Trigger 1: Every 60 seconds while reading (fallback progress push & light 304 pull check for remote notes)
@@ -5147,6 +5279,15 @@ export default function App() {
           lanLoading={lanLoading}
           onToggleLan={handleToggleLanDirect}
           onCopyLanUrl={handleCopyLanUrl}
+          lanWebDavRunning={lanWebDavRunning}
+          lanWebDavUrl={lanWebDavUrl}
+          lanWebDavLoading={lanWebDavLoading}
+          lanWebDavPath={lanWebDavConfig.customPath}
+          lanWebDavSupported={isLanWebDavNativeAvailable()}
+          localFsReady={storageDir.initialized && localFsReady}
+          onToggleLanWebDav={handleToggleLanWebDav}
+          onUpdateLanWebDavPath={handleUpdateLanWebDavPath}
+          onCopyLanWebDavText={(text, label) => void copyTextToClipboard(text, label)}
           dictionaries={mdictDicts}
           activeDictId={activeMdictId}
           onImportDictFiles={handleImportMdictFiles}

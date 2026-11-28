@@ -104,6 +104,40 @@ export function isReservedMediaDirName(name: string | null | undefined): boolean
   return lower === 'images' || lower === 'assets';
 }
 
+export function isIgnoredTempFileName(name: string | null | undefined): boolean {
+  if (!name) return true;
+  const trimmed = name.trim();
+  if (!trimmed) return true;
+  const lower = trimmed.toLowerCase();
+  if (trimmed.startsWith('.') || trimmed.startsWith('~$') || trimmed.startsWith('~')) {
+    return true;
+  }
+  if (
+    lower === 'desktop.ini' ||
+    lower === 'thumbs.db' ||
+    lower === '.ds_store' ||
+    lower === '4913'
+  ) {
+    return true;
+  }
+  if (
+    lower.endsWith('.tmp') ||
+    lower.endsWith('.temp') ||
+    lower.endsWith('.swp') ||
+    lower.endsWith('.swo') ||
+    lower.endsWith('.swx') ||
+    lower.endsWith('.bak') ||
+    lower.endsWith('.orig') ||
+    lower.endsWith('.part') ||
+    lower.endsWith('.crdownload') ||
+    lower.endsWith('.wbk') ||
+    lower.endsWith('~')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 const INDEX_FILE_NAME = '.feiartical-index.json';
 const SYNC_MANIFEST_STORAGE_KEY = 'feiartical_local_fs_manifest_v1';
 const WEB_FS_DB_NAME = 'feiartical_local_fs_db';
@@ -731,7 +765,7 @@ async function scanWebFsWorkspace(): Promise<NativeScanResult> {
   let indexJson = '';
 
   const detectFormat = (fileName: string): 'md' | 'txt' | null => {
-    if (!fileName || fileName.startsWith('.')) return null;
+    if (!fileName || isIgnoredTempFileName(fileName)) return null;
     const lower = fileName.toLowerCase();
     if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'md';
     if (lower.endsWith('.txt')) return 'txt';
@@ -875,6 +909,27 @@ function buildDesiredWorkspaceLayout(
   }
 
   return { folderPaths, docFiles, folderMeta };
+}
+
+/**
+ * Returns the relative disk paths of all active encrypted documents so the LAN WebDAV
+ * network drive can hide ciphertext files from PC file explorers and editors.
+ */
+export function getEncryptedDocRelPaths(
+  folders: FolderNode[],
+  docs: ArticleDoc[]
+): string[] {
+  const { docFiles } = buildDesiredWorkspaceLayout(folders, docs);
+  const encryptedIds = new Set(
+    docs.filter((d) => !d.deleted && Boolean(d.encrypted)).map((d) => d.id)
+  );
+  const paths: string[] = [];
+  for (const [docId, meta] of Object.entries(docFiles)) {
+    if (encryptedIds.has(docId) && meta.relPath) {
+      paths.push(meta.relPath);
+    }
+  }
+  return paths;
 }
 
 export function syncWorkspaceToLocalFs(
@@ -1258,6 +1313,7 @@ export function checkAndPullExternalLocalFsChanges(
   options?: {
     protectedDocId?: string | null;
     forceScan?: boolean;
+    externalRenames?: Array<{ from: string; to: string }>;
   }
 ): Promise<ExternalDiskSyncResult> {
   const run = async (): Promise<ExternalDiskSyncResult> => {
@@ -1347,6 +1403,28 @@ export function checkAndPullExternalLocalFsChanges(
     let renamedCount = 0;
     let removedCount = 0;
 
+    // Build collapsed rename maps from external MOVE records (e.g. WebDAV MOVE)
+    const normalizeRelKey = (raw: string) =>
+      String(raw || '')
+        .replace(/\\/g, '/')
+        .replace(/^\/+|\/+$/g, '')
+        .toLowerCase();
+    const collapsedRenameFromByTo = new Map<string, string>();
+    const folderRenameFromByTo = new Map<string, string>();
+    for (const item of options?.externalRenames ?? []) {
+      const fromKey = normalizeRelKey(item.from);
+      const toKey = normalizeRelKey(item.to);
+      if (!fromKey || !toKey || fromKey === toKey) continue;
+      const originalFrom = collapsedRenameFromByTo.get(fromKey) ?? fromKey;
+      collapsedRenameFromByTo.delete(fromKey);
+      collapsedRenameFromByTo.set(toKey, originalFrom);
+      if (!fromKey.includes('/') && !toKey.includes('/')) {
+        const origFolderFrom = folderRenameFromByTo.get(fromKey) ?? fromKey;
+        folderRenameFromByTo.delete(fromKey);
+        folderRenameFromByTo.set(toKey, origFolderFrom);
+      }
+    }
+
     // 1. Reconcile folders present on disk
     const seenFolderIds = new Set<string>();
     let maxFolderOrder = nextFolders.reduce((m, f) => Math.max(m, f.order), -1);
@@ -1367,6 +1445,23 @@ export function checkAndPullExternalLocalFsChanges(
       const existingByName = folderByDirKey.get(key);
       if (existingByName && !existingByName.deleted) {
         seenFolderIds.add(existingByName.id);
+        continue;
+      }
+
+      // Preserve original folder ID & ordering if the folder was renamed via WebDAV MOVE
+      const renamedFromFolderKey = folderRenameFromByTo.get(key);
+      const renamedFolderId = renamedFromFolderKey
+        ? syncedFolderIdByDirKey.get(renamedFromFolderKey) ||
+          indexFolderMetaByDirKey.get(renamedFromFolderKey)?.id ||
+          folderByDirKey.get(renamedFromFolderKey)?.id
+        : undefined;
+      const renamedFolder = renamedFolderId ? folderById.get(renamedFolderId) : undefined;
+      if (renamedFolder && !renamedFolder.deleted && !seenFolderIds.has(renamedFolder.id)) {
+        renamedFolder.name = dirName;
+        renamedFolder.updatedAt = Math.max(now, renamedFolder.updatedAt + 1);
+        seenFolderIds.add(renamedFolder.id);
+        folderByDirKey.set(key, renamedFolder);
+        changed = true;
         continue;
       }
 
@@ -1412,11 +1507,90 @@ export function checkAndPullExternalLocalFsChanges(
       }
     }
 
-    const diskFiles = scan.files ?? [];
+    const diskFiles = (scan.files ?? []).filter(
+      (f) => !isIgnoredTempFileName(f.fileName)
+    );
     const diskHashes = new Map<string, string>();
     for (const file of diskFiles) {
       diskHashes.set(file.relPath.toLowerCase(), await sha256Hex(file.content ?? ''));
     }
+
+    const applyDiskContentUpdate = async (
+      existingDoc: ArticleDoc,
+      file: NativeScannedFile,
+      relKey: string
+    ) => {
+      const diskContent = file.content ?? '';
+      if (diskContent === existingDoc.content) return false;
+      if (existingDoc.id === protectedDocId) return false;
+
+      const prevContent = existingDoc.content || '';
+      const prevOffset = Math.max(0, Math.round(existingDoc.lastCharOffset ?? 0));
+      const hasProgress = prevOffset > 0 || (existingDoc.readProgress ?? 0) > 0;
+      const anchorBeforeEdit =
+        existingDoc.readAnchorText ||
+        (prevContent && hasProgress ? extractReadAnchorText(prevContent, prevOffset) : '');
+      const backupAnchorBeforeEdit =
+        existingDoc.readBackupAnchorText ||
+        (prevContent && hasProgress ? extractBackupAnchorText(prevContent, prevOffset) : '');
+
+      const hash = diskHashes.get(relKey) || (await sha256Hex(diskContent));
+      existingDoc.content = diskContent;
+      existingDoc.contentHash = hash;
+      existingDoc.byteSize = getByteSize(diskContent);
+      existingDoc.excerpt = extractExcerpt(diskContent);
+      existingDoc.updatedAt = Math.max(file.lastModified || now, existingDoc.updatedAt + 1);
+      existingDoc.syncStatus = 'dirty';
+
+      if (hasProgress && diskContent.length > 0) {
+        const relocated = relocateOffsetAfterContentEdit(diskContent, prevOffset, {
+          prevContent: prevContent || undefined,
+          primaryAnchor: anchorBeforeEdit || undefined,
+          backupAnchor: backupAnchorBeforeEdit || undefined,
+          fallbackToBoundaryOnDelete: true,
+        });
+        existingDoc.lastCharOffset = relocated.offset;
+        existingDoc.readProgress = relocated.progress;
+        existingDoc.lastScrollTop = 0;
+        existingDoc.readAnchorText =
+          extractReadAnchorText(diskContent, relocated.offset) || anchorBeforeEdit || undefined;
+        existingDoc.readBackupAnchorText =
+          extractBackupAnchorText(diskContent, relocated.offset) ||
+          backupAnchorBeforeEdit ||
+          undefined;
+        if (relocated.offset !== prevOffset) {
+          existingDoc.lastReadAt = Math.max(now, (existingDoc.lastReadAt ?? 0) + 1);
+        }
+      }
+      if (existingDoc.pendingRemoteProgress && diskContent.length > 0) {
+        const p = existingDoc.pendingRemoteProgress;
+        const relocatedPending = relocateOffsetAfterContentEdit(diskContent, p.lastCharOffset, {
+          prevContent: prevContent || undefined,
+          primaryAnchor: p.anchorText,
+          backupAnchor: p.backupAnchorText,
+          fallbackToBoundaryOnDelete: true,
+        });
+        if (relocatedPending.matched) {
+          existingDoc.pendingRemoteProgress = {
+            ...p,
+            lastCharOffset: relocatedPending.offset,
+            readProgress: relocatedPending.progress,
+            anchorText: extractReadAnchorText(diskContent, relocatedPending.offset) || p.anchorText,
+            backupAnchorText:
+              extractBackupAnchorText(diskContent, relocatedPending.offset) || p.backupAnchorText,
+          };
+        }
+      }
+
+      if (existingDoc.notes && existingDoc.notes.length > 0 && diskContent.length > 0) {
+        existingDoc.notes = relocateNotesAfterContentEdit(existingDoc.notes, diskContent, {
+          prevContent,
+          bumpUpdatedAt: true,
+          now,
+        });
+      }
+      return true;
+    };
 
     const seenDocIds = new Set<string>();
     const unmatchedFiles: NativeScannedFile[] = [];
@@ -1433,77 +1607,7 @@ export function checkAndPullExternalLocalFsChanges(
       }
 
       seenDocIds.add(existingDoc.id);
-      const diskContent = file.content ?? '';
-      if (diskContent !== existingDoc.content) {
-        if (existingDoc.id === protectedDocId) {
-          continue;
-        }
-        const prevContent = existingDoc.content || '';
-        const prevOffset = Math.max(0, Math.round(existingDoc.lastCharOffset ?? 0));
-        const hasProgress = prevOffset > 0 || (existingDoc.readProgress ?? 0) > 0;
-        const anchorBeforeEdit =
-          existingDoc.readAnchorText ||
-          (prevContent && hasProgress ? extractReadAnchorText(prevContent, prevOffset) : '');
-        const backupAnchorBeforeEdit =
-          existingDoc.readBackupAnchorText ||
-          (prevContent && hasProgress ? extractBackupAnchorText(prevContent, prevOffset) : '');
-
-        const hash = diskHashes.get(relKey) || (await sha256Hex(diskContent));
-        existingDoc.content = diskContent;
-        existingDoc.contentHash = hash;
-        existingDoc.byteSize = getByteSize(diskContent);
-        existingDoc.excerpt = extractExcerpt(diskContent);
-        existingDoc.updatedAt = Math.max(file.lastModified || now, existingDoc.updatedAt + 1);
-        existingDoc.syncStatus = 'dirty';
-
-        if (hasProgress && diskContent.length > 0) {
-          const relocated = relocateOffsetAfterContentEdit(diskContent, prevOffset, {
-            prevContent: prevContent || undefined,
-            primaryAnchor: anchorBeforeEdit || undefined,
-            backupAnchor: backupAnchorBeforeEdit || undefined,
-            fallbackToBoundaryOnDelete: true,
-          });
-          existingDoc.lastCharOffset = relocated.offset;
-          existingDoc.readProgress = relocated.progress;
-          existingDoc.lastScrollTop = 0;
-          existingDoc.readAnchorText =
-            extractReadAnchorText(diskContent, relocated.offset) || anchorBeforeEdit || undefined;
-          existingDoc.readBackupAnchorText =
-            extractBackupAnchorText(diskContent, relocated.offset) ||
-            backupAnchorBeforeEdit ||
-            undefined;
-          if (relocated.offset !== prevOffset) {
-            existingDoc.lastReadAt = Math.max(now, (existingDoc.lastReadAt ?? 0) + 1);
-          }
-        }
-        if (existingDoc.pendingRemoteProgress && diskContent.length > 0) {
-          const p = existingDoc.pendingRemoteProgress;
-          const relocatedPending = relocateOffsetAfterContentEdit(diskContent, p.lastCharOffset, {
-            prevContent: prevContent || undefined,
-            primaryAnchor: p.anchorText,
-            backupAnchor: p.backupAnchorText,
-            fallbackToBoundaryOnDelete: true,
-          });
-          if (relocatedPending.matched) {
-            existingDoc.pendingRemoteProgress = {
-              ...p,
-              lastCharOffset: relocatedPending.offset,
-              readProgress: relocatedPending.progress,
-              anchorText: extractReadAnchorText(diskContent, relocatedPending.offset) || p.anchorText,
-              backupAnchorText:
-                extractBackupAnchorText(diskContent, relocatedPending.offset) || p.backupAnchorText,
-            };
-          }
-        }
-
-        if (existingDoc.notes && existingDoc.notes.length > 0 && diskContent.length > 0) {
-          existingDoc.notes = relocateNotesAfterContentEdit(existingDoc.notes, diskContent, {
-            prevContent,
-            bumpUpdatedAt: true,
-            now,
-          });
-        }
-
+      if (await applyDiskContentUpdate(existingDoc, file, relKey)) {
         updatedCount += 1;
         changed = true;
       }
@@ -1511,33 +1615,64 @@ export function checkAndPullExternalLocalFsChanges(
 
     // Identify previously-synced active docs missing from their old disk path
     const missingSyncedDocs: ArticleDoc[] = [];
-    for (const docId of Object.keys(prevManifest.docFiles)) {
+    const missingDocByOldRelKey = new Map<string, ArticleDoc>();
+    for (const [docId, prevEntry] of Object.entries(prevManifest.docFiles)) {
       if (seenDocIds.has(docId)) continue;
       const docObj = docById.get(docId);
       if (!docObj || docObj.deleted || docObj.syncStatus === 'remote-only') continue;
       missingSyncedDocs.push(docObj);
+      if (prevEntry.relPath) {
+        missingDocByOldRelKey.set(prevEntry.relPath.toLowerCase(), docObj);
+      }
     }
 
-    // Pass 2: Detect external renames or moves by matching contentHash
+    // Pass 2: Detect external renames or moves (first via explicit WebDAV MOVE records, then by contentHash)
     const stillUnmatchedFiles: NativeScannedFile[] = [];
     for (const file of unmatchedFiles) {
       const relKey = file.relPath.toLowerCase();
-      const fileHash = diskHashes.get(relKey) || '';
-      const renameIdx = missingSyncedDocs.findIndex(
-        (d) => !seenDocIds.has(d.id) && d.contentHash && d.contentHash === fileHash
-      );
+      let matchedDoc: ArticleDoc | undefined;
 
-      if (renameIdx !== -1) {
-        const docObj = missingSyncedDocs[renameIdx];
+      // 2a. Explicit rename/move mapping (handles rename + simultaneous content edits!)
+      let mappedOldKey = collapsedRenameFromByTo.get(relKey);
+      if (!mappedOldKey && file.folderName) {
+        const oldFolderKey = folderRenameFromByTo.get(file.folderName.toLowerCase());
+        if (oldFolderKey) {
+          mappedOldKey = `${oldFolderKey}/${file.fileName.toLowerCase()}`;
+        }
+      }
+      if (mappedOldKey) {
+        const candidateId =
+          missingDocByOldRelKey.get(mappedOldKey)?.id ??
+          docIdByRelKey.get(mappedOldKey) ??
+          indexDocByRelKey.get(mappedOldKey)?.id;
+        const candidateDoc = candidateId ? docById.get(candidateId) : undefined;
+        if (candidateDoc && !candidateDoc.deleted && !seenDocIds.has(candidateDoc.id)) {
+          matchedDoc = candidateDoc;
+        }
+      }
+
+      // 2b. Fallback: detect renames/moves by matching contentHash
+      if (!matchedDoc) {
+        const fileHash = diskHashes.get(relKey) || '';
+        const renameIdx = missingSyncedDocs.findIndex(
+          (d) => !seenDocIds.has(d.id) && d.contentHash && d.contentHash === fileHash
+        );
+        if (renameIdx !== -1) {
+          matchedDoc = missingSyncedDocs[renameIdx];
+        }
+      }
+
+      if (matchedDoc) {
         const targetFolder = file.folderName
           ? folderByDirKey.get(file.folderName.toLowerCase()) ?? null
           : null;
-        docObj.title = stripDocExtension(file.fileName);
-        docObj.folderId = targetFolder ? targetFolder.id : null;
-        docObj.format = file.format;
-        docObj.updatedAt = Math.max(file.lastModified || now, docObj.updatedAt + 1);
-        docObj.syncStatus = 'dirty';
-        seenDocIds.add(docObj.id);
+        matchedDoc.title = stripDocExtension(file.fileName);
+        matchedDoc.folderId = targetFolder ? targetFolder.id : null;
+        matchedDoc.format = file.format;
+        matchedDoc.updatedAt = Math.max(file.lastModified || now, matchedDoc.updatedAt + 1);
+        matchedDoc.syncStatus = 'dirty';
+        seenDocIds.add(matchedDoc.id);
+        await applyDiskContentUpdate(matchedDoc, file, relKey);
         renamedCount += 1;
         changed = true;
       } else {
